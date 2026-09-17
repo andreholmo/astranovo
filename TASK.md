@@ -2,10 +2,11 @@
 
 - **ID:** TASK-002
 - **Milestone:** M0 — Fundação e contratos
-- **Status:** READY
+- **Status:** APPROVED
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Commit esperado:** `feat: cria fundacao tipada do AstraNovo`
+- **Commit entregue:** `1e5bfbc0e880d8e8e9ef7504e03b6015adcc0d10`
+- **Revisão:** `docs/coordination/CHATGPT_REVIEW_TASK_002.md`
 
 ## Objetivo
 
