@@ -1,78 +1,68 @@
-# Verificação de alegação cripto — contexto do projeto
+# AstraNovo — contexto do projeto
 
 ## Objetivo
 
-Construir um experimento simples para verificar se uma IA consegue tomar decisões autônomas de trading com desempenho mensurável, começando com **100% de simulação e sem dinheiro real**.
-
-Fluxo do MVP:
+Construir um experimento mensurável de trading autônomo multiagente, começando exclusivamente em simulação:
 
 ```text
-dados reais de mercado → Astra → BUY / SELL / HOLD → carteira fictícia de US$100 → resultados
+dados reais → agentes/Astra → BUY/SELL/HOLD estruturado
+→ Risk Manager determinístico → PaperBroker
+→ carteiras fictícias → auditoria e métricas
 ```
 
-O objetivo inicial não é construir um produto completo. É descobrir, com dados e rastreabilidade, se a estratégia apresenta algum sinal de utilidade.
+A pergunta inicial é: decisões de agentes apresentam algum sinal de vantagem após custos, contra benchmarks simples? Viralidade ou alegações públicas não contam como evidência.
 
-## Arquitetura conceitual
+## Estado atual
 
-Astra será somente o motor de decisão. Software tradicional será responsável por:
+O repositório contém documentação e coordenação. A implementação do trader ainda não começou. A referência GPTHEIST foi auditada no commit `2ad2e47b798341df4584edd68a6998e8c07c0618`; os resultados estão em `docs/GPTHEIST_ANALYSIS.md`.
 
-- coleta dos dados reais de mercado;
-- preparação e envio do contexto ao Astra;
-- validação da resposta estruturada;
-- Risk Manager determinístico;
-- PaperBroker;
-- carteira fictícia;
-- logs e CSV;
-- métricas de desempenho.
+## Princípio de autoridade
 
-A IA não terá liberdade irrestrita. O Risk Manager deverá controlar progressivamente tamanho máximo de posição, perda diária, exposição, liquidez, slippage, allowlist e circuit breaker.
+- IA decide/propõe.
+- Software valida.
+- Risk Manager determinístico autoriza ou bloqueia.
+- Broker executa.
+- Somente fills alteram a carteira.
 
-Nenhuma chave privada será entregue ao Astra.
+A IA nunca acessa credenciais, wallet, chave privada ou execução direta.
 
-## Fases autorizadas
+## Multiagente
 
-1. Paper trading.
-2. Testnet, somente após resultados interessantes e autorização.
-3. Validação paralela.
-4. Capital real muito pequeno, somente após nova decisão explícita.
+A quantidade de agentes é configurável. O primeiro conjunto demonstrativo terá seis perfis com carteiras isoladas e US$100 fictícios por agente. O proprietário poderá definir os orçamentos antes de cada experimento.
 
-A fase atual é exclusivamente a fase 1.
+Dois modos devem permanecer possíveis:
 
-## Fora do escopo inicial
+- MODE_A_REFERENCE: pipeline comparável à estrutura do GPTHEIST;
+- MODE_B_OPTIMIZED: arquitetura especializada desenvolvida por nós.
 
-- corretora real;
-- execução com dinheiro;
-- testnet;
-- dashboard;
-- aplicação web;
-- infraestrutura distribuída;
-- otimizações prematuras;
-- múltiplos agentes de trading;
-- custódia ou gestão de chaves privadas.
+## Fase autorizada
+
+Somente paper trading. Testnet, shadow mode e capital real exigem fases posteriores e autorização explícita.
+
+## Fora do escopo atual
+
+Dashboard, app, login, cloud, banco distribuído, wallet, corretora, testnet, execução blockchain, dinheiro real e automação completa ChatGPT↔Claude.
 
 ## Responsabilidades
 
-- **André:** proprietário e decisões de produto.
-- **ChatGPT/GPT-5.6 Sol:** arquitetura, especificações, critérios de aceite, revisão de código, segurança e resultados.
-- **Claude Code:** implementação, testes, commits e push.
-- **Astra:** decisões futuras de BUY, SELL ou HOLD.
+- André: proprietário; decide mudanças grandes, custos relevantes, credenciais, corretora/blockchain e ações irreversíveis.
+- ChatGPT/GPT-5.6 Sol: arquiteto, pesquisador, especificador, tech lead e revisor.
+- Claude Code: implementa tarefas READY, testa, registra relatório, faz commit e push.
+- Astra: futuramente produz propostas de decisão estruturadas.
+- Software determinístico: validação, risco, execução paper, carteira, logs e métricas.
 
-## GitHub
+## Documentos de referência
 
-Repositório oficial: `andreholmo/astranovo`.
+1. `docs/GPTHEIST_ANALYSIS.md`
+2. `docs/ARCHITECTURE.md`
+3. `docs/DECISIONS.md`
+4. `docs/ROADMAP.md`
+5. `TASK.md`
 
-A conta `andresholmo` e seus repositórios não pertencem a este projeto.
+O plano Python anterior é histórico. As decisões atuais em `docs/DECISIONS.md` prevalecem.
 
 ## Fluxo de colaboração
 
-```text
-ChatGPT escreve TASK.md
-        ↓
-Claude sincroniza, implementa, testa e publica
-        ↓
-ChatGPT lê o commit e revisa
-        ↓
-Nova tarefa ou correção em TASK.md
-```
+ChatGPT publica especificação → Claude sincroniza/implementa/testa/push → ChatGPT revisa o commit → nova tarefa ou correção.
 
-O GitHub é o estado compartilhado. Decisões duráveis devem ser registradas no repositório.
+GitHub `andreholmo/astranovo` é o único estado compartilhado autorizado.
