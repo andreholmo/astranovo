@@ -20,6 +20,14 @@
  *   below carry meaning.
  */
 
+import {
+  MAX_MICROS,
+  parseAssetScale,
+  parseBps,
+  parseNonNegativeIntegerString
+} from "../money/fixed-point.js";
+import { rejectContract } from "./errors.js";
+
 /** Maximum length of a human-readable name. */
 export const MAX_NAME_LENGTH = 128;
 /** Maximum length of a slug identifier (`id`, `strategy`). */
@@ -48,36 +56,10 @@ const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 /** Canonical UTC ISO-8601 with milliseconds, e.g. `2026-09-17T18:00:00.000Z`. */
 const CANONICAL_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
-/**
- * A contract violation. Carries the contract name, the field and the
- * requirement that failed — never the rejected value itself.
- */
-export class ContractValidationError extends Error {
-  public readonly contract: string;
-  public readonly field: string;
-  public readonly requirement: string;
-
-  public constructor(contract: string, field: string, requirement: string) {
-    super(`Invalid ${contract}: ${field} ${requirement}`);
-    this.name = "ContractValidationError";
-    this.contract = contract;
-    this.field = field;
-    this.requirement = requirement;
-  }
-}
-
-/**
- * Renders any error as a single safe line for user-facing output: no stack,
- * no cause chain, no payload content. Unknown errors are reported generically
- * rather than leaking a message from an unexpected source.
- */
-export function describeContractError(error: unknown): string {
-  if (error instanceof ContractValidationError) return error.message;
-  return "Validation failed for an unexpected reason.";
-}
+export { ContractValidationError, describeContractError } from "./errors.js";
 
 function reject(contract: string, field: string, requirement: string): never {
-  throw new ContractValidationError(contract, field, requirement);
+  return rejectContract(contract, field, requirement);
 }
 
 function requireObject(value: unknown, contract: string): Record<string, unknown> {
@@ -179,6 +161,15 @@ function requireCanonicalTimestamp(value: unknown, contract: string, field: stri
     reject(contract, field, "must be canonical UTC ISO-8601, e.g. 2026-09-17T18:00:00.000Z");
   }
   return epoch;
+}
+
+/**
+ * Same check as {@link requireCanonicalTimestamp}, but returns the validated
+ * string rather than its epoch, for fields stored as timestamps.
+ */
+function requireCanonicalTimestampValue(value: unknown, contract: string, field: string): string {
+  requireCanonicalTimestamp(value, contract, field);
+  return value as string;
 }
 
 function requireEnum<T extends string>(
@@ -446,4 +437,161 @@ export function parseAgentProposal(value: unknown): AgentProposal {
     model: requireText(source.model, AGENT_PROPOSAL, "model", MAX_MODEL_LENGTH)
   };
   return Object.freeze(parsed);
+}
+
+/* -------------------------------------------------------------------------- */
+/* ExecutionPolicy                                                            */
+/* -------------------------------------------------------------------------- */
+
+/** Largest basis-point figure accepted in an execution policy: 100%. */
+export const MAX_POLICY_BPS = 10_000;
+
+/**
+ * The cost model a broker applies. Deterministic and fully configurable: the
+ * same policy, order and wallet always produce the same fill.
+ *
+ * `policyVersion` is recorded on every event so a stored run can be read back
+ * knowing exactly which cost model produced it.
+ */
+export interface ExecutionPolicy {
+  readonly schemaVersion: 1;
+  /** Stable identifier of this cost model, recorded on every event. */
+  readonly policyVersion: string;
+  /** Trading fee in basis points, charged on the gross notional. */
+  readonly feeBps: number;
+  /** Quoted spread in basis points; half of it is paid on each side. */
+  readonly spreadBps: number;
+  /** Additional adverse price movement in basis points. */
+  readonly slippageBps: number;
+}
+
+const EXECUTION_POLICY = "ExecutionPolicy";
+
+/** Validates an execution policy and returns a frozen copy. */
+export function parseExecutionPolicy(value: unknown): ExecutionPolicy {
+  const source = requireObject(value, EXECUTION_POLICY);
+  const parsed: ExecutionPolicy = {
+    schemaVersion: requireSchemaVersion(source.schemaVersion, EXECUTION_POLICY),
+    policyVersion: requireIdentifier(source.policyVersion, EXECUTION_POLICY, "policyVersion"),
+    feeBps: parseBps(source.feeBps, EXECUTION_POLICY, "feeBps", MAX_POLICY_BPS),
+    spreadBps: parseBps(source.spreadBps, EXECUTION_POLICY, "spreadBps", MAX_POLICY_BPS),
+    slippageBps: parseBps(source.slippageBps, EXECUTION_POLICY, "slippageBps", MAX_POLICY_BPS)
+  };
+  return Object.freeze(parsed);
+}
+
+/* -------------------------------------------------------------------------- */
+/* OrderIntent                                                                */
+/* -------------------------------------------------------------------------- */
+
+/** The two sides an order can take. There is no short selling. */
+export const ORDER_SIDES = ["BUY", "SELL"] as const;
+export type OrderSide = (typeof ORDER_SIDES)[number];
+
+/**
+ * An order a broker may attempt to execute.
+ *
+ * An intent is still not an order sent anywhere: no execution route exists in
+ * this repository. It is the deterministic, fully-specified request that the
+ * `PaperBroker` turns into a fill or a rejection.
+ *
+ * `positionPct` keeps the semantics of `AgentProposal`: on `BUY` it is a
+ * fraction of the available cash, on `SELL` a fraction of the current
+ * position. A `HOLD` proposal never becomes an `OrderIntent` — see
+ * {@link orderIntentFromProposal}.
+ *
+ * `referencePriceMicros` is micros of `quote` per one whole unit of `asset`.
+ * `assetScale` is how many decimal places one whole unit of `asset` has, so a
+ * quantity in atoms divided by `10^assetScale` is a quantity in whole units.
+ */
+export interface OrderIntent {
+  readonly schemaVersion: 1;
+  readonly orderId: string;
+  readonly cycleId: string;
+  readonly agentId: string;
+  readonly side: OrderSide;
+  readonly asset: string;
+  readonly quote: string;
+  /** Fraction in (0, 1]; a zero-size order is rejected as meaningless. */
+  readonly positionPct: number;
+  readonly referencePriceMicros: bigint;
+  readonly assetScale: number;
+  readonly createdAt: string;
+}
+
+const ORDER_INTENT = "OrderIntent";
+
+/**
+ * Validates an order intent and returns a frozen copy.
+ *
+ * `referencePriceMicros` crosses the JSON boundary as a canonical decimal
+ * string and comes back as a `bigint`; see `src/money/fixed-point.ts`.
+ */
+export function parseOrderIntent(value: unknown): OrderIntent {
+  const source = requireObject(value, ORDER_INTENT);
+  const positionPct = requireFiniteNumber(source.positionPct, ORDER_INTENT, "positionPct", 0, 1);
+  if (positionPct === 0) {
+    rejectContract(ORDER_INTENT, "positionPct", "must be greater than 0");
+  }
+  const referencePriceMicros = parseNonNegativeIntegerString(
+    source.referencePriceMicros,
+    ORDER_INTENT,
+    "referencePriceMicros",
+    MAX_MICROS
+  );
+  if (referencePriceMicros === 0n) {
+    rejectContract(ORDER_INTENT, "referencePriceMicros", "must be greater than 0");
+  }
+  const parsed: OrderIntent = {
+    schemaVersion: requireSchemaVersion(source.schemaVersion, ORDER_INTENT),
+    orderId: requireIdentifier(source.orderId, ORDER_INTENT, "orderId"),
+    cycleId: requireIdentifier(source.cycleId, ORDER_INTENT, "cycleId"),
+    agentId: requireSlug(source.agentId, ORDER_INTENT, "agentId"),
+    side: requireEnum(source.side, ORDER_INTENT, "side", ORDER_SIDES),
+    asset: requireSymbol(source.asset, ORDER_INTENT, "asset"),
+    quote: requireSymbol(source.quote, ORDER_INTENT, "quote"),
+    positionPct,
+    referencePriceMicros,
+    assetScale: parseAssetScale(source.assetScale, ORDER_INTENT, "assetScale"),
+    createdAt: requireCanonicalTimestampValue(source.createdAt, ORDER_INTENT, "createdAt")
+  };
+  return Object.freeze(parsed);
+}
+
+/** Everything an `AgentProposal` does not carry but an `OrderIntent` needs. */
+export interface OrderContext {
+  readonly orderId: string;
+  readonly quote: string;
+  /** Canonical decimal string of the reference price, in micros. */
+  readonly referencePriceMicros: string;
+  readonly assetScale: number;
+  readonly createdAt: string;
+}
+
+/**
+ * Turns a validated proposal into an order intent.
+ *
+ * Returns `null` for `HOLD`: holding is the absence of an order, so nothing
+ * reaches the broker and no event is produced. Every other action carries a
+ * non-zero `positionPct` by contract, so the resulting intent is always
+ * executable-shaped.
+ */
+export function orderIntentFromProposal(
+  proposal: AgentProposal,
+  context: OrderContext
+): OrderIntent | null {
+  if (proposal.action === "HOLD") return null;
+  return parseOrderIntent({
+    schemaVersion: 1,
+    orderId: context.orderId,
+    cycleId: proposal.cycleId,
+    agentId: proposal.agentId,
+    side: proposal.action,
+    asset: proposal.asset,
+    quote: context.quote,
+    positionPct: proposal.positionPct,
+    referencePriceMicros: context.referencePriceMicros,
+    assetScale: context.assetScale,
+    createdAt: context.createdAt
+  });
 }
