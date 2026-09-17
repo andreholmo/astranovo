@@ -1,0 +1,20 @@
+{
+  "name": "astranovo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Paper-only multi-agent trading experiment. Typed foundation: agent configuration and runtime-validated domain contracts.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/tests/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.9",
+    "typescript": "^5.7.3"
+  }
+}

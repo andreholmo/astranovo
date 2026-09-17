@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "agents": [
+    {
+      "id": "trend-following",
+      "name": "Trend Following",
+      "strategy": "trend-following",
+      "enabled": true,
+      "initialBudgetUsd": 100,
+      "mode": "reference"
+    },
+    {
+      "id": "mean-reversion",
+      "name": "Mean Reversion",
+      "strategy": "mean-reversion",
+      "enabled": true,
+      "initialBudgetUsd": 100,
+      "mode": "reference"
+    },
+    {
+      "id": "breakout",
+      "name": "Breakout",
+      "strategy": "breakout",
+      "enabled": true,
+      "initialBudgetUsd": 100,
+      "mode": "reference"
+    },
+    {
+      "id": "momentum",
+      "name": "Momentum",
+      "strategy": "momentum",
+      "enabled": true,
+      "initialBudgetUsd": 100,
+      "mode": "reference"
+    },
+    {
+      "id": "volatility-filtered",
+      "name": "Volatility Filtered",
+      "strategy": "volatility-filtered",
+      "enabled": true,
+      "initialBudgetUsd": 100,
+      "mode": "reference"
+    },
+    {
+      "id": "conservative-baseline",
+      "name": "Conservative Baseline",
+      "strategy": "conservative-baseline",
+      "enabled": true,
+      "initialBudgetUsd": 100,
+      "mode": "reference"
+    }
+  ]
+}

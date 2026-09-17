@@ -1,0 +1,9 @@
+node_modules/
+dist/
+runs/
+data/
+*.tgz
+*.log
+.env
+.env.*
+.DS_Store
