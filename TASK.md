@@ -1,47 +1,94 @@
 # Tarefa atual
 
 - **ID:** TASK-002
+- **Milestone:** M0 — Fundação e contratos
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base obrigatória:** `docs/UPSTREAM_ADAPTATION.md`
-- **Upstream fixado:** `immortalhowwl/gptheist@2ad2e47b798341df4584edd68a6998e8c07c0618`
+- **Commit esperado:** `feat: cria fundacao tipada do AstraNovo`
 
 ## Objetivo
 
-Criar a baseline TypeScript do AstraNovo como adaptação rastreável do núcleo seguro do GPTHEIST, mantendo somente replay/paper-only. Esta tarefa prepara a fundação; ainda não conecta Astra nem mercado ao vivo.
+Criar uma baseline TypeScript mínima e testável: configuração de N agentes, contratos centrais e validação runtime. Esta tarefa não implementa trading, LLM, mercado ao vivo, Risk Manager ou broker.
 
-## Instruções
+## Leitura obrigatória
 
-1. Sincronize `main` antes de começar e leia `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/UPSTREAM_ADAPTATION.md` e o plano anterior.
-2. Inspecione diretamente o upstream no commit fixado. Não trabalhe de memória.
-3. Adote Node.js 20+ e TypeScript estrito.
-4. Crie na raiz:
-   - `package.json`, lockfile e `tsconfig.json`;
-   - `src/domain/`, `src/orchestrator/`, `src/risk/`, `src/broker/`, `src/portfolio/`, `src/market/`, `src/agents/`, `src/audit/`, `src/metrics/`;
-   - `config/agents.json`;
-   - `tests/` e fixtures mínimas;
-   - CI para build, lint/typecheck e testes.
-5. A configuração deve conter seis agentes iniciais, mas loader, tipos, loops e armazenamento devem aceitar qualquer quantidade positiva. Não use tuplas de seis nem nomes codificados na lógica.
-6. Cada agente configurado precisa de `id`, `name`, `strategy`, `enabled` e `initialBudgetUsd`. Use `100` como orçamento demonstrativo provisório e documente que o proprietário o substituirá antes do primeiro experimento.
-7. Implemente apenas o “vertical slice” determinístico:
-   - carregar e validar a configuração;
-   - receber um snapshot fixture;
-   - gerar uma decisão stub BUY/SELL/HOLD por agente, sem rede e sem LLM;
-   - aplicar Risk Manager fail-closed;
-   - executar no PaperBroker;
-   - manter carteira separada;
-   - gravar eventos JSONL append-only;
-   - calcular ao menos equity e P&L não realizado.
-8. Preserve os padrões úteis do GPTHEIST: schemas em runtime, handoffs explícitos, veto incontornável, IDs determinísticos, replay reproduzível, escaping de caracteres de controle, escrita segura de auditoria e testes negativos.
-9. Não importe Desk, assets, servidor, Robinhood Chain/Pons, FxTwitter ou qualquer integração de execução real.
-10. Crie `THIRD_PARTY_NOTICES.md` com URL, commit fixado e texto/atribuição MIT do upstream. Se copiar trechos substanciais, mantenha também os avisos nos arquivos derivados quando apropriado.
-11. Mantenha `EXECUTION_MODE = "paper-only"` como invariante verificável. Não adicione variáveis de wallet, chave privada, corretora, testnet ou endpoint de ordens.
-12. Atualize `docs/coordination/CLAUDE_REPORT.md` com arquivos, comandos, resultados, decisões e SHA do commit.
+Antes de editar:
 
-## Seis perfis iniciais
+1. `CLAUDE.md`
+2. `docs/PROJECT_CONTEXT.md`
+3. `docs/GPTHEIST_ANALYSIS.md`
+4. `docs/ARCHITECTURE.md`
+5. `docs/DECISIONS.md`
+6. `docs/ROADMAP.md`
 
-Use perfis experimentais simples e claramente rotulados, sem alegação de lucratividade:
+Inspecione também `immortalhowwl/gptheist@2ad2e47b798341df4584edd68a6998e8c07c0618` para entender os padrões, sem copiar o Desk ou a integração Pons.
+
+## Escopo exato
+
+Crie:
+
+- projeto Node.js 20+ com TypeScript estrito;
+- `package.json`, lockfile, `tsconfig.json` e `.gitignore`;
+- `src/domain/contracts.ts`;
+- `src/config/load-agents.ts`;
+- `config/agents.json`;
+- testes unitários offline;
+- CI de build/typecheck e testes;
+- README mínimo de instalação/testes e aviso paper-only;
+- `THIRD_PARTY_NOTICES.md` com referência, commit e licença MIT do GPTHEIST.
+
+## Contratos mínimos
+
+### AgentConfig
+
+Campos obrigatórios:
+
+- `id`: slug único;
+- `name`: texto limitado;
+- `strategy`: slug;
+- `enabled`: boolean;
+- `initialBudgetUsd`: número finito e positivo;
+- `mode`: `reference | optimized`.
+
+### MarketSnapshot
+
+Campos obrigatórios:
+
+- `schemaVersion: 1`;
+- `snapshotId`;
+- `source`;
+- `asset`;
+- `quote`;
+- `asOf`: UTC ISO-8601 canônico;
+- `availableAt`: UTC ISO-8601 canônico;
+- `price`: número finito e positivo;
+- `spreadBps`: número finito e não negativo;
+- `complete`: boolean.
+
+Invariante temporal: `availableAt >= asOf`. Documente que somente informação disponível até `availableAt` pode entrar em uma decisão.
+
+### AgentProposal
+
+Campos obrigatórios:
+
+- `schemaVersion: 1`;
+- `proposalId`, `cycleId`, `agentId`;
+- `action: BUY | SELL | HOLD`;
+- `asset`;
+- `confidence` entre 0 e 1;
+- `positionPct` entre 0 e 1;
+- `reason` limitado;
+- `veto`: boolean;
+- `evidenceIds`: lista limitada de IDs;
+- `promptVersion`;
+- `model`.
+
+Semântica obrigatória: HOLD exige `positionPct = 0`; BUY representa fração do caixa/equity elegível; SELL representa fração da posição atual. Não interprete texto livre.
+
+## Configuração padrão
+
+Inclua exatamente seis agentes habilitados, todos com `initialBudgetUsd: 100`:
 
 - trend-following;
 - mean-reversion;
@@ -50,35 +97,74 @@ Use perfis experimentais simples e claramente rotulados, sem alegação de lucra
 - volatility-filtered;
 - conservative-baseline.
 
-Nesta tarefa eles podem compartilhar o mesmo stub determinístico; a estratégia deve permanecer um campo configurável para implementação posterior.
+IDs e nomes podem ser claros e estáveis. A lógica não pode conter limite fixo de seis.
+
+## Validação runtime
+
+Implemente validadores explícitos para os três contratos. Pode usar funções TypeScript próprias; evite dependência runtime nesta milestone.
+
+Rejeite:
+
+- campos ausentes/tipos errados;
+- NaN/Infinity;
+- strings vazias, excessivas ou com controles;
+- IDs duplicados;
+- lista vazia de agentes;
+- timestamps não canônicos;
+- violação temporal;
+- enum desconhecido;
+- HOLD com tamanho diferente de zero;
+- percentuais fora do intervalo;
+- evidenceIds excessivos ou duplicados.
+
+Erros devem ser claros, mas não incluir stack/segredos em output destinado ao usuário.
+
+## Testes obrigatórios
+
+- configuração padrão carrega exatamente seis agentes;
+- cada orçamento é US$100;
+- sétimo agente é aceito sem mudança de código;
+- zero agentes é rejeitado;
+- IDs duplicados são rejeitados;
+- cada classe de valor inválido acima possui teste;
+- MarketSnapshot futuro/inconsistente é rejeitado;
+- AgentProposal HOLD com posição não zero é rejeitado;
+- objetos validados não são mutados;
+- testes são offline e determinísticos.
+
+## Restrições
+
+Não criar nesta tarefa:
+
+- decisão stub;
+- orquestrador;
+- Risk Manager;
+- PaperBroker;
+- carteira/ledger;
+- métricas;
+- coleta de mercado;
+- chamada Astra/LLM;
+- servidor, dashboard ou banco;
+- wallet, testnet, exchange ou execução real.
+
+Não copie nomes dos dez personagens para a lógica. Não altere `TASK.md`.
 
 ## Critérios de aceite
 
-- `npm ci`, build/typecheck e testes passam em ambiente limpo;
-- exatamente seis entradas vêm na configuração padrão;
-- um teste adiciona dinamicamente um sétimo agente sem alterar código e o ciclo o processa;
-- carteiras e orçamentos são isolados;
-- BUY acima do caixa é reduzido ou vetado conforme política explícita;
-- SELL acima da posição é vetado;
-- snapshot inválido ou incompleto produz HOLD/veto, nunca execução;
-- agente com falha não impede o processamento dos outros;
-- mesmo fixture + configuração + versão de política gera o mesmo resultado e IDs;
-- log já existente nunca é sobrescrito com conteúdo diferente;
-- nenhum teste, fixture, log ou fonte contém segredo;
-- busca por caminhos de execução real não encontra implementação;
-- atribuição MIT está presente;
-- README explica execução local e deixa explícito: experimento, paper-only, sem promessa de lucro.
-
-## Fora de escopo
-
-- chamada real ao Astra/LLM;
-- coleta de dados reais;
-- dashboard ou servidor;
-- banco de dados;
-- exchange, wallet, testnet ou dinheiro real;
-- otimização de estratégia;
-- paralelismo distribuído.
+- `npm ci` passa;
+- build/typecheck estrito passa;
+- testes passam em ambiente limpo;
+- CI usa permissões mínimas;
+- nenhuma dependência runtime desnecessária;
+- configuração aceita N positivo;
+- contratos e invariantes estão documentados/testados;
+- nenhuma rota de execução financeira existe;
+- atribuição upstream está presente.
 
 ## Entrega
 
-Um único commit de implementação em `main`, seguido de push. Não altere o status deste arquivo. Registre o commit e evidências no relatório; o ChatGPT fará a revisão e mudará o status.
+1. Atualize `docs/coordination/CLAUDE_REPORT.md` com arquivos, comandos, resultados, limitações e decisões.
+2. Faça um único commit com a mensagem `feat: cria fundacao tipada do AstraNovo`.
+3. Push para `origin main`.
+4. Informe o SHA completo.
+5. Não marque a tarefa como aprovada.
