@@ -1,171 +1,165 @@
 # Tarefa atual
 
-- **ID:** TASK-002
-- **Milestone:** M0 — Fundação e contratos
-- **Status:** APPROVED
+- **ID:** TASK-003
+- **Milestone:** M1 — Carteira, ledger e PaperBroker
+- **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Commit entregue:** `1e5bfbc0e880d8e8e9ef7504e03b6015adcc0d10`
-- **Revisão:** `docs/coordination/CHATGPT_REVIEW_TASK_002.md`
+- **Commit esperado:** `feat: implementa carteira e paper broker deterministico`
 
 ## Objetivo
 
-Criar uma baseline TypeScript mínima e testável: configuração de N agentes, contratos centrais e validação runtime. Esta tarefa não implementa trading, LLM, mercado ao vivo, Risk Manager ou broker.
+Implementar o núcleo contábil determinístico do paper trading para N agentes: carteiras isoladas, ordens internas, fills simulados com custos e ledger append-only em memória. Ainda não conectar Astra, mercado ao vivo, Risk Manager completo ou persistência em disco.
 
 ## Leitura obrigatória
 
-Antes de editar:
+Sincronize `main` e leia `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_002.md` e esta tarefa.
 
-1. `CLAUDE.md`
-2. `docs/PROJECT_CONTEXT.md`
-3. `docs/GPTHEIST_ANALYSIS.md`
-4. `docs/ARCHITECTURE.md`
-5. `docs/DECISIONS.md`
-6. `docs/ROADMAP.md`
+## Decisões técnicas desta milestone
 
-Inspecione também `immortalhowwl/gptheist@2ad2e47b798341df4584edd68a6998e8c07c0618` para entender os padrões, sem copiar o Desk ou a integração Pons.
+- Não usar ponto flutuante como fonte contábil.
+- Valores monetários internos: inteiros `bigint` em micros de USD (US$0,000001).
+- Quantidades de ativo: inteiros `bigint` em unidades atômicas, com escala configurada por ativo; fixture inicial usa 8 casas.
+- Fronteiras JSON representam `bigint` como strings decimais canônicas.
+- Arredondamento financeiro: para baixo quando calcula quantidade comprável; fees e custos arredondados para cima, favorecendo uma simulação conservadora.
+- Sem short selling.
+- Apenas fills totais ou rejeição nesta milestone.
+- Ledger imutável em memória é a fonte de verdade; snapshots de carteira são derivados por replay.
+- Cada agente inicia com sua própria verba configurada; nenhuma transferência entre carteiras.
+
+Documente e centralize conversões/rounding. Não espalhe fórmulas pelos módulos.
 
 ## Escopo exato
 
-Crie:
+Crie módulos mínimos em:
 
-- projeto Node.js 20+ com TypeScript estrito;
-- `package.json`, lockfile, `tsconfig.json` e `.gitignore`;
-- `src/domain/contracts.ts`;
-- `src/config/load-agents.ts`;
-- `config/agents.json`;
-- testes unitários offline;
-- CI de build/typecheck e testes;
-- README mínimo de instalação/testes e aviso paper-only;
-- `THIRD_PARTY_NOTICES.md` com referência, commit e licença MIT do GPTHEIST.
+- `src/money/`: tipos fixed-point, conversões seguras e operações;
+- `src/portfolio/`: estado derivado e replay do ledger;
+- `src/ledger/`: eventos imutáveis e idempotência;
+- `src/broker/`: interface `Broker` e implementação `PaperBroker`.
+
+Atualize os contratos existentes somente quando necessário para integrar esses módulos.
 
 ## Contratos mínimos
 
-### AgentConfig
+### OrderIntent
 
-Campos obrigatórios:
-
-- `id`: slug único;
-- `name`: texto limitado;
-- `strategy`: slug;
-- `enabled`: boolean;
-- `initialBudgetUsd`: número finito e positivo;
-- `mode`: `reference | optimized`.
-
-### MarketSnapshot
-
-Campos obrigatórios:
+Deve conter:
 
 - `schemaVersion: 1`;
-- `snapshotId`;
-- `source`;
-- `asset`;
-- `quote`;
-- `asOf`: UTC ISO-8601 canônico;
-- `availableAt`: UTC ISO-8601 canônico;
-- `price`: número finito e positivo;
-- `spreadBps`: número finito e não negativo;
-- `complete`: boolean.
+- `orderId`, `cycleId`, `agentId`;
+- `side: BUY | SELL`;
+- `asset`, `quote`;
+- `positionPct` como fração validada;
+- `referencePriceMicros`;
+- `assetScale`;
+- `createdAt`.
 
-Invariante temporal: `availableAt >= asOf`. Documente que somente informação disponível até `availableAt` pode entrar em uma decisão.
+Uma proposta HOLD não vira OrderIntent.
 
-### AgentProposal
+### ExecutionPolicy
 
-Campos obrigatórios:
+- `feeBps`;
+- `spreadBps`;
+- `slippageBps`;
+- limites finitos, inteiros, não negativos e configuráveis.
 
-- `schemaVersion: 1`;
-- `proposalId`, `cycleId`, `agentId`;
-- `action: BUY | SELL | HOLD`;
-- `asset`;
-- `confidence` entre 0 e 1;
-- `positionPct` entre 0 e 1;
-- `reason` limitado;
-- `veto`: boolean;
-- `evidenceIds`: lista limitada de IDs;
-- `promptVersion`;
-- `model`.
+### FillEvent / RejectionEvent
 
-Semântica obrigatória: HOLD exige `positionPct = 0`; BUY representa fração do caixa/equity elegível; SELL representa fração da posição atual. Não interprete texto livre.
+Fill precisa registrar ao menos orderId, agentId, side, quantidade atômica, preço de referência, preço final, fee, slippage/spread aplicados, total em micros, timestamp e policyVersion.
 
-## Configuração padrão
+Rejeição precisa registrar código estável e não alterar carteira.
 
-Inclua exatamente seis agentes habilitados, todos com `initialBudgetUsd: 100`:
+## Comportamento do PaperBroker
 
-- trend-following;
-- mean-reversion;
-- breakout;
-- momentum;
-- volatility-filtered;
-- conservative-baseline.
+### BUY
 
-IDs e nomes podem ser claros e estáveis. A lógica não pode conter limite fixo de seis.
+- usar `positionPct` sobre o caixa disponível;
+- incorporar spread, slippage e fee;
+- nunca produzir caixa negativo;
+- reduzir deterministicamente a quantidade para o máximo pagável;
+- rejeitar quando a quantidade resultante for zero.
 
-## Validação runtime
+### SELL
 
-Implemente validadores explícitos para os três contratos. Pode usar funções TypeScript próprias; evite dependência runtime nesta milestone.
+- usar `positionPct` sobre a posição atual;
+- nunca vender mais que a posição;
+- rejeitar ativo inexistente ou quantidade zero;
+- aplicar custos de maneira conservadora;
+- nunca gerar caixa negativo.
 
-Rejeite:
+### HOLD
 
-- campos ausentes/tipos errados;
-- NaN/Infinity;
-- strings vazias, excessivas ou com controles;
-- IDs duplicados;
-- lista vazia de agentes;
-- timestamps não canônicos;
-- violação temporal;
-- enum desconhecido;
-- HOLD com tamanho diferente de zero;
-- percentuais fora do intervalo;
-- evidenceIds excessivos ou duplicados.
+- não chega ao broker;
+- nenhuma ordem ou fill é criado.
 
-Erros devem ser claros, mas não incluir stack/segredos em output destinado ao usuário.
+## Ledger e idempotência
+
+- eventos possuem `eventId` determinístico;
+- reprocessar o mesmo `orderId` com conteúdo idêntico devolve o mesmo resultado sem novo evento;
+- mesmo `orderId` com conteúdo diferente é rejeitado como conflito;
+- replay dos mesmos eventos produz exatamente o mesmo portfolio;
+- arrays e objetos retornados devem ser imutáveis;
+- ledger de um agente não altera outro agente.
+
+Não implementar arquivo JSONL ainda; o adaptador persistente virá em tarefa separada.
+
+## Inicialização
+
+Crie uma função que receba `AgentsConfig` validado e produza as carteiras iniciais dos agentes habilitados usando `initialBudgetUsd`. Os seis agentes padrão devem resultar em seis carteiras independentes de US$100 cada.
 
 ## Testes obrigatórios
 
-- configuração padrão carrega exatamente seis agentes;
-- cada orçamento é US$100;
-- sétimo agente é aceito sem mudança de código;
-- zero agentes é rejeitado;
-- IDs duplicados são rejeitados;
-- cada classe de valor inválido acima possui teste;
-- MarketSnapshot futuro/inconsistente é rejeitado;
-- AgentProposal HOLD com posição não zero é rejeitado;
-- objetos validados não são mutados;
-- testes são offline e determinísticos.
+- conversões fixed-point válidas e rejeição de overflow/formato inválido;
+- arredondamento documentado nas fronteiras;
+- seis carteiras isoladas com US$100;
+- configuração com sétimo agente funciona;
+- BUY normal com fee/spread/slippage;
+- BUY de 100% nunca deixa caixa negativo;
+- BUY pequeno demais é rejeitado;
+- SELL parcial e total;
+- SELL sem posição e oversell são rejeitados;
+- custos reduzem o resultado versus execução sem custos;
+- mesmo orderId idêntico não duplica fill;
+- mesmo orderId divergente gera conflito;
+- replay reconstrói exatamente caixa e posições;
+- falha/rejeição não modifica portfolio;
+- operação de um agente não modifica os demais;
+- nenhum NaN/Infinity, número negativo ou bigint não canônico atravessa contratos;
+- testes offline e determinísticos.
+
+Use fixtures pequenas cujos resultados possam ser conferidos manualmente.
 
 ## Restrições
 
-Não criar nesta tarefa:
+Não implementar:
 
-- decisão stub;
-- orquestrador;
-- Risk Manager;
-- PaperBroker;
-- carteira/ledger;
-- métricas;
-- coleta de mercado;
 - chamada Astra/LLM;
-- servidor, dashboard ou banco;
-- wallet, testnet, exchange ou execução real.
+- coleta de mercado;
+- prompts/agentes reais;
+- coordenador multiagente;
+- Risk Manager completo;
+- métricas de performance;
+- JSONL/SQLite;
+- servidor/dashboard;
+- testnet, wallet, exchange ou dinheiro real.
 
-Não copie nomes dos dez personagens para a lógica. Não altere `TASK.md`.
+Não alterar `TASK.md`. Não adicionar dependência runtime sem necessidade comprovada.
 
 ## Critérios de aceite
 
-- `npm ci` passa;
-- build/typecheck estrito passa;
-- testes passam em ambiente limpo;
-- CI usa permissões mínimas;
-- nenhuma dependência runtime desnecessária;
-- configuração aceita N positivo;
-- contratos e invariantes estão documentados/testados;
-- nenhuma rota de execução financeira existe;
-- atribuição upstream está presente.
+- `npm ci`, typecheck, build e testes passam;
+- CI continua verde em Node 20 e 22;
+- contabilidade usa fixed-point/`bigint`, sem floats como fonte de verdade;
+- invariantes de caixa e posição são testadas;
+- ledger é idempotente e replayável;
+- carteiras são isoladas e extensíveis para N agentes;
+- nenhuma rota financeira real existe;
+- documentação explica fórmulas e arredondamentos.
 
 ## Entrega
 
-1. Atualize `docs/coordination/CLAUDE_REPORT.md` com arquivos, comandos, resultados, limitações e decisões.
-2. Faça um único commit com a mensagem `feat: cria fundacao tipada do AstraNovo`.
+1. Atualize README e `docs/coordination/CLAUDE_REPORT.md`.
+2. Faça um único commit com `feat: implementa carteira e paper broker deterministico`.
 3. Push para `origin main`.
-4. Informe o SHA completo.
-5. Não marque a tarefa como aprovada.
+4. Não altere o status da tarefa nem aprove o próprio trabalho.
