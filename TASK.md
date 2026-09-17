@@ -2,10 +2,11 @@
 
 - **ID:** TASK-003
 - **Milestone:** M1 — Carteira, ledger e PaperBroker
-- **Status:** READY
+- **Status:** APPROVED — AUTOMATION_SETUP_REQUIRED
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Commit esperado:** `feat: implementa carteira e paper broker deterministico`
+- **Commit entregue:** `ddcd7684c08689502fd70e29070d1e93d1ec6a3e`
+- **Revisão:** `docs/coordination/CHATGPT_REVIEW_TASK_003.md`
 
 ## Objetivo
 
@@ -163,3 +164,7 @@ Não alterar `TASK.md`. Não adicionar dependência runtime sem necessidade comp
 2. Faça um único commit com `feat: implementa carteira e paper broker deterministico`.
 3. Push para `origin main`.
 4. Não altere o status da tarefa nem aprove o próprio trabalho.
+
+## Bloqueio antes da próxima tarefa
+
+Não publicar nem executar TASK-004 manualmente. O próximo passo é instalar e validar o Claude Code GitHub App/Action e o fluxo por Pull Request. O desenvolvimento do trader só continua depois que o ciclo autônomo estiver operacional.
