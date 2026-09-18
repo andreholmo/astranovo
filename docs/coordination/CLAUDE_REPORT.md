@@ -257,3 +257,139 @@ Nenhuma integração, dependência, wallet externa, corretora, testnet, credenci
 
 - **Commit:** `fix: rejeita BUY fail-closed quando baseline de exposicao e zero`
 - **Hash:** informado a André na resposta após o push.
+
+## TASK-005 — Integração determinística risco → execução paper (M2)
+
+- **ID da tarefa:** TASK-005
+- **Milestone:** M2 — integração determinística Risk Manager → PaperBroker
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-18
+
+### Resumo da entrega
+
+Fachada mínima e pura, `executePaperOrderWithRisk`, que torna explícita a sequência
+obrigatória `OrderIntent validado → evaluateRisk → bloqueio OU PaperBroker.execute`. Não
+reimplementa nenhuma regra de risco ou de execução: reutiliza `evaluateRisk`/`RiskDecision`
+de `src/risk/`, `Broker`/`ExecutionOutcome` de `src/broker/broker.ts` e os contratos de
+`src/domain/contracts.ts` e `src/portfolio/portfolio.ts` sem alterar nenhum deles. Não
+aplica evento ao ledger/portfolio nesta tarefa — o `RiskDecision` rejeitado já é o registro
+estruturado do bloqueio, e um fill/rejeição aprovado pelo broker é devolvido ao chamador
+para essa decisão aplicar.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_004.md`,
+`docs/coordination/CLAUDE_REPORT.md` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/execution/execute-paper-order-with-risk.ts` | criado — `executePaperOrderWithRisk`, `ExecutePaperOrderWithRiskRequest`, `ExecutePaperOrderWithRiskResult` |
+| `tests/execution.test.ts` | criado |
+| `README.md` | atualizado (seção "Integração determinística risco → execução paper") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design da fachada
+
+`executePaperOrderWithRisk` recebe `intent`, `wallet`, `riskPolicy`, `executionPolicy`,
+`broker`, `evaluatedAt` (instante do `RiskDecision`) e `occurredAt` (instante do evento do
+broker) — dois timestamps canônicos distintos, ambos injetados pelo chamador, nunca lidos
+do relógio do sistema. Sequência interna, sem desvio possível:
+
+1. Valida `broker.kind === "paper"` **antes** de qualquer avaliação ou execução; qualquer
+   outro valor lança `Error` de imediato e o broker não é tocado.
+2. Chama `evaluateRisk` exatamente uma vez.
+3. Se `riskDecision.approved === false`, devolve `{ status: "RISK_REJECTED", riskDecision }`
+   congelado; o broker nunca é chamado.
+4. Se aprovado, chama `broker.execute` exatamente uma vez com o mesmo `intent`, `wallet`,
+   `executionPolicy` e `occurredAt` recebidos, e devolve
+   `{ status: "BROKER_EXECUTED", riskDecision, executionOutcome }` congelado, onde
+   `executionOutcome` é exatamente o que o broker calculou — sem transformação.
+
+Exceções inesperadas de `evaluateRisk` ou de `broker.execute` não são capturadas: propagam
+para o chamador, para que uma falha real nunca seja disfarçada de resultado estruturado.
+
+### Testes cobertos em `tests/execution.test.ts`
+
+Circuit breaker, ativo fora da allowlist e input de risco inválido (agente divergente)
+produzindo `RISK_REJECTED` com um broker duplo que lança erro se chamado (prova de zero
+chamadas); decisão aprovada chamando um broker-spy exatamente uma vez com o mesmo intent,
+carteira, política de execução e instante recebidos; BUY e SELL aprovados preservando
+exatamente o `ExecutionOutcome` que uma chamada direta ao `PaperBroker` com o mesmo request
+produz; uma rejeição nativa do `PaperBroker` (`NO_POSITION`, numa SELL sem posição que o
+Risk Manager aprova) preservada como `BROKER_EXECUTED` com `executionOutcome.status ===
+"REJECTED"`; um broker com `kind !== "paper"` lançando erro fail-closed sem ser chamado;
+congelamento do resultado e do `ExecutionOutcome`/evento aninhados; ausência de mutação de
+intent, carteira e políticas; ausência de qualquer efeito sobre a carteira recebida (prova
+de que nenhum evento é aplicado); isolamento entre dois agentes; determinismo do resultado
+completo para o mesmo input canônico; `riskDecision` devolvido idêntico a uma chamada
+direta de `evaluateRisk` com o mesmo request, evidenciando avaliação única; uso independente
+de `evaluatedAt` e `occurredAt` quando os dois instantes recebidos diferem.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **211 testes, 211 passaram, 0 falharam** (195 preexistentes + 16 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio (ambos os
+instantes são injetados pelo chamador em todo teste), nenhum uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **Dois timestamps distintos (`evaluatedAt`, `occurredAt`) em vez de um único instante
+   compartilhado.** A tarefa pede "timestamps canônicos injetados pelo chamador" (plural) e
+   `RiskRequest.evaluatedAt`/`ExecutionRequest.occurredAt` já são campos semanticamente
+   distintos nos módulos reutilizados; duplicar um único nome exigiria escolher um dos dois
+   nomes existentes ou inventar um terceiro. Passar os dois nomes originais deixa explícito
+   qual instante vai para qual registro, sem perder a possibilidade de o chamador usar o
+   mesmo valor para ambos quando quiser.
+2. **Falha no `kind` do broker lança `Error`, não devolve uma variante do resultado.** Um
+   broker de `kind` incorreto é um erro de configuração do chamador — nunca uma decisão de
+   negócio sobre a ordem — e seria uma terceira variante fora das duas que a tarefa define
+   (`RISK_REJECTED`, `BROKER_EXECUTED`). `PaperBroker.execute` já lança `Error` (não
+   `ContractValidationError`) para a mesma classe de problema (agente do intent divergente
+   do agente da carteira), então lançar aqui segue a mesma convenção já estabelecida no
+   repositório para invariantes estruturais quebradas pelo chamador, não pelo dado.
+3. **A verificação de `kind` acontece antes de `evaluateRisk`.** A tarefa pede
+   explicitamente que a implementação "valide `broker.kind === 'paper'` antes de qualquer
+   avaliação/execução". Como consequência, quando o broker é rejeitado por `kind`, o Risk
+   Manager não chega a ser avaliado nessa chamada — o que não conflita com "avaliar o risco
+   exatamente uma vez por chamada", já que essa chamada nunca chega a produzir um resultado
+   estruturado.
+4. **Nenhum novo código de erro/rejeição foi criado.** A fachada devolve apenas o que
+   `evaluateRisk` e o `PaperBroker` já produzem; não há terceiro tipo de rejeição nem evento
+   de ledger inventado para a rejeição de risco, exatamente como a tarefa exige.
+
+### Limitações conhecidas
+
+- A fachada não aplica o `ExecutionOutcome`/`RiskDecision` a nenhum ledger ou portfolio;
+  isso permanece responsabilidade explícita do chamador, fora do escopo desta tarefa.
+- Não há retry, idempotência de chamada dupla ou proteção contra o chamador invocar a
+  fachada duas vezes para o mesmo `orderId`; a idempotência por `orderId` já existe no
+  ledger (`src/ledger/ledger.ts`) e continua sendo responsabilidade de quem aplica o
+  resultado, não desta fachada.
+- Como no Risk Manager, a fachada não redimensiona uma ordem acima do limite de risco: ela
+  é aprovada inteira ou rejeitada inteira.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as quatro decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: integra risco ao fluxo de execucao paper`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
