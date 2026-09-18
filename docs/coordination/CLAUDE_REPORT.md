@@ -564,3 +564,154 @@ comportamento, testes ou critérios de aceite.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+
+## TASK-007 — Valoração de patrimônio sem look-ahead (primeira fatia de M3)
+
+- **ID da tarefa:** TASK-007
+- **Milestone:** M3 — valoração determinística sem look-ahead, primeira fatia
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-18
+
+### Resumo da entrega
+
+Menor base de métricas do replay: `valueWalletAt` calcula um `EquityPoint` imutável e
+auditável — patrimônio de uma `Wallet` num único instante, usando somente
+`MarketSnapshot`s completos, em USD, que já estavam disponíveis em `valuedAt`. Não calcula
+série temporal, P&L, drawdown, win rate ou benchmark; essa fatia valora apenas um instante,
+como o escopo exato da tarefa exige. Reutiliza integralmente `parseMarketSnapshot(snapshot,
+{ notAfter: valuedAt })` para a prova de disponibilidade/anti-look-ahead e
+`microsFromUsdNumber`, `scaleFactor`, `mulDivFloor`, `addBounded` e `MAX_MICROS` de
+`src/money/fixed-point.ts` para toda a aritmética; nenhuma fórmula monetária foi
+duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`,
+`docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`,
+`docs/coordination/CHATGPT_REVIEW_TASK_006.md`, `docs/coordination/CLAUDE_REPORT.md` e
+`TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/metrics/value-wallet-at.ts` | criado — `valueWalletAt`, `EquityPoint`, `PositionValuation` |
+| `tests/value-wallet-at.test.ts` | criado |
+| `README.md` | atualizado (seção "Valoração de patrimônio sem look-ahead") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design de `valueWalletAt`
+
+Recebe `{ wallet, valuedAt, snapshots }`, onde `snapshots` é uma lista de valores não
+validados (a mesma forma "software valida" já usada em todo o repositório), em qualquer
+ordem. Para cada entrada:
+
+1. `parseMarketSnapshot(raw, { notAfter: valuedAt })` valida o schema e prova, sem regra
+   duplicada, que `availableAt <= valuedAt` — dado futuro é rejeitado nessa chamada, não
+   depois;
+2. regras específicas desta fatia, que `parseMarketSnapshot` não impõe porque são
+   estruturalmente válidas para um `MarketSnapshot` isolado: `complete === true`,
+   `quote === "USD"`, o ativo precisa ser um que a carteira detém, e não pode haver dois
+   snapshots para o mesmo ativo — qualquer violação falha fechado imediatamente, sem
+   escolher silenciosamente um snapshot ou ignorar o excedente.
+
+Depois de validado o conjunto, cada posição da carteira (`wallet.positions`, já ordenada
+por ativo por invariante de `src/portfolio/portfolio.ts`) precisa ter exatamente um
+snapshot correspondente — a ausência falha fechada. O preço vem de
+`microsFromUsdNumber(snapshot.price, ...)`, que rejeita precisão incompatível com seis
+casas decimais em vez de arredondar; o valor da posição é
+`mulDivFloor(quantityAtoms, priceMicros, scaleFactor(assetScale))`; a soma usa
+`addBounded(..., MAX_MICROS, ...)`, que falha fechado em overflow. `equityMicros` é
+`addBounded(cashMicros, positionsValueMicros, MAX_MICROS, ...)`.
+
+Como a saída é construída iterando `wallet.positions` (já canonicamente ordenada), a ordem
+em que `snapshots` foi fornecida nunca influencia `positions` nem `snapshotIds` no
+resultado — só influencia qual violação é detectada primeiro quando a entrada é inválida.
+
+### Testes cobertos em `tests/value-wallet-at.test.ts`
+
+Carteira somente em caixa com lista vazia e `equityMicros === cashMicros`; uma posição
+corretamente valorada com evidência de preço auditável; duas posições com soma correta;
+mesmo conjunto de snapshots em ordens diferentes produzindo resultado idêntico; floor
+conservador com resto genuíno (`floor(1 * 3_333_333 / 100) = 33_333`, não 33_334); snapshot
+disponível exatamente em `valuedAt` aceito; snapshot disponível depois de `valuedAt`
+rejeitado; snapshot incompleto rejeitado; `quote` diferente de USD rejeitado; posição sem
+snapshot correspondente rejeitada; snapshot duplicado para o mesmo ativo rejeitado;
+snapshot de ativo não possuído pela carteira rejeitado; preço com sete casas decimais
+falhando fechado; overflow na soma de valores falhando fechado; congelamento do
+`EquityPoint`, de `positions` e de cada `PositionValuation`; ausência de mutação da
+carteira e dos snapshots recebidos; isolamento entre dois agentes; determinismo para o
+mesmo input canônico.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **243 testes, 243 passaram, 0 falharam** (225 preexistentes + 18 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio
+(`valuedAt` é sempre injetado pelo chamador), nenhum uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **`isCanonicalTimestamp` duplicado localmente**, com o mesmo padrão regex e a mesma
+   checagem de round-trip por `Date` já usadas em `src/domain/contracts.ts` (privada, não
+   exportada) e duplicadas de novo em `src/risk/risk-manager.ts`. O escopo exato desta
+   tarefa é criar `src/metrics/`, não alterar as exportações de `src/domain/contracts.ts`;
+   a duplicação de uma checagem de formato de três linhas segue o precedente já registrado
+   na TASK-004 (hash de `RiskDecision.id` duplicado pelo mesmo motivo).
+2. **`complete`, `quote === "USD"`, "um snapshot por ativo detido" e "rejeitar ativo não
+   detido" são verificados aqui, não em `parseMarketSnapshot`.** Um `MarketSnapshot`
+   isolado com `complete: false` ou `quote: "EUR"` é estruturalmente válido — só se torna
+   inadmissível no contexto de *valorar esta carteira*. Colocar a regra em
+   `src/domain/contracts.ts` alteraria o contrato para todo consumidor futuro de
+   `MarketSnapshot` que não valora patrimônio (ex.: um adaptador que só precisa do preço
+   bruto), o que amplia escopo além desta fatia.
+3. **A saída é construída iterando `wallet.positions`, nunca a lista `snapshots` recebida.**
+   `Wallet.positions` já é canonicamente ordenada por ativo (invariante de
+   `src/portfolio/portfolio.ts`), então reaproveitar essa ordem entrega "a ordem de entrada
+   não altera o resultado" sem precisar ordenar nada aqui, e sem duplicar a comparação de
+   string usada em `withPosition`.
+4. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/
+   `ContractValidationError`, o mesmo mecanismo de todo o resto do repositório
+   (`src/domain/contracts.ts`, `src/money/fixed-point.ts`, `src/portfolio/portfolio.ts`);
+   um código de motivo estilo `RiskDecision.codes` não foi pedido pela tarefa e teria sido
+   uma abstração nova sem necessidade demonstrada.
+5. **O teste de overflow constrói uma `Wallet` diretamente com um objeto literal, em vez de
+   produzi-la por um fluxo real do `PaperBroker`.** Nenhuma compra real pode alcançar um
+   valor de posição que exceda `MAX_MICROS`, porque o próprio broker e `MAX_ATOMS`/
+   `MAX_PRICE` já limitam isso antes de chegar aqui; o mesmo padrão já foi usado na
+   TASK-006 para forjar um evento de agente inconsistente que "não pode ser produzido por
+   um fluxo real e válido".
+
+### Limitações conhecidas
+
+- Valora um único instante; não existe série temporal, P&L, drawdown, win rate ou
+  benchmark — são fatias futuras de M3, fora do escopo exato desta tarefa.
+- Não há seleção automática do snapshot mais recente nem tolerância de "quase o mesmo
+  instante": o chamador precisa fornecer exatamente um snapshot por ativo detido.
+- Não há verificação de frescor (staleness) além do anti-look-ahead: um snapshot com
+  `availableAt` muito anterior a `valuedAt`, mas ainda `<= valuedAt`, é aceito.
+- Não persiste nada em arquivo; o `EquityPoint` vive apenas em memória, como as milestones
+  anteriores.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: calcula patrimonio sem look-ahead`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
