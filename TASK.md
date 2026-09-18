@@ -1,19 +1,19 @@
 # Tarefa atual
 
-- **ID:** TASK-005
-- **Milestone:** M2 — integração determinística Risk Manager → PaperBroker
+- **ID:** TASK-006
+- **Milestone:** M2 — liquidação contábil determinística do paper trade
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `36cc95fb6b5469dd14bccf861b72b0705dfb48ad`
+- **Base:** `main` após `bf3349ffb99f49f1b5d8efe9464fbd27afc18e97`
 
 ## Objetivo
 
-Criar uma fachada mínima e determinística de execução paper que torne explícita a sequência obrigatória:
+Completar a menor fatia contábil do pipeline paper:
 
-`OrderIntent validado → evaluateRisk → bloqueio OU PaperBroker.execute`
+`executePaperOrderWithRisk → evento do PaperBroker → append idempotente no ledger → carteira derivada`
 
-Uma ordem rejeitada pelo Risk Manager jamais pode chegar ao broker. Uma ordem aprovada pode chegar somente ao broker paper. Esta tarefa não aplica eventos ao ledger e não altera carteira.
+A nova função deve receber o resultado já produzido por `executePaperOrderWithRisk`, a carteira imutável do mesmo agente e seu `AgentLedger`. Ela não executa risco nem broker novamente.
 
 ## Leitura obrigatória
 
@@ -24,84 +24,77 @@ Sincronize `main` e leia integralmente:
 3. `docs/ARCHITECTURE.md`;
 4. `docs/DECISIONS.md`;
 5. `docs/ROADMAP.md`;
-6. `docs/coordination/CHATGPT_REVIEW_TASK_004.md`;
+6. `docs/coordination/CHATGPT_REVIEW_TASK_005.md`;
 7. `docs/coordination/CLAUDE_REPORT.md`;
 8. esta tarefa.
 
 ## Escopo exato
 
-Crie uma implementação pequena em `src/execution/` e testes correspondentes. Reutilize, sem duplicar regras:
+Crie uma função pura pequena em `src/execution/`, por exemplo `settlePaperExecution`, com request/result explícitos.
 
-- `evaluateRisk` e `RiskDecision`;
-- `RiskPolicy`;
-- `PaperBroker`/`Broker` e `ExecutionOutcome`;
-- `ExecutionPolicy`, `OrderIntent` e `Wallet`.
+Entradas:
 
-A fachada deve receber apenas dependências e dados já validados:
+- `ExecutePaperOrderWithRiskResult`;
+- `Wallet` imutável;
+- `AgentLedger` imutável.
 
-- `OrderIntent`;
-- snapshot imutável da carteira simulada do mesmo agente;
-- `RiskPolicy`;
-- `ExecutionPolicy`;
-- timestamps canônicos injetados pelo chamador;
-- broker com `kind === "paper"`.
+Resultado: união discriminada, imutável e suficiente para auditoria:
 
-Ela deve devolver uma união discriminada, imutável e estruturada:
+1. **`RISK_REJECTED`** — devolve a mesma carteira e o mesmo ledger por referência; nenhum evento é criado ou anexado;
+2. **`BROKER_RECORDED`** — contém o resultado de execução original, o evento canônico armazenado, o novo ledger, a carteira resultante e `appended: boolean`.
 
-1. **`RISK_REJECTED`** — contém a `RiskDecision` rejeitada e não contém evento de broker;
-2. **`BROKER_EXECUTED`** — contém a `RiskDecision` aprovada e o `ExecutionOutcome` retornado pelo PaperBroker.
+Reutilize, sem duplicar regras:
 
-Não invente evento de ledger para rejeição de risco nesta tarefa. O `RiskDecision` já é o registro estruturado da rejeição.
+- `AgentLedger.append`;
+- `applyAppendResult`;
+- `ExecutePaperOrderWithRiskResult`;
+- `ExecutionOutcome`, `LedgerEvent` e `Wallet`.
 
 ## Regras obrigatórias
 
-- Avaliar o risco exatamente uma vez por chamada.
-- Se `riskDecision.approved === false`, não chamar o broker em hipótese alguma.
-- Se aprovado, chamar o broker exatamente uma vez com o mesmo intent, wallet, política de execução e timestamp recebido.
-- Rejeitar fail-closed um broker cujo `kind` não seja exatamente `"paper"`; não chamar esse broker.
-- A fachada não redimensiona, corrige ou reinterpreta a ordem.
-- A fachada não captura e transforma silenciosamente exceções inesperadas do Risk Manager ou do PaperBroker.
-- Não alterar `OrderIntent`, wallet, policies, ledger ou estado compartilhado.
-- Não anexar/aplicar eventos ao ledger ou portfolio.
-- Mesmo input canônico e timestamps iguais devem produzir resultado idêntico.
-- A avaliação de um agente não pode consultar carteira de outro agente.
-- Nenhum relógio global, aleatoriedade, rede ou I/O.
-
-## Design mínimo
-
-Prefira uma função pura pequena, por exemplo `executePaperOrderWithRisk`, com tipos explícitos para request/result. O nome final pode mudar se permanecer claro.
-
-A dependência de broker pode usar a interface `Broker` para permitir um spy/fake em testes, mas a implementação deve validar `broker.kind === "paper"` antes de qualquer avaliação/execução. Não crie `TestnetBroker`, `LiveBroker` ou outro adaptador.
-
-Não mova regras de risco para a fachada e não mova regras de execução para o Risk Manager.
+- Nunca chamar `evaluateRisk`, `Broker.execute` ou `PaperBroker.execute`.
+- Em `RISK_REJECTED`, não inventar evento de ledger e não alterar estado.
+- Em `BROKER_EXECUTED`, registrar exatamente `executionOutcome.event`.
+- Um evento novo deve ser anexado uma vez e aplicado à carteira uma vez.
+- Replay idêntico do mesmo `orderId` deve retornar `appended: false`, manter a carteira recebida por referência e não duplicar evento nem efeito contábil.
+- Mesmo `orderId` com conteúdo diferente deve preservar o fail-closed existente e lançar `LedgerConflictError`.
+- Rejeição produzida pelo PaperBroker deve entrar no ledger, mas manter a carteira inalterada por referência.
+- Validar estruturalmente que wallet e ledger pertencem ao mesmo agente antes de qualquer append.
+- O evento também deve pertencer ao mesmo agente; preserve o fail-closed existente para divergência.
+- Não reconstruir, clonar, corrigir ou reinterpretar eventos.
+- Não mutar resultado, carteira, ledger, evento ou coleções.
+- Mesmo input deve produzir resultado idêntico.
+- Nenhum relógio, aleatoriedade, rede ou I/O.
+- Não adicionar persistência em arquivo nesta tarefa.
 
 ## Testes obrigatórios
 
-- circuit breaker produz `RISK_REJECTED` e o broker é chamado zero vezes;
-- ativo fora da allowlist produz `RISK_REJECTED` e o broker é chamado zero vezes;
-- input de risco inválido produz `RISK_REJECTED` e o broker é chamado zero vezes;
-- decisão aprovada chama o broker exatamente uma vez;
-- BUY aprovada preserva o `ExecutionOutcome` do PaperBroker;
-- SELL aprovada preserva o `ExecutionOutcome` do PaperBroker;
-- rejeição produzida pelo próprio PaperBroker é preservada como `BROKER_EXECUTED` com outcome `REJECTED`;
-- broker com `kind !== "paper"` falha fechado antes de ser chamado;
-- os objetos retornados e coleções próprias são imutáveis;
-- intent, wallet e policies não sofrem mutação;
-- a função não aplica evento ao ledger/portfolio;
-- isolamento entre dois agentes;
-- determinismo com o mesmo input e timestamps;
+- `RISK_REJECTED`: zero eventos, mesmas referências de wallet e ledger;
+- BUY preenchida: evento anexado e caixa/posição atualizados uma vez;
+- SELL preenchida: evento anexado e caixa/posição atualizados uma vez;
+- rejeição do PaperBroker: evento anexado e wallet preservada por referência;
+- replay idêntico: `appended: false`, nenhum segundo evento, nenhum segundo efeito na wallet;
+- conflito do mesmo `orderId`: `LedgerConflictError`;
+- wallet e ledger de agentes diferentes: falha fechada antes de append;
+- evento de outro agente: falha fechada;
+- isolamento: liquidar agente A não altera ledger/carteira do agente B;
+- objetos de resultado e coleções próprias imutáveis;
+- entradas não sofrem mutação;
+- determinismo;
 - testes offline e determinísticos.
 
-Use test doubles somente dentro dos testes. Não adicione uma segunda implementação de broker ao código de produção.
+Use o `PaperBroker` real para formar outcomes principais. Test doubles somente quando estritamente necessários e apenas nos testes.
 
 ## Documentação
 
-Atualize o README apenas no necessário para registrar a sequência obrigatória e deixar explícito que:
+Atualize o README apenas no necessário para explicar:
 
-- Risk Manager bloqueado encerra o fluxo;
-- aprovação de risco não significa fill garantido;
-- o PaperBroker ainda pode rejeitar por caixa, posição, quantidade ou custos;
-- a fachada é pura e não aplica eventos ao ledger.
+- somente eventos do PaperBroker são registrados por esta função;
+- o ledger append-only é a fonte de verdade;
+- a carteira é derivada;
+- replay idêntico não duplica fill nem efeito;
+- rejeição de risco não cria evento contábil;
+- rejeição do PaperBroker é auditada no ledger, sem alterar saldo/posição.
 
 Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limitações e decisões técnicas.
 
@@ -109,12 +102,12 @@ Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limi
 
 Não implementar:
 
-- Astra/LLM, prompts ou agentes;
+- Astra/LLM, prompts, agentes ou coordenação multiagente;
 - dados de mercado ou rede;
-- persistência em disco;
-- append/aplicação automática no ledger;
-- métricas, replay ou benchmarks;
+- métricas, replay histórico completo ou benchmarks;
+- persistência JSONL/SQLite/CSV;
 - novas regras de risco;
+- retry ou fila;
 - dashboard, servidor ou cloud;
 - wallet externa, chave privada, blockchain;
 - testnet, corretora, exchange, credenciais ou dinheiro real;
@@ -124,11 +117,12 @@ Não adicionar dependência runtime. Não alterar este `TASK.md`.
 
 ## Critérios de aceite
 
-- sequência Risk Manager → PaperBroker comprovada por testes;
-- veto determinístico não pode ser contornado pela fachada;
-- apenas broker `kind === "paper"`;
-- resultado estruturado e imutável;
-- nenhuma mutação contábil pela fachada;
+- caminho contábil PaperBroker → ledger → wallet comprovado;
+- idempotência impede duplicação de fill e de efeito na carteira;
+- ledger continua como fonte de verdade append-only;
+- rejeição de risco não vira evento contábil;
+- isolamento por agente e fail-closed preservados;
+- nenhuma regra de risco ou broker duplicada;
 - tipos estritos e comportamento determinístico;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
@@ -136,7 +130,7 @@ Não adicionar dependência runtime. Não alterar este `TASK.md`.
 
 ## Entrega
 
-1. Faça um único commit com a mensagem `feat: integra risco ao fluxo de execucao paper`.
+1. Faça um único commit com a mensagem `feat: liquida execucao paper no ledger`.
 2. Faça push em branch própria e abra PR para `main`.
-3. No PR, inclua resumo, testes e `Closes #6`.
+3. No PR, inclua resumo, testes e `Closes #8`.
 4. Não aprove o próprio trabalho e não altere o status desta tarefa.
