@@ -9,8 +9,9 @@ Experimento de trading autônomo multiagente, **exclusivamente em paper trading*
 
 ## O que existe hoje
 
-Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperBroker** e a
-primeira fatia de **M2 — Risk Manager determinístico**.
+Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperBroker**, a
+primeira fatia de **M2 — Risk Manager determinístico** e a fachada determinística que
+integra as duas.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -22,14 +23,16 @@ primeira fatia de **M2 — Risk Manager determinístico**.
 - `src/broker/` — interface `Broker`, modelo de custos e `PaperBroker` determinístico;
 - `src/risk/` — `RiskPolicy`, `RiskDecision` e o gate determinístico `evaluateRisk`,
   entre um `OrderIntent` validado e o `PaperBroker`;
+- `src/execution/` — `executePaperOrderWithRisk`, a fachada pura que obriga a sequência
+  `evaluateRisk → bloqueio OU PaperBroker.execute`;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
-multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, execução automática
-do broker após aprovação, métricas, persistência em arquivo, servidor ou banco de dados.
-O roadmap está em `docs/ROADMAP.md`.
+multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, aplicação automática
+de eventos ao ledger/portfolio, métricas, persistência em arquivo, servidor ou banco de
+dados. O roadmap está em `docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -191,6 +194,37 @@ preço de outros ativos da carteira, então não estima o patrimônio total do p
 O gate recebe a carteira de um único agente (nunca o `Portfolio` inteiro), então o
 isolamento entre agentes é estrutural: não há como uma avaliação ler ou alterar a carteira
 de outro agente.
+
+## Integração determinística risco → execução paper
+
+`src/execution/execute-paper-order-with-risk.ts` define `executePaperOrderWithRisk`, a
+fachada mínima e pura que torna explícita a sequência obrigatória:
+
+```text
+OrderIntent validado → evaluateRisk → bloqueio OU PaperBroker.execute
+```
+
+Ela recebe apenas dependências e dados já validados — `OrderIntent`, a carteira do mesmo
+agente, `RiskPolicy`, `ExecutionPolicy`, os instantes `evaluatedAt`/`occurredAt` e um
+`Broker` — e devolve uma união discriminada, imutável e estruturada:
+
+- **`RISK_REJECTED`** — o Risk Manager bloqueou a ordem; o broker não é chamado e nenhum
+  evento de broker existe. O `RiskDecision` rejeitado já é o registro estruturado do
+  bloqueio; esta fachada não inventa um evento de ledger para ele;
+- **`BROKER_EXECUTED`** — o Risk Manager aprovou a ordem e o `PaperBroker` foi chamado
+  exatamente uma vez com o mesmo intent, carteira, política de execução e instante
+  recebidos. O `ExecutionOutcome` devolvido é exatamente o que o `PaperBroker` calculou —
+  aprovação de risco **não** significa fill garantido: o `PaperBroker` ainda pode rejeitar
+  por caixa insuficiente, ausência de posição, quantidade residual ou custos que consomem
+  o preço/proceeds.
+
+Uma ordem rejeitada pelo Risk Manager jamais alcança o broker: `riskDecision.approved ===
+false` interrompe o fluxo antes de qualquer chamada de execução. Um broker cujo `kind` não
+seja exatamente `"paper"` é rejeitado fail-closed antes de qualquer avaliação ou execução —
+esta fachada não autoriza testnet, corretora ou broker ao vivo. Exceções inesperadas de
+`evaluateRisk` ou do `PaperBroker` não são capturadas nem reinterpretadas; propagam como
+vieram. A fachada é pura: não aplica evento ao ledger/portfolio, não redimensiona a ordem e
+não muta intent, carteira ou políticas.
 
 ## Documentação
 
