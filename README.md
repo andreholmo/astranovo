@@ -9,7 +9,8 @@ Experimento de trading autônomo multiagente, **exclusivamente em paper trading*
 
 ## O que existe hoje
 
-Milestones **M0 — Fundação e contratos** e **M1 — Carteira, ledger e PaperBroker**.
+Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperBroker** e a
+primeira fatia de **M2 — Risk Manager determinístico**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -19,12 +20,15 @@ Milestones **M0 — Fundação e contratos** e **M1 — Carteira, ledger e Paper
 - `src/ledger/` — eventos imutáveis com id determinístico e ledger append-only idempotente;
 - `src/portfolio/` — carteiras isoladas derivadas do ledger por replay;
 - `src/broker/` — interface `Broker`, modelo de custos e `PaperBroker` determinístico;
+- `src/risk/` — `RiskPolicy`, `RiskDecision` e o gate determinístico `evaluateRisk`,
+  entre um `OrderIntent` validado e o `PaperBroker`;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
-multiagente, Risk Manager, métricas, persistência em arquivo, servidor ou banco de dados.
+multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, execução automática
+do broker após aprovação, métricas, persistência em arquivo, servidor ou banco de dados.
 O roadmap está em `docs/ROADMAP.md`.
 
 ## Requisitos
@@ -138,6 +142,55 @@ e cada agente tem um ledger independente.
 
 Não há short selling, não há fill parcial (fill total ou rejeição) e não há transferência
 entre carteiras.
+
+## Risk Manager determinístico (primeira fatia)
+
+`src/risk/risk-manager.ts` define `evaluateRisk`, um gate pré-trade puro entre um
+`OrderIntent` já validado e o `PaperBroker`. Ele somente aprova ou rejeita: não executa o
+broker, não altera portfolio/ledger, não lê o relógio e não usa IA. O `RiskDecision`
+devolvido é imutável e traz `id` determinístico (hash sha256 do conteúdo canônico, mesmo
+esquema de `src/ledger/events.ts`), `orderId`, `cycleId`, `agentId`, `approved`, `codes`
+(motivos de rejeição, ordenados de forma estável) e `policyVersion`.
+
+### Política (`RiskPolicy`, `src/risk/policy.ts`)
+
+- `policyVersion` não vazia;
+- `allowedAssets` — allowlist de símbolos; vazia bloqueia qualquer ordem;
+- `maxOrderPositionBps` e `maxAssetExposureBps` — 0 a 10.000;
+- `maxOpenPositions` — inteiro não negativo;
+- `circuitBreaker` — booleano.
+
+Política inválida falha fechado no parse (`ContractValidationError`). Perda diária,
+drawdown, cooldown, liquidez e janela de trades ficam para fatias futuras de M2.
+
+### Regras e códigos
+
+| Código | Quando dispara |
+|---|---|
+| `CIRCUIT_BREAKER_ACTIVE` | `circuitBreaker` ligado; bloqueia BUY e SELL |
+| `ASSET_NOT_ALLOWED` | ativo fora de `allowedAssets`; bloqueia BUY e SELL |
+| `ORDER_SIZE_LIMIT_EXCEEDED` | `positionPct` da ordem, em bps, acima de `maxOrderPositionBps` |
+| `ASSET_EXPOSURE_LIMIT_EXCEEDED` | só BUY; exposição projetada ao ativo acima de `maxAssetExposureBps` |
+| `MAX_OPEN_POSITIONS_REACHED` | só BUY que abriria posição nova, com o limite já atingido |
+| `INVALID_RISK_INPUT` | entrada ausente, incompatível, não canônica ou impossível de avaliar |
+
+Quando mais de um código dispara, `codes` sempre os lista na mesma ordem (a da tabela
+acima), nunca na ordem em que as verificações rodaram. `INVALID_RISK_INPUT` é sempre o
+único código quando aparece — nenhuma outra regra pode ser avaliada com confiança se o
+agente da carteira diverge do agente da ordem, se a escala de um ativo já detido diverge
+da ordem, ou se o timestamp recebido não é um UTC ISO-8601 canônico. Um SELL nunca é
+bloqueado por exposição ou número de posições, pois reduz risco; continua sujeito ao
+circuit breaker e à allowlist. Esta fatia não redimensiona ordens: acima do limite, a
+ordem inteira é rejeitada.
+
+A exposição de um ativo é calculada apenas sobre o caixa somado à posição atual desse
+mesmo ativo, avaliada ao `referencePriceMicros` da própria ordem — esta fatia não recebe
+preço de outros ativos da carteira, então não estima o patrimônio total do portfolio. Essa
+é uma limitação documentada, não uma métrica de exposição de portfólio.
+
+O gate recebe a carteira de um único agente (nunca o `Portfolio` inteiro), então o
+isolamento entre agentes é estrutural: não há como uma avaliação ler ou alterar a carteira
+de outro agente.
 
 ## Documentação
 
