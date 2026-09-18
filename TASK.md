@@ -1,19 +1,19 @@
 # Tarefa atual
 
-- **ID:** TASK-006
-- **Milestone:** M2 — liquidação contábil determinística do paper trade
+- **ID:** TASK-007
+- **Milestone:** M3 — valoração determinística sem look-ahead
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `bf3349ffb99f49f1b5d8efe9464fbd27afc18e97`
+- **Base:** `main` após `d9c84f74a67cd1bbe870cc817be2b01c5c98ad5c`
 
 ## Objetivo
 
-Completar a menor fatia contábil do pipeline paper:
+Criar a menor base de métricas do replay: calcular um ponto imutável de patrimônio de uma carteira paper usando somente snapshots completos, em USD, que já estavam disponíveis no instante avaliado.
 
-`executePaperOrderWithRisk → evento do PaperBroker → append idempotente no ledger → carteira derivada`
+`Wallet + MarketSnapshot(s) disponíveis → EquityPoint auditável`
 
-A nova função deve receber o resultado já produzido por `executePaperOrderWithRisk`, a carteira imutável do mesmo agente e seu `AgentLedger`. Ela não executa risco nem broker novamente.
+Esta tarefa calcula apenas a valoração de um instante. Não calcula série temporal, P&L, drawdown, win rate ou benchmark.
 
 ## Leitura obrigatória
 
@@ -24,77 +24,89 @@ Sincronize `main` e leia integralmente:
 3. `docs/ARCHITECTURE.md`;
 4. `docs/DECISIONS.md`;
 5. `docs/ROADMAP.md`;
-6. `docs/coordination/CHATGPT_REVIEW_TASK_005.md`;
+6. `docs/coordination/CHATGPT_REVIEW_TASK_006.md`;
 7. `docs/coordination/CLAUDE_REPORT.md`;
 8. esta tarefa.
 
 ## Escopo exato
 
-Crie uma função pura pequena em `src/execution/`, por exemplo `settlePaperExecution`, com request/result explícitos.
+Crie um módulo pequeno em `src/metrics/`, por exemplo `valueWalletAt`.
 
 Entradas:
 
-- `ExecutePaperOrderWithRiskResult`;
-- `Wallet` imutável;
-- `AgentLedger` imutável.
+- uma `Wallet` imutável;
+- `valuedAt` canônico injetado pelo chamador;
+- snapshots de mercado usados para valorar as posições.
 
-Resultado: união discriminada, imutável e suficiente para auditoria:
+Saída imutável e estruturada, por exemplo `EquityPoint`, contendo no mínimo:
 
-1. **`RISK_REJECTED`** — devolve a mesma carteira e o mesmo ledger por referência; nenhum evento é criado ou anexado;
-2. **`BROKER_RECORDED`** — contém o resultado de execução original, o evento canônico armazenado, o novo ledger, a carteira resultante e `appended: boolean`.
+- `agentId`;
+- `valuedAt`;
+- `cashMicros`;
+- valor de cada posição em micros, com `asset`, quantidade/escala, `priceMicros`, `snapshotId` e `snapshotAvailableAt`;
+- `positionsValueMicros`;
+- `equityMicros`;
+- IDs dos snapshots efetivamente usados, em ordem determinística.
 
-Reutilize, sem duplicar regras:
+Reutilize:
 
-- `AgentLedger.append`;
-- `applyAppendResult`;
-- `ExecutePaperOrderWithRiskResult`;
-- `ExecutionOutcome`, `LedgerEvent` e `Wallet`.
+- `parseMarketSnapshot(snapshot, { notAfter: valuedAt })` para provar disponibilidade;
+- `microsFromUsdNumber` para converter preço;
+- `scaleFactor`, `mulDivFloor` e `addBounded`;
+- `MAX_MICROS`;
+- os contratos `Wallet`, `Position` e `MarketSnapshot`.
+
+Não use aritmética de dinheiro em `number`.
 
 ## Regras obrigatórias
 
-- Nunca chamar `evaluateRisk`, `Broker.execute` ou `PaperBroker.execute`.
-- Em `RISK_REJECTED`, não inventar evento de ledger e não alterar estado.
-- Em `BROKER_EXECUTED`, registrar exatamente `executionOutcome.event`.
-- Um evento novo deve ser anexado uma vez e aplicado à carteira uma vez.
-- Replay idêntico do mesmo `orderId` deve retornar `appended: false`, manter a carteira recebida por referência e não duplicar evento nem efeito contábil.
-- Mesmo `orderId` com conteúdo diferente deve preservar o fail-closed existente e lançar `LedgerConflictError`.
-- Rejeição produzida pelo PaperBroker deve entrar no ledger, mas manter a carteira inalterada por referência.
-- Validar estruturalmente que wallet e ledger pertencem ao mesmo agente antes de qualquer append.
-- O evento também deve pertencer ao mesmo agente; preserve o fail-closed existente para divergência.
-- Não reconstruir, clonar, corrigir ou reinterpretar eventos.
-- Não mutar resultado, carteira, ledger, evento ou coleções.
-- Mesmo input deve produzir resultado idêntico.
+- Aceitar somente snapshot `complete === true`.
+- Aceitar somente `quote === "USD"`.
+- Cada posição deve ter exatamente um snapshot do mesmo `asset`.
+- Falhar fechado se faltar preço de uma posição.
+- Falhar fechado diante de snapshots duplicados para o mesmo ativo; não escolher silenciosamente um deles.
+- Snapshots de ativos que a carteira não possui devem ser rejeitados, não ignorados.
+- `availableAt` deve ser menor ou igual a `valuedAt`; qualquer dado futuro deve ser rejeitado.
+- `valuedAt` e timestamps precisam permanecer canônicos.
+- Converter `snapshot.price` para micros pelo helper existente; precisão incompatível deve falhar fechada, nunca arredondar silenciosamente.
+- Valor de posição: `floor(quantityAtoms * priceMicros / 10^assetScale)`.
+- Somar valores com limites protegidos; overflow deve falhar fechado.
+- Carteira somente em caixa deve aceitar lista vazia e ter `equityMicros === cashMicros`.
+- A ordem da entrada não pode alterar o resultado: posições e IDs na saída devem ser ordenados por ativo.
+- Não alterar wallet, posições ou snapshots.
+- Mesmo input canônico deve produzir resultado idêntico.
 - Nenhum relógio, aleatoriedade, rede ou I/O.
-- Não adicionar persistência em arquivo nesta tarefa.
 
 ## Testes obrigatórios
 
-- `RISK_REJECTED`: zero eventos, mesmas referências de wallet e ledger;
-- BUY preenchida: evento anexado e caixa/posição atualizados uma vez;
-- SELL preenchida: evento anexado e caixa/posição atualizados uma vez;
-- rejeição do PaperBroker: evento anexado e wallet preservada por referência;
-- replay idêntico: `appended: false`, nenhum segundo evento, nenhum segundo efeito na wallet;
-- conflito do mesmo `orderId`: `LedgerConflictError`;
-- wallet e ledger de agentes diferentes: falha fechada antes de append;
-- evento de outro agente: falha fechada;
-- isolamento: liquidar agente A não altera ledger/carteira do agente B;
-- objetos de resultado e coleções próprias imutáveis;
+- carteira somente em caixa;
+- uma posição corretamente valorada;
+- múltiplas posições e soma correta;
+- arredondamento conservador por floor;
+- snapshots fornecidos em ordens diferentes produzem resultado idêntico;
+- snapshot disponível exatamente em `valuedAt` é aceito;
+- snapshot disponível depois de `valuedAt` é rejeitado;
+- snapshot incompleto é rejeitado;
+- quote diferente de USD é rejeitada;
+- snapshot ausente para posição é rejeitado;
+- snapshot duplicado para o mesmo ativo é rejeitado;
+- snapshot de ativo não possuído é rejeitado;
+- preço com precisão não representável em micros falha fechado;
+- overflow falha fechado;
+- objetos e coleções próprias retornados são imutáveis;
 - entradas não sofrem mutação;
+- isolamento entre agentes;
 - determinismo;
-- testes offline e determinísticos.
-
-Use o `PaperBroker` real para formar outcomes principais. Test doubles somente quando estritamente necessários e apenas nos testes.
+- testes offline.
 
 ## Documentação
 
-Atualize o README apenas no necessário para explicar:
+Atualize o README apenas no necessário para explicar que:
 
-- somente eventos do PaperBroker são registrados por esta função;
-- o ledger append-only é a fonte de verdade;
-- a carteira é derivada;
-- replay idêntico não duplica fill nem efeito;
-- rejeição de risco não cria evento contábil;
-- rejeição do PaperBroker é auditada no ledger, sem alterar saldo/posição.
+- patrimônio é caixa mais posições marcadas a mercado;
+- a valoração usa somente snapshots completos disponíveis até `valuedAt`;
+- dados futuros, ausentes, duplicados ou incompatíveis falham fechados;
+- esta fatia ainda não calcula P&L, drawdown, win rate ou benchmarks.
 
 Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limitações e decisões técnicas.
 
@@ -102,35 +114,33 @@ Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limi
 
 Não implementar:
 
-- Astra/LLM, prompts, agentes ou coordenação multiagente;
-- dados de mercado ou rede;
-- métricas, replay histórico completo ou benchmarks;
+- série temporal, P&L, drawdown, win rate ou benchmarks;
+- replay de ciclos completo;
+- seleção automática do snapshot mais recente;
+- provider de mercado ou rede;
 - persistência JSONL/SQLite/CSV;
+- Astra/LLM, prompts ou agentes;
 - novas regras de risco;
-- retry ou fila;
 - dashboard, servidor ou cloud;
 - wallet externa, chave privada, blockchain;
-- testnet, corretora, exchange, credenciais ou dinheiro real;
-- qualquer broker além do PaperBroker existente.
+- testnet, corretora, exchange, credenciais ou dinheiro real.
 
 Não adicionar dependência runtime. Não alterar este `TASK.md`.
 
 ## Critérios de aceite
 
-- caminho contábil PaperBroker → ledger → wallet comprovado;
-- idempotência impede duplicação de fill e de efeito na carteira;
-- ledger continua como fonte de verdade append-only;
-- rejeição de risco não vira evento contábil;
-- isolamento por agente e fail-closed preservados;
-- nenhuma regra de risco ou broker duplicada;
-- tipos estritos e comportamento determinístico;
+- patrimônio calculado integralmente em fixed-point;
+- evidência de preço auditável na saída;
+- anti-look-ahead comprovado por testes;
+- ausência/ambiguidade de preço falha fechada;
+- tipos estritos, imutabilidade e determinismo;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
 - nenhuma rota financeira real existe.
 
 ## Entrega
 
-1. Faça um único commit com a mensagem `feat: liquida execucao paper no ledger`.
+1. Faça um único commit com a mensagem `feat: calcula patrimonio sem look-ahead`.
 2. Faça push em branch própria e abra PR para `main`.
-3. No PR, inclua resumo, testes e `Closes #8`.
+3. No PR, inclua resumo, testes e `Closes #10`.
 4. Não aprove o próprio trabalho e não altere o status desta tarefa.
