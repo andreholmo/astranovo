@@ -1,170 +1,142 @@
 # Tarefa atual
 
-- **ID:** TASK-003
-- **Milestone:** M1 — Carteira, ledger e PaperBroker
-- **Status:** APPROVED — AUTOMATION_SETUP_REQUIRED
+- **ID:** TASK-004
+- **Milestone:** M2 — Risk Manager determinístico, primeira fatia
+- **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Commit entregue:** `ddcd7684c08689502fd70e29070d1e93d1ec6a3e`
-- **Revisão:** `docs/coordination/CHATGPT_REVIEW_TASK_003.md`
+- **Base:** `main` após `97a16ad4bb7fa10823d33731bebb0add01a2408b`
 
 ## Objetivo
 
-Implementar o núcleo contábil determinístico do paper trading para N agentes: carteiras isoladas, ordens internas, fills simulados com custos e ledger append-only em memória. Ainda não conectar Astra, mercado ao vivo, Risk Manager completo ou persistência em disco.
+Implementar o primeiro gate determinístico de risco pré-trade entre um `OrderIntent` válido e o `PaperBroker`. Nesta tarefa o Risk Manager somente aprova ou rejeita; ele não executa ordens, não altera carteira e não usa IA.
 
 ## Leitura obrigatória
 
-Sincronize `main` e leia `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_002.md` e esta tarefa.
+Sincronize `main` e leia:
 
-## Decisões técnicas desta milestone
-
-- Não usar ponto flutuante como fonte contábil.
-- Valores monetários internos: inteiros `bigint` em micros de USD (US$0,000001).
-- Quantidades de ativo: inteiros `bigint` em unidades atômicas, com escala configurada por ativo; fixture inicial usa 8 casas.
-- Fronteiras JSON representam `bigint` como strings decimais canônicas.
-- Arredondamento financeiro: para baixo quando calcula quantidade comprável; fees e custos arredondados para cima, favorecendo uma simulação conservadora.
-- Sem short selling.
-- Apenas fills totais ou rejeição nesta milestone.
-- Ledger imutável em memória é a fonte de verdade; snapshots de carteira são derivados por replay.
-- Cada agente inicia com sua própria verba configurada; nenhuma transferência entre carteiras.
-
-Documente e centralize conversões/rounding. Não espalhe fórmulas pelos módulos.
+1. `CLAUDE.md`;
+2. `docs/PROJECT_CONTEXT.md`;
+3. `docs/ARCHITECTURE.md`;
+4. `docs/DECISIONS.md`;
+5. `docs/ROADMAP.md`;
+6. `docs/coordination/CHATGPT_REVIEW_TASK_003.md`;
+7. `docs/coordination/CHATGPT_REVIEW_AUTOMATION_002.md`;
+8. esta tarefa.
 
 ## Escopo exato
 
-Crie módulos mínimos em:
+Crie uma implementação mínima em `src/risk/` e testes correspondentes. Reutilize os contratos fixed-point, ledger e portfolio existentes; não duplique conversões monetárias.
 
-- `src/money/`: tipos fixed-point, conversões seguras e operações;
-- `src/portfolio/`: estado derivado e replay do ledger;
-- `src/ledger/`: eventos imutáveis e idempotência;
-- `src/broker/`: interface `Broker` e implementação `PaperBroker`.
+O componente deve receber:
 
-Atualize os contratos existentes somente quando necessário para integrar esses módulos.
+- `OrderIntent` já validado;
+- snapshot imutável da carteira do agente;
+- política de risco validada;
+- contexto determinístico mínimo necessário à avaliação.
 
-## Contratos mínimos
+E deve devolver um `RiskDecision` imutável e estruturado, sem executar o broker.
 
-### OrderIntent
+## Política mínima configurável
 
-Deve conter:
+Implemente somente:
+
+- `policyVersion` não vazia;
+- allowlist de ativos;
+- `maxOrderPositionBps` entre 0 e 10.000;
+- `maxAssetExposureBps` entre 0 e 10.000;
+- `maxOpenPositions` inteiro não negativo;
+- `circuitBreaker` booleano.
+
+Política inválida deve falhar fechado. Não implemente perda diária, drawdown, cooldown, liquidez ou janela de trades nesta tarefa.
+
+## Decisão e códigos estáveis
+
+`RiskDecision` deve registrar ao menos:
 
 - `schemaVersion: 1`;
+- ID determinístico;
 - `orderId`, `cycleId`, `agentId`;
-- `side: BUY | SELL`;
-- `asset`, `quote`;
-- `positionPct` como fração validada;
-- `referencePriceMicros`;
-- `assetScale`;
-- `createdAt`.
+- `approved`;
+- códigos de regra estáveis e ordenados;
+- `policyVersion`;
+- timestamp recebido pelo chamador, sem leitura do relógio global.
 
-Uma proposta HOLD não vira OrderIntent.
+Inclua códigos estáveis equivalentes a:
 
-### ExecutionPolicy
+- `CIRCUIT_BREAKER_ACTIVE`;
+- `ASSET_NOT_ALLOWED`;
+- `ORDER_SIZE_LIMIT_EXCEEDED`;
+- `ASSET_EXPOSURE_LIMIT_EXCEEDED`;
+- `MAX_OPEN_POSITIONS_REACHED`;
+- `INVALID_RISK_INPUT`.
 
-- `feeBps`;
-- `spreadBps`;
-- `slippageBps`;
-- limites finitos, inteiros, não negativos e configuráveis.
+Nomes podem ser ajustados apenas se permanecerem claros, documentados e testados.
 
-### FillEvent / RejectionEvent
+## Regras de avaliação
 
-Fill precisa registrar ao menos orderId, agentId, side, quantidade atômica, preço de referência, preço final, fee, slippage/spread aplicados, total em micros, timestamp e policyVersion.
+- O circuit breaker bloqueia qualquer nova ordem.
+- Ativo fora da allowlist é bloqueado.
+- Ordem acima do tamanho máximo é bloqueada; não redimensionar nesta tarefa.
+- BUY que criaria nova posição quando o limite já foi atingido é bloqueado.
+- BUY que excederia a exposição máxima do ativo é bloqueado.
+- SELL de posição existente não deve ser bloqueado por limite de exposição ou quantidade de posições, pois reduz risco; continua sujeito ao circuit breaker e à allowlist.
+- Qualquer dado ausente, incompatível, negativo, não canônico ou impossível de avaliar resulta em rejeição fail-closed.
+- Avaliar risco não altera `OrderIntent`, portfolio, ledger ou qualquer estado compartilhado.
+- A avaliação de um agente não consulta nem altera carteira de outro agente.
+- Mesmo input canônico, política e timestamp produzem decisão/ID idênticos.
 
-Rejeição precisa registrar código estável e não alterar carteira.
-
-## Comportamento do PaperBroker
-
-### BUY
-
-- usar `positionPct` sobre o caixa disponível;
-- incorporar spread, slippage e fee;
-- nunca produzir caixa negativo;
-- reduzir deterministicamente a quantidade para o máximo pagável;
-- rejeitar quando a quantidade resultante for zero.
-
-### SELL
-
-- usar `positionPct` sobre a posição atual;
-- nunca vender mais que a posição;
-- rejeitar ativo inexistente ou quantidade zero;
-- aplicar custos de maneira conservadora;
-- nunca gerar caixa negativo.
-
-### HOLD
-
-- não chega ao broker;
-- nenhuma ordem ou fill é criado.
-
-## Ledger e idempotência
-
-- eventos possuem `eventId` determinístico;
-- reprocessar o mesmo `orderId` com conteúdo idêntico devolve o mesmo resultado sem novo evento;
-- mesmo `orderId` com conteúdo diferente é rejeitado como conflito;
-- replay dos mesmos eventos produz exatamente o mesmo portfolio;
-- arrays e objetos retornados devem ser imutáveis;
-- ledger de um agente não altera outro agente.
-
-Não implementar arquivo JSONL ainda; o adaptador persistente virá em tarefa separada.
-
-## Inicialização
-
-Crie uma função que receba `AgentsConfig` validado e produza as carteiras iniciais dos agentes habilitados usando `initialBudgetUsd`. Os seis agentes padrão devem resultar em seis carteiras independentes de US$100 cada.
+Use aritmética inteira/`bigint` e as regras de arredondamento existentes. Nenhum float pode ser fonte de verdade contábil.
 
 ## Testes obrigatórios
 
-- conversões fixed-point válidas e rejeição de overflow/formato inválido;
-- arredondamento documentado nas fronteiras;
-- seis carteiras isoladas com US$100;
-- configuração com sétimo agente funciona;
-- BUY normal com fee/spread/slippage;
-- BUY de 100% nunca deixa caixa negativo;
-- BUY pequeno demais é rejeitado;
-- SELL parcial e total;
-- SELL sem posição e oversell são rejeitados;
-- custos reduzem o resultado versus execução sem custos;
-- mesmo orderId idêntico não duplica fill;
-- mesmo orderId divergente gera conflito;
-- replay reconstrói exatamente caixa e posições;
-- falha/rejeição não modifica portfolio;
-- operação de um agente não modifica os demais;
-- nenhum NaN/Infinity, número negativo ou bigint não canônico atravessa contratos;
+- política válida e rejeição de cada campo inválido;
+- circuit breaker;
+- ativo permitido e não permitido;
+- limite de tamanho exatamente na fronteira e acima dela;
+- exposição exatamente na fronteira e acima dela;
+- nova posição com limite livre e limite atingido;
+- BUY em posição já existente não conta como nova posição;
+- SELL que reduz risco não é bloqueado por exposição/quantidade de posições;
+- input inconsistente falha fechado;
+- múltiplos motivos de rejeição têm ordem determinística;
+- decisão e coleções retornadas são imutáveis;
+- nenhuma mutação no portfolio/ledger;
+- isolamento entre agentes;
+- IDs determinísticos;
 - testes offline e determinísticos.
 
-Use fixtures pequenas cujos resultados possam ser conferidos manualmente.
-
-## Restrições
+## Fora do escopo
 
 Não implementar:
 
-- chamada Astra/LLM;
+- chamada Astra/LLM ou prompts;
 - coleta de mercado;
-- prompts/agentes reais;
-- coordenador multiagente;
-- Risk Manager completo;
-- métricas de performance;
-- JSONL/SQLite;
-- servidor/dashboard;
-- testnet, wallet, exchange ou dinheiro real.
+- execução automática do broker após aprovação;
+- persistência em disco;
+- métricas, replay histórico ou benchmarks;
+- perda diária, drawdown, cooldown, liquidez ou slippage adicional;
+- dashboard, servidor ou cloud;
+- testnet, wallet, corretora, exchange, credenciais ou dinheiro real.
 
-Não alterar `TASK.md`. Não adicionar dependência runtime sem necessidade comprovada.
+Não adicionar dependência runtime sem necessidade comprovada. Não alterar este `TASK.md`.
 
 ## Critérios de aceite
 
+- somente a primeira fatia do Risk Manager e documentação diretamente relacionada;
+- validação runtime e tipos estritos;
+- comportamento fail-closed;
+- regras e códigos documentados;
+- nenhum estado financeiro é alterado pela avaliação;
 - `npm ci`, typecheck, build e testes passam;
-- CI continua verde em Node 20 e 22;
-- contabilidade usa fixed-point/`bigint`, sem floats como fonte de verdade;
-- invariantes de caixa e posição são testadas;
-- ledger é idempotente e replayável;
-- carteiras são isoladas e extensíveis para N agentes;
-- nenhuma rota financeira real existe;
-- documentação explica fórmulas e arredondamentos.
+- CI verde em Node.js 20 e 22;
+- nenhuma rota financeira real existe.
 
 ## Entrega
 
-1. Atualize README e `docs/coordination/CLAUDE_REPORT.md`.
-2. Faça um único commit com `feat: implementa carteira e paper broker deterministico`.
-3. Push para `origin main`.
-4. Não altere o status da tarefa nem aprove o próprio trabalho.
-
-## Bloqueio antes da próxima tarefa
-
-Não publicar nem executar TASK-004 manualmente. O próximo passo é instalar e validar o Claude Code GitHub App/Action e o fluxo por Pull Request. O desenvolvimento do trader só continua depois que o ciclo autônomo estiver operacional.
+1. Atualize `README.md` apenas no necessário.
+2. Atualize `docs/coordination/CLAUDE_REPORT.md`.
+3. Faça um único commit com a mensagem `feat: implementa gate deterministico de risco`.
+4. Faça push em branch própria e abra PR para `main`.
+5. No PR, inclua resumo, testes e `Closes #4`.
+6. Não aprove o próprio trabalho e não altere o status desta tarefa.
