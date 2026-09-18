@@ -10,8 +10,9 @@ Experimento de trading autônomo multiagente, **exclusivamente em paper trading*
 ## O que existe hoje
 
 Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperBroker**, a
-primeira fatia de **M2 — Risk Manager determinístico** e a fachada determinística que
-integra as duas.
+primeira fatia de **M2 — Risk Manager determinístico**, a fachada determinística que
+integra as duas e a liquidação contábil determinística do resultado dessa fachada no
+ledger.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -24,15 +25,15 @@ integra as duas.
 - `src/risk/` — `RiskPolicy`, `RiskDecision` e o gate determinístico `evaluateRisk`,
   entre um `OrderIntent` validado e o `PaperBroker`;
 - `src/execution/` — `executePaperOrderWithRisk`, a fachada pura que obriga a sequência
-  `evaluateRisk → bloqueio OU PaperBroker.execute`;
+  `evaluateRisk → bloqueio OU PaperBroker.execute`, e `settlePaperExecution`, que registra
+  o evento resultante no ledger e deriva a carteira;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
-multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, aplicação automática
-de eventos ao ledger/portfolio, métricas, persistência em arquivo, servidor ou banco de
-dados. O roadmap está em `docs/ROADMAP.md`.
+multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, métricas,
+persistência em arquivo, servidor ou banco de dados. O roadmap está em `docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -225,6 +226,42 @@ esta fachada não autoriza testnet, corretora ou broker ao vivo. Exceções ines
 `evaluateRisk` ou do `PaperBroker` não são capturadas nem reinterpretadas; propagam como
 vieram. A fachada é pura: não aplica evento ao ledger/portfolio, não redimensiona a ordem e
 não muta intent, carteira ou políticas.
+
+## Liquidação contábil da execução paper
+
+`src/execution/settle-paper-execution.ts` define `settlePaperExecution`, a menor fatia
+contábil do pipeline paper:
+
+```text
+executePaperOrderWithRisk → evento do PaperBroker → append idempotente no ledger → carteira derivada
+```
+
+Ela recebe o resultado já produzido por `executePaperOrderWithRisk`, a carteira imutável
+do mesmo agente e seu `AgentLedger` — nunca chama `evaluateRisk` ou `Broker.execute` de
+novo — e reaproveita integralmente `AgentLedger.append` e `applyAppendResult` para aplicar
+exatamente as regras já existentes de idempotência e de invariantes de carteira:
+
+- **`RISK_REJECTED`** — nenhum evento é criado ou anexado; a mesma carteira e o mesmo
+  ledger recebidos são devolvidos por referência, sem qualquer registro contábil de uma
+  rejeição de risco;
+- **`BROKER_RECORDED`** — somente eventos produzidos pelo `PaperBroker` são registrados:
+  exatamente `executionOutcome.event` é anexado ao ledger append-only, que continua sendo a
+  fonte de verdade. A carteira devolvida é a carteira derivada desse append, com
+  `appended: boolean` informando se o evento era novo;
+- replay idêntico do mesmo `orderId` não duplica fill nem efeito contábil: devolve
+  `appended: false`, o mesmo evento e a mesma carteira por referência;
+- mesmo `orderId` com conteúdo diferente preserva o fail-closed existente do ledger e lança
+  `LedgerConflictError`;
+- uma rejeição produzida pelo próprio `PaperBroker` é auditada no ledger (para registrar que
+  a ordem foi tentada e por que falhou), mas não altera saldo/posição: `applyAppendResult`
+  nunca move caixa para um evento de rejeição, então a carteira devolvida é a mesma
+  referência recebida;
+- a carteira e o ledger recebidos precisam pertencer ao mesmo agente — validado
+  estruturalmente antes de qualquer append; um evento que pertença a um agente diferente do
+  ledger continua fail-closed via `LedgerAgentMismatchError`, sem duplicar essa checagem.
+
+Pura e determinística: não lê o relógio, não usa aleatoriedade, não faz I/O e não muta
+nenhuma entrada. Nenhuma persistência em arquivo é adicionada nesta fatia.
 
 ## Documentação
 

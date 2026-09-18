@@ -393,3 +393,174 @@ Nenhum bloqueio.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-006 — Liquidação contábil determinística do paper trade (M2)
+
+- **ID da tarefa:** TASK-006
+- **Milestone:** M2 — liquidação contábil determinística do paper trade
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-18
+
+### Resumo da entrega
+
+Menor fatia contábil do pipeline paper: `executePaperOrderWithRisk → evento do
+PaperBroker → append idempotente no ledger → carteira derivada`. `settlePaperExecution`
+recebe o `ExecutePaperOrderWithRiskResult` já produzido, a carteira imutável do mesmo
+agente e seu `AgentLedger`, e aplica exatamente a contabilidade que esse resultado implica
+— nunca chama `evaluateRisk`, `Broker.execute` ou `PaperBroker.execute` de novo. Reutiliza
+integralmente `AgentLedger.append` e `applyAppendResult` de `src/ledger/ledger.ts` e
+`src/portfolio/portfolio.ts`; nenhuma regra de idempotência ou de invariante de carteira foi
+duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`,
+`docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`,
+`docs/coordination/CHATGPT_REVIEW_TASK_005.md`, `docs/coordination/CLAUDE_REPORT.md` e
+`TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/execution/settle-paper-execution.ts` | criado — `settlePaperExecution`, `SettlePaperExecutionRequest`, `SettlePaperExecutionResult` |
+| `tests/settle-paper-execution.test.ts` | criado |
+| `README.md` | atualizado (seção "Liquidação contábil da execução paper") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design de `settlePaperExecution`
+
+Recebe `{ executionResult, wallet, ledger }` e devolve uma união discriminada, imutável e
+congelada:
+
+1. **`RISK_REJECTED`** — quando `executionResult.status === "RISK_REJECTED"`: nenhum evento
+   é criado ou anexado; a mesma instância de `wallet` e a mesma instância de `ledger`
+   recebidas são devolvidas por referência. Uma rejeição de risco nunca vira evento
+   contábil.
+2. **`BROKER_RECORDED`** — quando o Risk Manager aprovou e o `PaperBroker` produziu um
+   `ExecutionOutcome`: anexa exatamente `executionOutcome.event` (fill **ou** rejeição do
+   broker) ao `AgentLedger` recebido via `ledger.append`, deriva a carteira resultante via
+   `applyAppendResult`, e devolve o `executionResult` original, o evento canônico
+   armazenado, o novo ledger, a carteira resultante e `appended: boolean`.
+
+Validação estrutural antes de qualquer append: `wallet.agentId` deve ser igual a
+`ledger.agentId`, ou a função lança `Error` de imediato — na mesma convenção de erro puro já
+usada em `PaperBroker.execute` e `executePaperOrderWithRisk` para preconditions de
+configuração do chamador, não de dado de negócio. A divergência entre o agente do **evento**
+e o agente do **ledger** não é checada aqui de novo: `AgentLedger.append` já lança
+`LedgerAgentMismatchError` fail-closed para esse caso, e reimplementar a checagem seria
+duplicar uma regra existente.
+
+Toda a semântica de idempotência e de efeito contábil vem, sem alteração, dos módulos
+reutilizados:
+
+- **replay idêntico** do mesmo `orderId` — `ledger.append` reconhece o evento já registrado,
+  devolve `appended: false`, a mesma instância de ledger e o mesmo evento por referência;
+  `applyAppendResult` não aplica o evento de novo, então a carteira devolvida é exatamente a
+  instância recebida — nenhum segundo efeito contábil;
+- **conflito** do mesmo `orderId` com conteúdo diferente — `ledger.append` lança
+  `LedgerConflictError`, propagada sem captura;
+- **rejeição do PaperBroker** — é anexada ao ledger como qualquer outro evento (para que a
+  tentativa fique auditável), mas `applyEvent`/`applyAppendResult` nunca movem caixa ou
+  posição para um `RejectionEvent`, então a carteira devolvida é a mesma referência recebida,
+  mesmo quando `appended` é `true` nesse primeiro append.
+
+### Testes cobertos em `tests/settle-paper-execution.test.ts`
+
+`RISK_REJECTED` sem eventos e com wallet/ledger preservados por referência; BUY preenchida
+com caixa e posição atualizados uma vez; SELL preenchida com caixa e posição atualizados uma
+vez; rejeição do `PaperBroker` anexada ao ledger com wallet preservada por referência; replay
+idêntico com `appended: false`, mesmo evento e mesma carteira por referência; conflito do
+mesmo `orderId` com conteúdo diferente lançando `LedgerConflictError`; wallet e ledger de
+agentes diferentes falhando fechado antes de qualquer append; evento pertencente a outro
+agente falhando fechado via `LedgerAgentMismatchError` do próprio ledger; isolamento entre
+dois agentes; congelamento do resultado, do ledger, da carteira e do evento; ausência de
+mutação do `executionResult`, da carteira e do ledger recebidos; determinismo do resultado
+completo para o mesmo input canônico; uso independente de `evaluatedAt`/`occurredAt` através
+do evento liquidado. Os cenários principais (BUY, SELL, rejeição do broker) usam o
+`PaperBroker` real via `executePaperOrderWithRisk`; um evento com `agentId` de outro agente é
+construído manualmente com `createFillEvent`, porque esse cenário de dado inconsistente não
+pode ser produzido por um fluxo real e válido.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **225 testes, 225 passaram, 0 falharam** (211 preexistentes + 14 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio (todo
+instante é injetado pelo chamador em cada teste), nenhum uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **Nome do resultado `BROKER_RECORDED`, não `BROKER_EXECUTED`.** `TASK.md` usa os dois
+   nomes em seções diferentes: a definição formal da união discriminada (`## Escopo exato`)
+   nomeia o segundo membro `BROKER_RECORDED`, enquanto uma frase isolada em `## Regras
+   obrigatórias` ("Em `BROKER_EXECUTED`, registrar exatamente `executionOutcome.event`")
+   reaproveita o nome já usado pela TASK-005 para a variante análoga de
+   `ExecutePaperOrderWithRiskResult`. Interpretei isso como uma inconsistência de redação
+   entre as duas seções do mesmo documento, não uma ambiguidade material: as duas frases
+   descrevem inequivocamente o mesmo ramo (o caso em que o broker produziu um evento).
+   Adotei `BROKER_RECORDED`, o nome do cabeçalho que define formalmente o tipo, porque
+   `settlePaperExecution` e `executePaperOrderWithRisk` são funções e resultados distintos —
+   reusar `BROKER_EXECUTED` para os dois tipos diferentes teria sido mais confuso, não menos.
+   Se o arquiteto pretendia `BROKER_EXECUTED` aqui também, é um `rename` de um único
+   identificador de tipo, sem qualquer mudança de comportamento.
+2. **A validação estrutural de agente (`wallet.agentId === ledger.agentId`) roda
+   incondicionalmente, mesmo em `RISK_REJECTED`.** A tarefa pede a checagem "antes de
+   qualquer append", o que tecnicamente só se aplica ao ramo `BROKER_RECORDED`. Preferi
+   validar sempre porque é uma invariante estrutural do próprio `SettlePaperExecutionRequest`
+   — um chamador que passa carteira e ledger de agentes diferentes está com um bug de
+   fiação, independentemente do resultado de risco que está liquidando — e falhar fechado
+   cedo é mais seguro do que só falhar quando o caminho de código específico é exercitado.
+3. **Erro de agente divergente é um `Error` simples, não uma subclasse dedicada.** Segue a
+   mesma convenção já usada em `PaperBroker.execute` (agente do intent divergente do agente
+   da carteira) e em `executePaperOrderWithRisk` (broker de `kind` incorreto): um erro de
+   configuração do chamador, não uma decisão de negócio sobre a ordem, então não é uma
+   terceira variante do resultado estruturado.
+4. **O evento de uma rejeição do `PaperBroker` é anexado ao ledger mesmo não alterando a
+   carteira.** A tarefa exige "rejeição do PaperBroker deve entrar no ledger, mas manter a
+   carteira inalterada por referência" — isso já é exatamente o que `applyEvent` faz para
+   `RejectionEvent` (devolve a mesma instância de carteira), então nenhuma ramificação
+   adicional foi necessária em `settlePaperExecution`: o mesmo caminho de código que
+   trata um fill trata uma rejeição do broker.
+5. **Nenhuma nova classe de erro foi criada.** `LedgerConflictError` e
+   `LedgerAgentMismatchError`, já existentes em `src/ledger/ledger.ts`, cobrem os dois casos
+   de fail-closed exigidos pela tarefa (conflito de `orderId` e evento de agente
+   divergente); criar um alias ou uma subclasse local duplicaria uma regra existente sem
+   necessidade.
+
+### Limitações conhecidas
+
+- `settlePaperExecution` opera sobre o `AgentLedger` de um único agente, não sobre o
+  `Ledger` agregando todos os agentes; um chamador que precise atualizar o `Ledger`
+  multiagente precisa extrair e recompor o `AgentLedger` do agente correspondente — essa
+  orquestração fica fora do escopo desta fatia.
+- Não há persistência em arquivo: o ledger e a carteira liquidados continuam em memória,
+  exatamente como nas milestones anteriores.
+- Nenhum pipeline automático chama `settlePaperExecution` após
+  `executePaperOrderWithRisk`; essa fiação de ciclo completo é trabalho futuro.
+
+### Decisões pendentes para André / revisor
+
+1. **Nome `BROKER_RECORDED` vs. `BROKER_EXECUTED`** — decisão técnica nº 1 acima; peço
+   confirmação explícita do arquiteto sobre qual nome é o pretendido, já que `TASK.md` usa
+   os dois.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. A única inconsistência textual encontrada em `TASK.md` (decisão técnica
+nº 1) foi resolvida com a leitura mais literal da definição formal do tipo, e registrada
+acima para revisão — não interrompi a execução da tarefa por ela, por não afetar
+comportamento, testes ou critérios de aceite.
+
+### Commit
+
+- **Mensagem:** `feat: liquida execucao paper no ledger`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
