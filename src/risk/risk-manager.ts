@@ -69,10 +69,20 @@ function isCanonicalTimestamp(value: unknown): value is string {
   return Number.isFinite(epoch) && new Date(epoch).toISOString() === value;
 }
 
+/** Value of any currently-held position in `intent.asset`, priced at `intent.referencePriceMicros`. */
+function heldValueMicros(wallet: Wallet, intent: OrderIntent): bigint {
+  const held = positionOf(wallet, intent.asset);
+  return held === undefined
+    ? 0n
+    : mulDivFloor(held.quantityAtoms, intent.referencePriceMicros, scaleFactor(intent.assetScale));
+}
+
 /**
  * Whether this request is even admissible to evaluate: the wallet must
  * belong to the same agent as the intent, a held position's scale must agree
- * with the intent's, and the caller-supplied instant must be canonical.
+ * with the intent's, the caller-supplied instant must be canonical, and — for
+ * a BUY — the cash-plus-current-position exposure baseline must be nonzero,
+ * since `projectedValue / equity` is undefined when that baseline is zero.
  * Anything else fails closed with `INVALID_RISK_INPUT` before any rule runs,
  * because no rule below can be trusted once these basics disagree.
  */
@@ -82,6 +92,7 @@ function hasEvaluableInput(request: RiskRequest): boolean {
   if (!isCanonicalTimestamp(evaluatedAt)) return false;
   const held = positionOf(wallet, intent.asset);
   if (held !== undefined && held.assetScale !== intent.assetScale) return false;
+  if (intent.side === "BUY" && wallet.cashMicros + heldValueMicros(wallet, intent) === 0n) return false;
   return true;
 }
 
@@ -94,18 +105,15 @@ function orderSizeBps(intent: OrderIntent): bigint {
 /**
  * Projected exposure to `intent.asset` after a BUY, in basis points of the
  * cash-plus-current-position baseline described in the module docstring.
+ * Only ever called for a BUY that already passed {@link hasEvaluableInput},
+ * which guarantees that baseline is nonzero.
  */
 function projectedAssetExposureBps(wallet: Wallet, intent: OrderIntent): bigint {
-  const held = positionOf(wallet, intent.asset);
-  const heldValueMicros =
-    held === undefined
-      ? 0n
-      : mulDivFloor(held.quantityAtoms, intent.referencePriceMicros, scaleFactor(intent.assetScale));
+  const heldMicros = heldValueMicros(wallet, intent);
   const fractionMicros = fractionToMicros(intent.positionPct, "OrderIntent", "positionPct");
   const addedMicros = mulDivFloor(wallet.cashMicros, fractionMicros, MICROS_PER_UNIT);
-  const projectedValueMicros = heldValueMicros + addedMicros;
-  const equityMicros = wallet.cashMicros + heldValueMicros;
-  if (equityMicros === 0n) return 0n;
+  const projectedValueMicros = heldMicros + addedMicros;
+  const equityMicros = wallet.cashMicros + heldMicros;
   return mulDivCeil(projectedValueMicros, BPS_DENOMINATOR, equityMicros);
 }
 

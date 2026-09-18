@@ -328,6 +328,17 @@ describe("fail-closed on inconsistent input", () => {
     assert.equal(decision.approved, false);
     assert.deepEqual(decision.codes, ["INVALID_RISK_INPUT"]);
   });
+
+  it("rejects a BUY from a wallet with zero cash and no position, since exposure is undefined", () => {
+    const decision = evaluateRisk({
+      intent: intent(),
+      wallet: createWallet("trend-following", 0n),
+      policy: policy(),
+      evaluatedAt: AT
+    });
+    assert.equal(decision.approved, false);
+    assert.deepEqual(decision.codes, ["INVALID_RISK_INPUT"]);
+  });
 });
 
 describe("determinism and immutability", () => {
