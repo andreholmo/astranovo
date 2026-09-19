@@ -2572,3 +2572,170 @@ possível ou necessária.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-020 — Resultado realizado de um round trip paper fechado (M3)
+
+- **ID da tarefa:** TASK-020
+- **Milestone:** M3 — resultado realizado de um round trip paper
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Menor primitiva auditável de P&L realizado do replay: `summarizeClosedRoundTrip` recebe
+exatamente um `FillEvent` de abertura BUY e um `FillEvent` de fechamento SELL da mesma
+quantidade, ativo, quote e agente, e devolve um `ClosedRoundTripResult` imutável com o
+custo realizado, a receita líquida, a direção (`WIN | LOSS | BREAK_EVEN`) e a magnitude
+absoluta exata do resultado, calculados exclusivamente a partir de `totalMicros` de cada
+fill. Não agrega múltiplos trades, não implementa FIFO/LIFO, não trata posição parcial ou
+short, e não executa ordem, broker, risco ou replay. Reutiliza integralmente
+`subtractChecked`, `parseAssetScale`, `MAX_MICROS` e `MAX_ATOMS` de
+`src/money/fixed-point.ts` para toda validação e comparação monetária; nenhuma fórmula é
+duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_019.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/ledger/events.ts`,
+`src/metrics/summarize-execution-costs.ts`, `src/money/fixed-point.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/metrics/summarize-closed-round-trip.ts` | criado — `summarizeClosedRoundTrip`, `ClosedRoundTripResult`, `ClosedRoundTripDirection` |
+| `tests/summarize-closed-round-trip.test.ts` | criado |
+| `README.md` | atualizado (seção "Resultado realizado de um round trip paper fechado") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design de `summarizeClosedRoundTrip`
+
+Recebe `(buyFill: FillEvent, sellFill: FillEvent)`, ambos tipados, mas revalida
+defensivamente todo campo do qual depende — o mesmo padrão já usado em
+`summarizeExecutionCosts` e nos comparadores de benchmark, porque nada em tempo de
+compilação impede um chamador de construir um `FillEvent` à mão com um campo forjado, como
+os próprios testes fazem para exercitar cada caminho fail-closed. A validação roda nesta
+ordem, antes de qualquer cálculo:
+
+1. `type` de cada fill deve ser `"FILL"`;
+2. `buyFill.side` deve ser `"BUY"` e `sellFill.side` deve ser `"SELL"` — lado invertido
+   falha fechado;
+3. os dois fills não podem compartilhar o mesmo `eventId` — um fill repetido não é um round
+   trip;
+4. `agentId`, `asset` e `quote` devem coincidir entre as duas pernas;
+5. `assetScale` (validado por `parseAssetScale`) deve coincidir;
+6. `quantityAtoms` (validado por `assertValidAtoms`) deve coincidir e ser maior que zero;
+7. `occurredAt` de cada perna deve ser um timestamp canônico UTC ISO-8601, e o do SELL deve
+   ser estritamente posterior ao do BUY;
+8. `totalMicros` de cada perna (validado por `assertValidMicros`) deve ser um `bigint` em
+   `[0, MAX_MICROS]`.
+
+Só então o custo realizado (`buyFill.totalMicros`) e a receita líquida
+(`sellFill.totalMicros`) são comparados com um único `subtractChecked`: `WIN` quando a
+receita excede o custo, `LOSS` quando fica abaixo, `BREAK_EVEN` quando são exatamente
+iguais (magnitude zero nesse caso, sem chamar `subtractChecked`). O resultado devolvido
+carrega `buyEventId`/`sellEventId` para auditoria, além da identidade comum já validada
+(`agentId`, `asset`, `quote`, `assetScale`, `quantityAtoms`) e os dois timestamps
+(`openedAt`, `closedAt`).
+
+### Por que o cálculo usa só `totalMicros`, sem tocar `feeMicros`
+
+`totalMicros` já é, por definição em `src/ledger/events.ts`, o caixa total movido pelo
+fill: `gross + fee` numa BUY, `gross - fee` numa SELL. Somar ou subtrair `feeMicros` de
+novo aqui contaria a fee duas vezes. Há teste dedicado (`tests/summarize-closed-round-trip.test.ts`,
+describe "fees already reflected in totalMicros") que constrói uma BUY e uma SELL com
+`grossMicros`/`feeMicros` explícitos e confirma que `resultMagnitudeMicros` é exatamente
+`sellFill.totalMicros - buyFill.totalMicros`, sem nenhum ajuste adicional pela fee.
+
+### Testes cobertos em `tests/summarize-closed-round-trip.test.ts`
+
+Ganho, perda e empate; diferença exata de 1 micro em ambos os sentidos (WIN e LOSS);
+fees já refletidas em `totalMicros` sem dupla contagem; rejeição por `agentId`, `asset`,
+`quote`, `assetScale` ou `quantityAtoms` divergentes entre as duas pernas; rejeição por
+lado de abertura invertido e por lado de fechamento invertido; rejeição do mesmo fill
+forjado como as duas pernas (mesmo `eventId`, isolado do teste de lado invertido porque um
+fill real nunca pode ser BUY e SELL ao mesmo tempo); rejeição de timestamp não canônico, de
+timestamp de fechamento igual ao de abertura e de timestamp de fechamento anterior ao de
+abertura; rejeição de dinheiro inválido em cada perna; congelamento do resultado; ausência
+de mutação de qualquer um dos dois fills recebidos; determinismo do resultado completo para
+o mesmo input canônico; identidade completa do resultado (`buyEventId`, `sellEventId`,
+`agentId`, `asset`, `quote`, `assetScale`, `quantityAtoms`, `openedAt`, `closedAt`). Toda a
+suíte é offline: nenhum valor monetário sai de `bigint`, nenhuma chamada de rede, relógio
+ou aleatoriedade.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **482 testes, 482 passaram, 0 falharam** (459 preexistentes + 23 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum
+uso de `random`. `git rev-parse HEAD main origin/main` confirmou que os três apontavam para
+o mesmo commit (`4bc19ad`) e `git status` confirmou árvore de trabalho limpa antes de
+iniciar, então a branch de trabalho já partia sincronizada com `main`.
+
+### Decisões técnicas tomadas
+
+1. **Nomes dos campos monetários do resultado (`realizedCostMicros`, `netProceedsMicros`,
+   `resultMagnitudeMicros`) em vez de nomes genéricos como `costMicros`/`proceedsMicros`.**
+   `TASK.md` pede "custo realizado do BUY, receita líquida do SELL"; os nomes escolhidos
+   espelham essa redação diretamente, evitando ambiguidade com outros campos monetários já
+   existentes no repositório (ex.: `grossMicros`, `totalMicros` do próprio `FillEvent`).
+2. **Validação por campo com prefixo `buyFill.`/`sellFill.` no nome do campo rejeitado**,
+   seguindo a convenção já usada em `compareToCashBenchmark`
+   (`src/benchmark/compare-to-cash-benchmark.ts`) para comparações entre dois objetos
+   estruturalmente distintos — deixa claro em qual das duas pernas a inconsistência foi
+   encontrada, sem inventar uma convenção nova.
+3. **`isCanonicalTimestamp` duplicada localmente**, seguindo o mesmo precedente já
+   registrado nas TASK-004, TASK-007 e TASK-008: a função não é exportada de
+   `src/domain/contracts.ts`, e o escopo exato desta tarefa é criar
+   `src/metrics/summarize-closed-round-trip.ts`, não alterar as exportações do módulo de
+   contratos.
+4. **`assertValidMicros`/`assertValidAtoms` duplicadas localmente**, em vez de importadas de
+   `src/metrics/summarize-execution-costs.ts`, pelo mesmo motivo: são funções privadas não
+   exportadas de lá, e o mesmo precedente já foi registrado nessa própria tarefa (TASK-018)
+   para `assertValidMicros`.
+5. **A checagem de quantidade maior que zero (`quantityAtoms !== 0n`) foi incluída**, mesmo
+   sem estar explicitamente listada em "Testes obrigatórios", porque um round trip de
+   quantidade zero não é uma operação real e `assertValidAtoms` sozinha aceita zero como
+   valor válido — a checagem adicional fecha essa lacuna sem duplicar nenhuma fórmula
+   monetária.
+6. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/
+   `ContractValidationError`, o mesmo mecanismo de todo o resto do repositório.
+
+### Limitações conhecidas
+
+- Opera sobre exatamente dois fills; não agrega múltiplos round trips, não calcula win rate
+  nem ranking multiagente — explicitamente fora do escopo desta tarefa em `TASK.md`.
+- Não implementa FIFO/LIFO, posição parcial ou short: um round trip é sempre "um BUY
+  integral seguido de um SELL integral da mesma quantidade", nunca uma composição de vários
+  fills.
+- Não executa nenhuma ordem, broker, risco ou replay: opera inteiramente sobre `FillEvent`s
+  já produzidos por um fluxo real ou construídos manualmente em teste.
+- Não persiste nada em arquivo; opera inteiramente em memória, como as milestones
+  anteriores.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as seis decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git fetch origin` exigiu aprovação não concedida neste ambiente
+sandboxed, na mesma linha já registrada nas TASK-017, TASK-018 e TASK-019;
+`git rev-parse HEAD main origin/main` (os três iguais) e `git status` (árvore limpa)
+confirmaram que a branch de trabalho já partia sincronizada com `main`, então nenhuma
+sincronização adicional era possível ou necessária.
+
+### Commit
+
+- **Mensagem:** `feat: resume round trip paper fechado`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
