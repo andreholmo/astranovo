@@ -1,19 +1,19 @@
 # Tarefa atual
 
-- **ID:** TASK-007
-- **Milestone:** M3 — valoração determinística sem look-ahead
+- **ID:** TASK-008
+- **Milestone:** M3 — resumo determinístico de série de patrimônio
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `d9c84f74a67cd1bbe870cc817be2b01c5c98ad5c`
+- **Base:** `main` após a revisão registrada em `docs/coordination/CHATGPT_REVIEW_TASK_007.md`
 
 ## Objetivo
 
-Criar a menor base de métricas do replay: calcular um ponto imutável de patrimônio de uma carteira paper usando somente snapshots completos, em USD, que já estavam disponíveis no instante avaliado.
+Criar a próxima fatia mínima de métricas: receber uma série cronológica de `EquityPoint` já calculados pela TASK-007 e produzir um resumo imutável e auditável de P&L e drawdown absoluto.
 
-`Wallet + MarketSnapshot(s) disponíveis → EquityPoint auditável`
+`EquityPoint[] canônicos → EquitySeriesSummary determinístico`
 
-Esta tarefa calcula apenas a valoração de um instante. Não calcula série temporal, P&L, drawdown, win rate ou benchmark.
+Esta tarefa não executa replay, não busca preços e não persiste dados.
 
 ## Leitura obrigatória
 
@@ -24,89 +24,76 @@ Sincronize `main` e leia integralmente:
 3. `docs/ARCHITECTURE.md`;
 4. `docs/DECISIONS.md`;
 5. `docs/ROADMAP.md`;
-6. `docs/coordination/CHATGPT_REVIEW_TASK_006.md`;
+6. `docs/coordination/CHATGPT_REVIEW_TASK_007.md`;
 7. `docs/coordination/CLAUDE_REPORT.md`;
-8. esta tarefa.
+8. `src/metrics/value-wallet-at.ts`;
+9. esta tarefa.
 
 ## Escopo exato
 
-Crie um módulo pequeno em `src/metrics/`, por exemplo `valueWalletAt`.
+Crie um módulo pequeno em `src/metrics/`, por exemplo `summarizeEquitySeries`.
 
-Entradas:
+Entrada:
 
-- uma `Wallet` imutável;
-- `valuedAt` canônico injetado pelo chamador;
-- snapshots de mercado usados para valorar as posições.
+- coleção readonly, não vazia, de `EquityPoint`;
+- pontos já ordenados cronologicamente pelo chamador.
 
-Saída imutável e estruturada, por exemplo `EquityPoint`, contendo no mínimo:
+Saída imutável e estruturada, por exemplo `EquitySeriesSummary`, contendo no mínimo:
 
 - `agentId`;
-- `valuedAt`;
-- `cashMicros`;
-- valor de cada posição em micros, com `asset`, quantidade/escala, `priceMicros`, `snapshotId` e `snapshotAvailableAt`;
-- `positionsValueMicros`;
-- `equityMicros`;
-- IDs dos snapshots efetivamente usados, em ordem determinística.
+- `startedAt` e `endedAt`;
+- `pointCount`;
+- `startingEquityMicros`;
+- `endingEquityMicros`;
+- P&L sem dinheiro em `number`: `pnlDirection` (`GAIN | LOSS | FLAT`) e `pnlMagnitudeMicros`;
+- `peakEquityMicros`;
+- `maxDrawdownMicros`;
+- evidência do drawdown máximo: timestamp do pico e timestamp do vale.
 
-Reutilize:
-
-- `parseMarketSnapshot(snapshot, { notAfter: valuedAt })` para provar disponibilidade;
-- `microsFromUsdNumber` para converter preço;
-- `scaleFactor`, `mulDivFloor` e `addBounded`;
-- `MAX_MICROS`;
-- os contratos `Wallet`, `Position` e `MarketSnapshot`.
-
-Não use aritmética de dinheiro em `number`.
+Não crie um tipo monetário signed se a representação direção + magnitude for suficiente.
 
 ## Regras obrigatórias
 
-- Aceitar somente snapshot `complete === true`.
-- Aceitar somente `quote === "USD"`.
-- Cada posição deve ter exatamente um snapshot do mesmo `asset`.
-- Falhar fechado se faltar preço de uma posição.
-- Falhar fechado diante de snapshots duplicados para o mesmo ativo; não escolher silenciosamente um deles.
-- Snapshots de ativos que a carteira não possui devem ser rejeitados, não ignorados.
-- `availableAt` deve ser menor ou igual a `valuedAt`; qualquer dado futuro deve ser rejeitado.
-- `valuedAt` e timestamps precisam permanecer canônicos.
-- Converter `snapshot.price` para micros pelo helper existente; precisão incompatível deve falhar fechada, nunca arredondar silenciosamente.
-- Valor de posição: `floor(quantityAtoms * priceMicros / 10^assetScale)`.
-- Somar valores com limites protegidos; overflow deve falhar fechado.
-- Carteira somente em caixa deve aceitar lista vazia e ter `equityMicros === cashMicros`.
-- A ordem da entrada não pode alterar o resultado: posições e IDs na saída devem ser ordenados por ativo.
-- Não alterar wallet, posições ou snapshots.
-- Mesmo input canônico deve produzir resultado idêntico.
+- Exigir pelo menos um ponto.
+- Todos os pontos devem pertencer ao mesmo `agentId`.
+- `valuedAt` deve ser canônico e estritamente crescente.
+- Rejeitar timestamps duplicados ou fora de ordem; não ordenar silenciosamente.
+- P&L deve ser a diferença exata entre patrimônio final e inicial, representada por direção e magnitude.
+- Drawdown em cada ponto é `peak anterior ou atual - equity atual`, nunca negativo.
+- `maxDrawdownMicros` deve ser o maior drawdown absoluto observado.
+- Em empate de drawdown máximo, manter o primeiro episódio cronológico.
+- Série de um único ponto deve produzir P&L `FLAT` e drawdown zero.
+- Validar limites monetários e falhar fechado diante de valores inválidos.
+- Não alterar os pontos nem suas coleções internas.
+- Mesmo input deve produzir resultado idêntico.
 - Nenhum relógio, aleatoriedade, rede ou I/O.
+- Reutilizar erros e helpers fixed-point existentes; não usar dinheiro em `number`.
 
 ## Testes obrigatórios
 
-- carteira somente em caixa;
-- uma posição corretamente valorada;
-- múltiplas posições e soma correta;
-- arredondamento conservador por floor;
-- snapshots fornecidos em ordens diferentes produzem resultado idêntico;
-- snapshot disponível exatamente em `valuedAt` é aceito;
-- snapshot disponível depois de `valuedAt` é rejeitado;
-- snapshot incompleto é rejeitado;
-- quote diferente de USD é rejeitada;
-- snapshot ausente para posição é rejeitado;
-- snapshot duplicado para o mesmo ativo é rejeitado;
-- snapshot de ativo não possuído é rejeitado;
-- preço com precisão não representável em micros falha fechado;
-- overflow falha fechado;
-- objetos e coleções próprias retornados são imutáveis;
-- entradas não sofrem mutação;
-- isolamento entre agentes;
+- série com um ponto;
+- ganho;
+- perda;
+- resultado flat;
+- novo pico seguido de drawdown;
+- recuperação parcial;
+- recuperação completa;
+- múltiplos drawdowns, escolhendo o maior;
+- empate mantendo o primeiro episódio;
+- rejeição de lista vazia;
+- rejeição de agentes misturados;
+- rejeição de timestamp duplicado;
+- rejeição de timestamps fora de ordem;
+- rejeição de timestamp não canônico;
+- rejeição de valor monetário inválido ou acima do limite;
+- imutabilidade da saída;
+- ausência de mutação da entrada;
 - determinismo;
 - testes offline.
 
 ## Documentação
 
-Atualize o README apenas no necessário para explicar que:
-
-- patrimônio é caixa mais posições marcadas a mercado;
-- a valoração usa somente snapshots completos disponíveis até `valuedAt`;
-- dados futuros, ausentes, duplicados ou incompatíveis falham fechados;
-- esta fatia ainda não calcula P&L, drawdown, win rate ou benchmarks.
+Atualize o README apenas no necessário para informar que a série de patrimônio agora produz P&L final e drawdown absoluto, ainda sem replay completo, win rate ou benchmarks.
 
 Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limitações e decisões técnicas.
 
@@ -114,9 +101,10 @@ Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limi
 
 Não implementar:
 
-- série temporal, P&L, drawdown, win rate ou benchmarks;
-- replay de ciclos completo;
-- seleção automática do snapshot mais recente;
+- drawdown percentual;
+- win rate, fees agregadas ou benchmarks;
+- replay de ciclos;
+- seleção ou busca de snapshots;
 - provider de mercado ou rede;
 - persistência JSONL/SQLite/CSV;
 - Astra/LLM, prompts ou agentes;
@@ -129,18 +117,16 @@ Não adicionar dependência runtime. Não alterar este `TASK.md`.
 
 ## Critérios de aceite
 
-- patrimônio calculado integralmente em fixed-point;
-- evidência de preço auditável na saída;
-- anti-look-ahead comprovado por testes;
-- ausência/ambiguidade de preço falha fechada;
-- tipos estritos, imutabilidade e determinismo;
+- P&L e drawdown calculados integralmente com `bigint`/fixed-point;
+- ordem temporal e isolamento por agente validados fail-closed;
+- saída imutável, auditável e determinística;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
 - nenhuma rota financeira real existe.
 
 ## Entrega
 
-1. Faça um único commit com a mensagem `feat: calcula patrimonio sem look-ahead`.
+1. Faça um único commit com a mensagem `feat: resume serie de patrimonio`.
 2. Faça push em branch própria e abra PR para `main`.
-3. No PR, inclua resumo, testes e `Closes #10`.
+3. No PR, inclua resumo, testes e `Closes #12`.
 4. Não aprove o próprio trabalho e não altere o status desta tarefa.
