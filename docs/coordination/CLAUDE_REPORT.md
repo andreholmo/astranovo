@@ -2275,3 +2275,150 @@ possível ou necessária.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-018 — Relatório determinístico consolidado de benchmarks (M3)
+
+- **ID da tarefa:** TASK-018
+- **Milestone:** M3 — relatório determinístico consolidado de benchmarks
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Menor composição do replay de M3: `buildStrategyBenchmarkReport` recebe o
+`EquitySeriesSummary` de uma estratégia, um `CashBenchmark` e um `BuyAndHoldBenchmark` do
+mesmo experimento e devolve um `StrategyBenchmarkReport` imutável e auditável, consolidando
+as duas comparações já existentes (`compareToCashBenchmark` e
+`compareStrategyToBuyAndHold`) numa única estrutura, com a identificação comum do
+experimento. Não executa nenhuma ordem, broker, risco ou replay; não reconstrói nenhum
+benchmark; não recalcula nenhuma fórmula monetária ou de comparação — reutiliza
+integralmente as duas funções de comparação exigidas pela tarefa.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_017.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/benchmark/compare-to-cash-benchmark.ts`,
+`src/benchmark/compare-strategy-to-buy-and-hold.ts`, `src/benchmark/build-cash-benchmark.ts`,
+`src/benchmark/build-buy-and-hold-benchmark.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/benchmark/build-strategy-benchmark-report.ts` | criado — `buildStrategyBenchmarkReport`, `StrategyBenchmarkReport` |
+| `tests/build-strategy-benchmark-report.test.ts` | criado |
+| `README.md` | atualizado (seção "Relatório determinístico consolidado de benchmarks") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design de `buildStrategyBenchmarkReport`
+
+Recebe `(strategySummary, cashBenchmark, buyAndHoldBenchmark)` e:
+
+1. chama `compareToCashBenchmark(strategySummary, cashBenchmark)` exatamente uma vez;
+2. chama `compareStrategyToBuyAndHold(strategySummary, buyAndHoldBenchmark)` exatamente uma
+   vez;
+3. devolve um `StrategyBenchmarkReport` congelado com a identificação comum do experimento
+   (`agentId`, `startedAt`, `endedAt`, `pointCount`, `startingEquityMicros`,
+   `strategyEndingEquityMicros`) lida dos próprios resultados dessas duas chamadas, mais os
+   dois objetos de comparação (`vsCash`, `vsBuyAndHold`) carregados verbatim — mesmos valores
+   em micros, mesma direção (`OUTPERFORMED`/`UNDERPERFORMED`/`TIED`) — sem transformação.
+
+Nenhuma das duas chamadas de comparação é envolvida em `try/catch`: uma rejeição de qualquer
+uma delas propaga como `ContractValidationError` para o chamador, exatamente como a tarefa
+exige ("falhe fechado quando qualquer entrada for incompatível ou inconsistente").
+
+### Por que nenhuma checagem cruzada extra entre os dois benchmarks foi adicionada
+
+`compareToCashBenchmark` já exige que `strategySummary.agentId`/`startedAt`/`endedAt`/
+`pointCount`/`startingEquityMicros` coincidam com o `cashBenchmark`; `compareStrategyToBuyAndHold`
+exige exatamente o mesmo conjunto de campos contra o `buyAndHoldBenchmark`. Como as duas
+comparações usam o mesmo `strategySummary` como referência comum, chamar as duas garante,
+por transitividade, que os dois benchmarks concordam entre si nesses campos — nenhuma
+terceira checagem comparando `cashBenchmark` a `buyAndHoldBenchmark` diretamente foi
+necessária ou adicionada, o que também evita duplicar uma regra que `compareBuyAndHoldToCash`
+já implementa para esse par específico, mas que esta tarefa não pede para reutilizar.
+
+### Testes cobertos em `tests/build-strategy-benchmark-report.test.ts`
+
+Relatório consolidado com a estratégia superando os dois benchmarks; quatro combinações
+distintas de resultado (supera caixa e perde do buy-and-hold; empata caixa e perde do
+buy-and-hold; supera caixa e empata buy-and-hold; perde dos dois); propagação fail-closed de
+divergências herdadas da comparação com o caixa (agentId incompatível, `kind` forjado do
+`CashBenchmark`, `summary.agentId` interno divergente, patrimônio inicial divergente do
+`initialCashMicros`) e da comparação com o buy-and-hold (`kind` forjado do
+`BuyAndHoldBenchmark`, `initialFill` que não é uma `BUY`, `pointCount` divergente); prova de
+que `vsCash` e `vsBuyAndHold` são exatamente o mesmo objeto que uma chamada direta a
+`compareToCashBenchmark`/`compareStrategyToBuyAndHold` produziria (`deepEqual`); congelamento
+do relatório; ausência de mutação dos três parâmetros recebidos; determinismo do relatório
+completo para o mesmo input canônico; testes offline (nenhum valor monetário sai de
+`bigint`).
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **456 testes, 456 passaram, 0 falharam** (438 preexistentes + 18 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum
+uso de `random`. `git rev-parse main origin/main HEAD` confirmou que os três apontavam para
+o mesmo commit (`8bef3a3`) e `git status` confirmou árvore de trabalho limpa antes de
+iniciar, então a branch de trabalho já partia sincronizada com `main`.
+
+### Decisões técnicas tomadas
+
+1. **`StrategyBenchmarkReport` carrega os dois objetos de comparação completos
+   (`vsCash: BenchmarkComparison`, `vsBuyAndHold: StrategyVsBuyAndHoldComparison`) em vez de
+   apenas seus campos de resultado.** A tarefa exige preservar "os resultados exatos em
+   micros e os sentidos das comparações" — carregar o objeto inteiro, produzido inalterado
+   pela função reutilizada, é a forma mais direta de não duplicar nem transformar nenhum
+   valor, e mantém `differenceMagnitudeMicros` de cada comparação auditável no relatório.
+2. **`reportKind: "STRATEGY_BENCHMARK_REPORT"` foi adicionado por simetria com `kind` em
+   `CashBenchmark`/`BuyAndHoldBenchmark` e `comparisonKind` em
+   `StrategyVsBuyAndHoldComparison`/`BuyAndHoldVsCashComparison`.** Não é exigido literalmente
+   pela tarefa, mas seguir a convenção já estabelecida no módulo torna o relatório
+   identificável em runtime sem inspecionar sua forma, e é consistente com "relatório
+   imutável" auditável.
+3. **Nenhuma checagem cruzada direta entre `cashBenchmark` e `buyAndHoldBenchmark`.**
+   Decisão técnica detalhada na seção acima: é redundante por transitividade, dado que ambos
+   já são validados contra o mesmo `strategySummary`.
+4. **`startingEquityMicros` e `strategyEndingEquityMicros` do relatório vêm de
+   `strategySummary`/`vsCash` diretamente, sem revalidação local.** Ambos já foram validados
+   como `Micros` em `[0, MAX_MICROS]` dentro de `compareToCashBenchmark` antes de essa chamada
+   retornar sem lançar; revalidar aqui duplicaria a checagem monetária que a tarefa proíbe
+   duplicar.
+5. **Nenhuma classe de erro nova.** Toda rejeição vem de `compareToCashBenchmark` ou
+   `compareStrategyToBuyAndHold`, ambas já usando `ContractValidationError` — não há
+   necessidade nem espaço no escopo exato da tarefa para uma terceira variante de erro.
+
+### Limitações conhecidas
+
+- Não calcula win rate, P&L realizado por trade ou ranking multiagente — explicitamente fora
+  do escopo desta tarefa em `TASK.md`.
+- Não compara `cashBenchmark` e `buyAndHoldBenchmark` diretamente entre si (isso já existe em
+  `compareBuyAndHoldToCash`, não incluído neste relatório porque a tarefa define o relatório
+  apenas em torno das duas comparações centradas na estratégia).
+- Não persiste nada em arquivo; opera inteiramente em memória, como as milestones anteriores.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git fetch` exigiu aprovação não concedida neste ambiente sandboxed, na
+mesma linha já registrada na TASK-017; `git rev-parse main origin/main HEAD` confirmou que os
+três apontavam para o mesmo commit e `git status` confirmou árvore de trabalho limpa antes de
+iniciar, então nenhuma sincronização adicional era possível ou necessária.
+
+### Commit
+
+- **Mensagem:** `feat: consolida relatório de benchmarks`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.

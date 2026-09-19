@@ -15,8 +15,9 @@ integra as duas, a liquidação contábil determinística do resultado dessa fac
 ledger, e **M3 — valoração de patrimônio sem look-ahead, resumo determinístico da série
 de patrimônio, drawdown percentual determinístico, resumo determinístico de custos de
 execução, os benchmarks cash e buy-and-hold, a comparação determinística de cada um deles
-com o cash, a comparação determinística de uma estratégia com o buy-and-hold, e a
-seleção/série de snapshots sem look-ahead para replay**.
+com o cash, a comparação determinística de uma estratégia com o buy-and-hold, o relatório
+determinístico consolidado dessas duas comparações, e a seleção/série de snapshots sem
+look-ahead para replay**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -52,6 +53,8 @@ seleção/série de snapshots sem look-ahead para replay**.
 - `src/benchmark/compare-strategy-to-buy-and-hold.ts` — `compareStrategyToBuyAndHold`, que
   mede se o resumo de uma estratégia terminou acima, abaixo ou empatado com o benchmark
   buy-and-hold;
+- `src/benchmark/build-strategy-benchmark-report.ts` — `buildStrategyBenchmarkReport`, que
+  consolida as duas comparações acima num único relatório imutável, sem recalcular nada;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -562,6 +565,32 @@ patrimônios finais, sempre a partir do ponto de vista da estratégia;
 `differenceMagnitudeMicros` é a diferença absoluta exata entre eles, calculada com
 `subtractChecked` de `src/money/fixed-point.ts` — nunca em ponto flutuante. O
 `StrategyVsBuyAndHoldComparison` devolvido é imutável; nenhuma entrada é mutada.
+
+## Relatório determinístico consolidado de benchmarks
+
+`src/benchmark/build-strategy-benchmark-report.ts` define `buildStrategyBenchmarkReport`: a
+menor composição das duas comparações acima em um único relatório auditável. Não executa
+nenhuma ordem, não reconstrói nenhum benchmark e não recalcula nenhuma fórmula monetária —
+reutiliza integralmente `compareToCashBenchmark` e `compareStrategyToBuyAndHold`.
+
+```text
+EquitySeriesSummary da estratégia + CashBenchmark + BuyAndHoldBenchmark → StrategyBenchmarkReport
+```
+
+Toda a validação fail-closed — mesmo experimento (`agentId`, `startedAt`, `endedAt`,
+`pointCount` e patrimônio inicial da estratégia igual ao `initialCashMicros` de cada
+benchmark) e a consistência interna de cada benchmark — é herdada inteiramente das duas
+chamadas de comparação; nada é duplicado aqui. Como as duas comparações exigem
+independentemente que o resumo da estratégia coincida com cada benchmark nesses mesmos
+campos, chamar as duas garante, por transitividade, que os benchmarks cash e buy-and-hold
+concordam entre si sobre a mesma identificação de experimento — nenhuma checagem cruzada
+adicional entre os dois benchmarks foi necessária.
+
+O relatório devolvido carrega os dois objetos de comparação exatamente como
+`compareToCashBenchmark` e `compareStrategyToBuyAndHold` os produziram — mesmos valores em
+micros, mesma direção (`OUTPERFORMED`, `UNDERPERFORMED` ou `TIED`) — junto da identificação
+comum do experimento. O `StrategyBenchmarkReport` devolvido é imutável; nenhuma das três
+entradas é mutada.
 
 ## Seleção de snapshot sem look-ahead para replay
 
