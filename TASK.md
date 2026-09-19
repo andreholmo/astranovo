@@ -1,19 +1,19 @@
 # Tarefa atual
 
-- **ID:** TASK-015
-- **Milestone:** M3 — comparação buy-and-hold versus cash
+- **ID:** TASK-016
+- **Milestone:** M3 — drawdown percentual determinístico
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_014.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_015.md`
 
 ## Objetivo
 
-Comparar de forma determinística e auditável os dois benchmarks já existentes, respondendo se o buy-and-hold terminou acima, abaixo ou empatado com o cash no mesmo experimento.
+Calcular de forma determinística e auditável o drawdown percentual máximo de uma série de patrimônio já valorada, preservando a evidência do pico e do fundo.
 
-`CashBenchmark + BuyAndHoldBenchmark → BuyAndHoldVsCashComparison`
+`EquityPoint[] → DrawdownRateSummary`
 
-Esta tarefa apenas compara resultados existentes. Não executa ordens, não reconstrói benchmarks e não altera carteira.
+Esta tarefa apenas reduz pontos de patrimônio existentes. Não reavalia carteira, não executa ordens e não altera estado.
 
 ## Leitura obrigatória
 
@@ -24,74 +24,67 @@ Sincronize `main` e leia integralmente:
 3. `docs/ARCHITECTURE.md`;
 4. `docs/DECISIONS.md`;
 5. `docs/ROADMAP.md`;
-6. `docs/coordination/CHATGPT_REVIEW_TASK_014.md`;
+6. `docs/coordination/CHATGPT_REVIEW_TASK_015.md`;
 7. `docs/coordination/CLAUDE_REPORT.md`;
-8. `src/benchmark/build-cash-benchmark.ts`;
-9. `src/benchmark/build-buy-and-hold-benchmark.ts`;
-10. `src/benchmark/compare-to-cash-benchmark.ts`;
-11. `src/metrics/summarize-equity-series.ts`;
-12. `src/money/fixed-point.ts`;
-13. esta tarefa.
+8. `src/metrics/value-wallet-at.ts`;
+9. `src/metrics/summarize-equity-series.ts`;
+10. `src/money/fixed-point.ts`;
+11. esta tarefa.
 
 ## Escopo exato
 
-Crie `src/benchmark/compare-buy-and-hold-to-cash.ts`.
+Crie `src/metrics/summarize-drawdown-rate.ts`.
 
-Implemente uma função `compareBuyAndHoldToCash` que receba:
+Implemente `summarizeDrawdownRate`, recebendo uma coleção readonly não vazia de `EquityPoint` já calculados.
 
-- um `BuyAndHoldBenchmark`;
-- um `CashBenchmark`.
+A função deve reutilizar `summarizeEquitySeries` para obter o drawdown absoluto e sua evidência. Não duplique o algoritmo de pico/fundo.
 
-A função deve validar fail-closed, antes da comparação:
+O resultado `DrawdownRateSummary` deve ser profundamente imutável e registrar no mínimo:
 
-- `kind === "BUY_AND_HOLD"` e `kind === "CASH"`;
-- mesmo `agentId`;
-- mesmo `initialCashMicros`;
-- mesmo `startedAt`, `endedAt` e `pointCount` nos resumos;
-- consistência interna entre o `agentId` externo de cada benchmark e o respectivo resumo;
-- consistência do cash: capital inicial igual ao patrimônio inicial e final;
-- consistência mínima do buy-and-hold: fill inicial BUY, agente/ativo/quote do fill iguais aos campos externos e patrimônio final igual ao resumo recebido;
-- todos os valores monetários usados na comparação são `bigint` não negativos dentro de `MAX_MICROS`.
-
-O resultado `BuyAndHoldVsCashComparison` deve ser profundamente imutável e registrar no mínimo:
-
-- `comparisonKind: "BUY_AND_HOLD_VS_CASH"`;
 - `agentId`;
 - `startedAt`;
 - `endedAt`;
 - `pointCount`;
-- `initialCashMicros`;
-- `buyAndHoldEndingEquityMicros`;
-- `cashEndingEquityMicros`;
-- `result: "OUTPERFORMED" | "UNDERPERFORMED" | "TIED"`, sempre da perspectiva do buy-and-hold;
-- `differenceMagnitudeMicros`, diferença absoluta exata em `bigint`.
+- `maxDrawdownMicros`;
+- `maxDrawdownPeakEquityMicros`;
+- `maxDrawdownPeakAt`;
+- `maxDrawdownTroughAt`;
+- `maxDrawdownBps`, inteiro entre 0 e 10_000;
+- `rounding: "FLOOR"`.
+
+## Definição matemática
+
+Para drawdown não zero:
+
+`maxDrawdownBps = floor(maxDrawdownMicros * 10_000 / maxDrawdownPeakEquityMicros)`
+
+Use somente `bigint` durante multiplicação e divisão. Converta para `number` apenas o resultado final já provado no intervalo inteiro `[0, 10_000]`.
+
+Para drawdown zero, devolva `maxDrawdownBps = 0`. Se houver drawdown positivo com pico igual a zero, falhe fechado com `ContractValidationError`.
+
+O pico monetário deve corresponder exatamente ao ponto identificado por `maxDrawdownPeakAt`; não use apenas o maior pico global quando o maior drawdown tiver ocorrido a partir de um pico anterior.
 
 ## Regras obrigatórias
 
-- Reutilizar `subtractChecked`, `MAX_MICROS` e os tipos existentes.
-- Não usar `number` para dinheiro.
-- Não executar `PaperBroker`, ordens, fills adicionais ou qualquer operação de carteira.
-- Não duplicar construção de benchmark, cálculo de patrimônio, P&L ou drawdown.
+- Reutilizar `summarizeEquitySeries`, `MAX_MICROS` e os tipos existentes.
+- Não usar ponto flutuante para a razão.
+- Não reimplementar valoração, P&L ou detecção de drawdown absoluto.
 - Não mutar entradas.
 - Mesmo input canônico deve produzir resultado idêntico.
 - Nenhum relógio, aleatoriedade, rede ou I/O.
-- Toda incompatibilidade ou inconsistência deve gerar `ContractValidationError`; nunca tentar corrigir ou comparar parcialmente.
-- Não alterar `compareToCashBenchmark` nesta tarefa, salvo correção mínima indispensável demonstrada por teste.
+- Inconsistência deve gerar `ContractValidationError`.
+- Não alterar `summarizeEquitySeries`, salvo correção mínima indispensável demonstrada por teste.
 
 ## Testes obrigatórios
 
-- buy-and-hold supera cash;
-- buy-and-hold perde para cash;
-- empate;
-- diferença absoluta exata nos três casos;
-- aceita que o primeiro patrimônio do buy-and-hold seja menor que o capital inicial por custos de entrada;
-- rejeita `kind` forjado em qualquer benchmark;
-- rejeita `agentId` incompatível ou internamente inconsistente;
-- rejeita capital inicial diferente;
-- rejeita janela temporal ou quantidade de pontos diferente;
-- rejeita cash internamente inconsistente;
-- rejeita fill inicial que não seja BUY ou que divirja em agente, ativo ou quote;
-- rejeita valores monetários inválidos, negativos ou acima de `MAX_MICROS`;
+- drawdown zero em série crescente;
+- drawdown de 100%;
+- drawdown fracionário com arredondamento `FLOOR`;
+- maior drawdown usa o pico correto, mesmo quando não é o maior pico global final;
+- recuperação após o fundo preserva a evidência do maior drawdown;
+- série de um ponto;
+- rejeita coleção vazia;
+- rejeita agentes misturados, timestamps inválidos/fora de ordem e dinheiro inválido por meio da primitiva existente;
 - não muta entradas;
 - resultado congelado;
 - determinismo;
@@ -99,7 +92,7 @@ O resultado `BuyAndHoldVsCashComparison` deve ser profundamente imutável e regi
 
 ## Documentação
 
-Atualize o README apenas no necessário para explicar a comparação e deixar claro que o resultado é da perspectiva do buy-and-hold.
+Atualize o README apenas no necessário para explicar que o percentual é expresso em basis points inteiros, com arredondamento para baixo.
 
 Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limitações e decisões técnicas.
 
@@ -107,25 +100,25 @@ Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limi
 
 Não implementar:
 
-- estratégia de agente ou comparação entre agentes;
+- win rate ou P&L realizado por trade;
+- estratégia ou comparação entre agentes;
 - replay de propostas;
-- ordens novas, venda ou liquidação;
+- ordens, fills ou liquidação;
 - benchmark aleatório;
 - Astra/LLM, prompts ou handoffs;
 - novas regras de risco;
 - coleta de mercado ou rede;
-- persistência;
-- dashboard, servidor ou cloud;
-- wallet externa, chave privada, blockchain;
-- testnet, corretora, exchange, credenciais ou dinheiro real.
+- persistência, dashboard, servidor ou cloud;
+- wallet, blockchain, testnet, corretora, exchange, credenciais ou dinheiro real.
 
 Não adicionar dependência runtime. Não alterar este `TASK.md`.
 
 ## Critérios de aceite
 
-- comparação usa somente benchmarks existentes e compatíveis;
-- resultado correto da perspectiva do buy-and-hold;
-- diferença monetária exata em `bigint`;
+- reutiliza a primitiva de resumo existente;
+- razão calculada sem ponto flutuante;
+- pico/fundo auditáveis e corretos;
+- arredondamento explícito e determinístico;
 - inconsistências falham fechado;
 - nenhuma ordem ou alteração de carteira;
 - resultado imutável e determinístico;
@@ -135,7 +128,7 @@ Não adicionar dependência runtime. Não alterar este `TASK.md`.
 
 ## Entrega
 
-1. Faça um único commit com a mensagem `feat: compara buy and hold com cash`.
+1. Faça um único commit com a mensagem `feat: calcula drawdown percentual`.
 2. Faça push em branch própria; a automação deve abrir o PR para `main`.
-3. No PR, inclua resumo, testes e `Closes #26`.
+3. No PR, inclua resumo, testes e `Closes #28`.
 4. Não aprove o próprio trabalho e não altere o status desta tarefa.
