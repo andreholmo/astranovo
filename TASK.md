@@ -1,19 +1,19 @@
 # Tarefa atual
 
-- **ID:** TASK-013
-- **Milestone:** M3 — série cronológica de snapshots para replay
+- **ID:** TASK-014
+- **Milestone:** M3 — benchmark buy-and-hold com custos paper
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_012.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_013.md`
 
 ## Objetivo
 
-Compor a primitiva da TASK-012 em uma função determinística que materialize, para uma sequência cronológica de instantes de decisão, exatamente o snapshot que estava disponível em cada instante.
+Criar o primeiro benchmark buy-and-hold determinístico e auditável, usando a série anti-look-ahead e o `PaperBroker` existente para modelar o custo realista da compra inicial.
 
-`snapshots + asset + quote + decisionTimes → série imutável de pontos de replay`
+`snapshots + decisionTimes + capital + policy → BuyAndHoldBenchmark`
 
-Esta ainda não é a execução completa do replay. É apenas a montagem auditável da linha temporal de evidências de mercado.
+O benchmark compra uma única vez no primeiro instante, mantém a posição e marca a carteira a mercado em todos os instantes. Não vende no final nesta tarefa.
 
 ## Leitura obrigatória
 
@@ -24,66 +24,100 @@ Sincronize `main` e leia integralmente:
 3. `docs/ARCHITECTURE.md`;
 4. `docs/DECISIONS.md`;
 5. `docs/ROADMAP.md`;
-6. `docs/coordination/CHATGPT_REVIEW_TASK_012.md`;
+6. `docs/coordination/CHATGPT_REVIEW_TASK_013.md`;
 7. `docs/coordination/CLAUDE_REPORT.md`;
-8. `src/domain/contracts.ts`;
-9. `src/replay/select-latest-available-snapshot.ts`;
-10. esta tarefa.
+8. `src/replay/build-replay-snapshot-series.ts`;
+9. `src/benchmark/build-cash-benchmark.ts`;
+10. `src/broker/paper-broker.ts`;
+11. `src/domain/contracts.ts`;
+12. `src/portfolio/portfolio.ts`;
+13. `src/metrics/value-wallet-at.ts`;
+14. `src/metrics/summarize-equity-series.ts`;
+15. esta tarefa.
 
 ## Escopo exato
 
-Crie um módulo pequeno em `src/replay/`, por exemplo `buildReplaySnapshotSeries`.
+Crie `src/benchmark/build-buy-and-hold-benchmark.ts`.
 
-Entradas:
+A função deve receber explicitamente:
 
+- `agentId`;
+- `initialCashMicros`;
 - coleção readonly de snapshots não confiáveis;
 - `asset`;
 - `quote`;
-- coleção readonly de timestamps canônicos `decisionTimes`, já em ordem cronológica estritamente crescente.
+- `assetScale`;
+- coleção readonly de `decisionTimes`;
+- `ExecutionPolicy`.
 
-Saída:
+A função deve:
 
-- coleção readonly e congelada de pontos;
-- cada ponto contém somente `decisionAt` e o `MarketSnapshot` validado selecionado para esse instante;
-- cada snapshot deve ser obtido obrigatoriamente por `selectLatestAvailableSnapshot`.
+1. construir a série por `buildReplaySnapshotSeries`;
+2. exigir `quote === "USD"`;
+3. criar uma carteira cash-only por `createWallet`;
+4. criar e validar um `OrderIntent` BUY de 100% no primeiro ponto, convertendo o preço por `microsFromUsdNumber`;
+5. executar exatamente uma compra pelo `PaperBroker`, em `occurredAt === firstPoint.decisionAt`;
+6. falhar fechado se a compra não produzir `FILL`;
+7. aplicar o fill à carteira usando a primitiva contábil existente;
+8. valorar essa carteira em todos os pontos da série por `valueWalletAt`;
+9. resumir por `summarizeEquitySeries`;
+10. devolver um `BuyAndHoldBenchmark` profundamente imutável.
+
+## Saída mínima
+
+O resultado deve registrar:
+
+- `kind: "BUY_AND_HOLD"`;
+- `agentId`;
+- `asset`;
+- `quote`;
+- `initialCashMicros`;
+- política efetivamente usada;
+- fill da compra inicial;
+- carteira após a compra;
+- série de pontos de replay usada;
+- pontos de patrimônio;
+- resumo de patrimônio.
+
+Não implementar venda/liquidação final. Documente claramente que o patrimônio final é marcação a mercado e que custos de saída ainda não estão incluídos.
 
 ## Regras obrigatórias
 
-- Reutilizar `selectLatestAvailableSnapshot`; não duplicar sua lógica.
-- Rejeitar `decisionTimes` vazio.
-- Rejeitar timestamp não canônico.
-- Rejeitar timestamps duplicados ou fora de ordem.
-- Para cada instante, propagar fail-closed quando não houver snapshot elegível, houver empate no máximo ou existir entrada inválida relevante.
-- Nunca usar snapshot com `availableAt > decisionAt`.
-- Não ordenar nem alterar snapshots ou `decisionTimes`.
-- Preservar os snapshots validados e imutáveis retornados pelo seletor.
-- Congelar cada ponto e a coleção externa.
+- Reutilizar todas as primitivas citadas; não duplicar fórmulas de preço, fee, spread, slippage, wallet, valoração ou resumo.
+- Validar `ExecutionPolicy` com o parser existente.
+- Usar somente o snapshot do primeiro `decisionAt` para a compra inicial.
+- Nunca executar mais de uma ordem.
+- O fill deve refletir fee, spread e slippage da política.
+- Nenhum Risk Manager ou agente participa deste benchmark de controle.
+- Nenhum snapshot futuro pode influenciar compra ou valoração.
+- Rejeições devem falhar fechado; não converter rejeição em benchmark cash.
+- Não mutar entradas.
 - Mesmo input canônico deve produzir resultado idêntico.
 - Nenhum relógio, aleatoriedade, rede ou I/O.
 
 ## Testes obrigatórios
 
-- constrói série para um único instante;
-- constrói série cronológica para vários instantes;
-- troca de snapshot somente quando um mais recente já está disponível;
-- aceita snapshot com `availableAt === decisionAt`;
-- prova que snapshot futuro nunca aparece antes da disponibilidade;
-- rejeita lista de instantes vazia;
-- rejeita instante não canônico;
-- rejeita instantes duplicados;
-- rejeita instantes fora de ordem;
-- propaga ausência de snapshot elegível;
-- propaga empate no maior `availableAt`;
-- propaga snapshot malformado do par solicitado;
-- ignora outros pares conforme a primitiva existente;
-- ausência de mutação das entradas;
-- imutabilidade dos pontos e da coleção;
+- compra uma vez no primeiro instante e mantém a posição;
+- fill incorpora fee, spread e slippage;
+- patrimônio inicial após a compra reflete custos;
+- preço crescente aumenta o patrimônio;
+- preço decrescente reduz o patrimônio;
+- snapshot novo só afeta pontos após ficar disponível;
+- aceita `availableAt === decisionAt`;
+- rejeita quote diferente de USD;
+- rejeita série sem snapshot elegível;
+- rejeita política inválida;
+- rejeita capital insuficiente/quantidade pequena quando o broker rejeitar;
+- não executa venda final;
+- exatamente um fill e nenhuma outra ordem;
+- não muta snapshots, decisionTimes ou policy;
+- resultado, coleções e objetos próprios congelados;
 - determinismo;
 - testes offline.
 
 ## Documentação
 
-Atualize o README apenas no necessário para explicar a série de evidências do replay.
+Atualize o README apenas no necessário para explicar o benchmark e a ausência de liquidação final.
 
 Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limitações e decisões técnicas.
 
@@ -91,16 +125,14 @@ Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limi
 
 Não implementar:
 
-- decisão BUY/SELL/HOLD;
-- agente, Astra/LLM, prompts ou handoffs;
-- execução de ordem, Risk Manager ou PaperBroker;
-- replay completo do portfólio;
-- indicadores;
-- buy-and-hold ou estratégia aleatória;
-- ranking entre agentes;
+- comparação genérica entre benchmark e estratégia;
+- venda ou custo de saída;
+- estratégia aleatória;
+- replay de decisões de agentes;
+- Astra/LLM, prompts ou handoffs;
+- novas regras de risco;
 - coleta de mercado ou rede;
 - persistência;
-- novas regras de risco;
 - dashboard, servidor ou cloud;
 - wallet externa, chave privada, blockchain;
 - testnet, corretora, exchange, credenciais ou dinheiro real.
@@ -109,17 +141,19 @@ Não adicionar dependência runtime. Não alterar este `TASK.md`.
 
 ## Critérios de aceite
 
-- cada ponto usa apenas informação disponível em seu `decisionAt`;
-- a composição reutiliza a primitiva revisada da TASK-012;
-- comportamento fail-closed para sequência inválida e falhas da seleção;
-- resultado imutável, determinístico e cronológico;
+- benchmark realiza uma única compra paper no primeiro instante;
+- custos de entrada usam o `PaperBroker` existente;
+- todos os pontos respeitam anti-look-ahead;
+- carteira e patrimônio são derivados por primitivas existentes;
+- comportamento fail-closed;
+- resultado imutável e determinístico;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
 - nenhuma rota financeira real existe.
 
 ## Entrega
 
-1. Faça um único commit com a mensagem `feat: constroi serie de snapshots para replay`.
+1. Faça um único commit com a mensagem `feat: adiciona benchmark buy and hold`.
 2. Faça push em branch própria e abra PR para `main`.
-3. No PR, inclua resumo, testes e `Closes #22`.
+3. No PR, inclua resumo, testes e `Closes #24`.
 4. Não aprove o próprio trabalho e não altere o status desta tarefa.
