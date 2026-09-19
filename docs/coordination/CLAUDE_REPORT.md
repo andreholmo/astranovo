@@ -1809,3 +1809,160 @@ necessária — mesma limitação já registrada nas entregas anteriores.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-015 — Comparação determinística entre buy-and-hold e cash (quinta fatia de M3)
+
+- **ID da tarefa:** TASK-015
+- **Milestone:** M3 — comparação buy-and-hold versus cash
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Terceira comparação determinística de M3: `compareBuyAndHoldToCash` recebe um
+`BuyAndHoldBenchmark` e um `CashBenchmark` já construídos e devolve um
+`BuyAndHoldVsCashComparison` imutável, sempre da perspectiva do buy-and-hold. Não executa
+nenhuma ordem, não reconstrói nenhum dos dois benchmarks e não calcula patrimônio, P&L ou
+drawdown — só compara dois resultados já existentes, exatamente como o escopo exato da tarefa
+exige (`CashBenchmark + BuyAndHoldBenchmark → BuyAndHoldVsCashComparison`). Reutiliza
+integralmente `subtractChecked`/`MAX_MICROS` de `src/money/fixed-point.ts` para toda
+comparação monetária; nenhuma fórmula foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_014.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/benchmark/build-cash-benchmark.ts`,
+`src/benchmark/build-buy-and-hold-benchmark.ts`, `src/benchmark/compare-to-cash-benchmark.ts`,
+`src/metrics/summarize-equity-series.ts`, `src/money/fixed-point.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/benchmark/compare-buy-and-hold-to-cash.ts` | criado — `compareBuyAndHoldToCash`, `BuyAndHoldVsCashComparison`, `BuyAndHoldVsCashResult` |
+| `tests/compare-buy-and-hold-to-cash.test.ts` | criado |
+| `README.md` | atualizado (seção "Comparação entre buy-and-hold e cash"; lista "O que existe hoje" e "Ainda não existem" corrigidas para refletir os benchmarks e comparações já entregues) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime. `src/benchmark/compare-to-cash-benchmark.ts` não foi alterado: nenhuma
+correção mínima foi necessária nele.
+
+### Design de `compareBuyAndHoldToCash`
+
+Segue o mesmo formato de `compareToCashBenchmark`, adaptado às duas checagens de consistência
+interna extras que os dois benchmarks exigem (uma para cada `kind`):
+
+1. **Validação monetária primeiro** — `assertValidMicros` (duplicado localmente do mesmo padrão
+   de `compareToCashBenchmark`, porque `BuyAndHoldBenchmark`/`CashBenchmark` são só tipos
+   estruturais em tempo de compilação) valida como `bigint` em `[0, MAX_MICROS]` exatamente os
+   seis campos monetários usados pela comparação: `initialCashMicros` dos dois benchmarks,
+   `startingEquityMicros`/`endingEquityMicros` do `summary` do cash, `endingEquityMicros` do
+   `summary` do buy-and-hold, e o `equityMicros` do último ponto do buy-and-hold.
+2. **`kind` de cada benchmark** — `"BUY_AND_HOLD"` e `"CASH"`, exatamente.
+3. **Consistência interna `agentId` ↔ `summary.agentId`** — para os dois benchmarks
+   separadamente, antes de qualquer comparação cruzada.
+4. **Compatibilidade entre os dois benchmarks** — mesmo `agentId`, mesmo `initialCashMicros`, e
+   mesmo `startedAt`/`endedAt`/`pointCount` nos dois resumos.
+5. **Consistência interna do cash** — `summary.startingEquityMicros` **e**
+   `summary.endingEquityMicros` precisam ser iguais ao próprio `initialCashMicros`: uma carteira
+   que nunca opera não pode ter patrimônio inicial ou final diferente do capital com que
+   começou.
+6. **Consistência mínima do buy-and-hold** — `initialFill.side === "BUY"`, e
+   `initialFill.agentId`/`asset`/`quote` iguais aos campos externos do próprio benchmark; o
+   `equityMicros` do último ponto de `points` precisa ser igual ao `endingEquityMicros` do
+   próprio `summary`, para que um `summary` forjado sem relação com os `points` reais também
+   falhe fechado. Deliberadamente **não** exige que o primeiro ponto de patrimônio do
+   buy-and-hold seja igual a `initialCashMicros` — essa checagem só se aplica ao cash, porque o
+   buy-and-hold paga fee/spread na compra de entrada.
+7. **Resultado** — a mesma comparação de três vias de `compareToCashBenchmark`
+   (`OUTPERFORMED`/`UNDERPERFORMED`/`TIED` + `subtractChecked` para a diferença absoluta), mas
+   sempre nomeada a partir do buy-and-hold: `strategyEndingEquityMicros` vira
+   `buyAndHoldEndingEquityMicros`, `benchmarkEndingEquityMicros` vira `cashEndingEquityMicros`.
+
+### Testes cobertos em `tests/compare-buy-and-hold-to-cash.test.ts`
+
+Buy-and-hold supera cash (`OUTPERFORMED`, diferença exata); buy-and-hold perde para cash
+(`UNDERPERFORMED`, diferença exata); empate (`TIED`, diferença zero); primeiro patrimônio do
+buy-and-hold abaixo do capital inicial por custos de entrada aceito normalmente (mesmos números
+hand-checkable de `tests/build-buy-and-hold-benchmark.test.ts`: US$98.030.200 de US$100
+iniciais); `kind` forjado em cada benchmark separadamente; `agentId` divergente entre os dois
+benchmarks e `summary.agentId` internamente divergente em cada benchmark separadamente; capital
+inicial divergente; `pointCount` divergente; `endedAt` divergente; `summary.startingEquityMicros`
+e `summary.endingEquityMicros` do cash divergindo do seu próprio `initialCashMicros`
+(separadamente); `initialFill` que não é `BUY`, e que diverge em `agentId`/`asset`/`quote`
+(quatro casos); último ponto do buy-and-hold divergindo do `endingEquityMicros` do próprio
+`summary`; valor monetário forjado não-`bigint`, negativo e acima de `MAX_MICROS`; resultado
+congelado; ausência de mutação das duas entradas; determinismo para o mesmo input canônico;
+testes offline (sem relógio, rede ou aleatoriedade).
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **397 testes, 397 passaram, 0 falharam** (371 preexistentes + 26 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum uso
+de `random`. Nenhuma wallet externa, blockchain, testnet, corretora, credencial ou dinheiro
+real foi tocado — a tarefa só lê dois benchmarks já construídos em memória.
+
+### Decisões técnicas tomadas
+
+1. **`assertValidMicros` duplicado localmente**, em vez de exportado de
+   `src/benchmark/compare-to-cash-benchmark.ts`. O escopo exato desta tarefa é criar
+   `src/benchmark/compare-buy-and-hold-to-cash.ts`; a tarefa não autoriza alterar
+   `compareToCashBenchmark` além de uma "correção mínima indispensável demonstrada por teste",
+   que não foi necessária aqui. A duplicação de uma checagem de seis linhas segue o precedente
+   já registrado nas TASK-004, TASK-007 e TASK-008.
+2. **Tipo de resultado próprio, `BuyAndHoldVsCashResult`**, em vez de reexportar
+   `BenchmarkComparisonResult` de `compare-to-cash-benchmark.ts`. Os dois são a mesma união
+   literal de três strings, mas cada módulo de comparação já define seu próprio tipo de
+   resultado com nome específico (o padrão de `PnlDirection` em
+   `summarize-equity-series.ts`); acoplar este módulo a um tipo nomeado por outra comparação
+   pareceu mais confuso do que repetir três literais.
+3. **Consistência interna do cash exige patrimônio inicial *e* final iguais a
+   `initialCashMicros`**, enquanto `compareToCashBenchmark` só verifica o inicial. A tarefa pede
+   explicitamente os dois ("capital inicial igual ao patrimônio inicial e final"); como o cash
+   nunca opera, os três valores são sempre iguais em qualquer `CashBenchmark` real — a checagem
+   extra só importa contra um `summary` forjado.
+4. **O último ponto de `points` é comparado ao `endingEquityMicros` do `summary`, não
+   recalculado.** A tarefa proíbe duplicar cálculo de patrimônio; comparar o ponto já existente
+   ao resumo já existente prova a consistência interna sem revalorar nada.
+5. **Ordem de validação:** monetária → `kind` → `agentId` interno de cada benchmark →
+   compatibilidade cruzada → consistência interna do cash → consistência mínima do
+   buy-and-hold. Segue a mesma ordem de `compareToCashBenchmark` (monetário antes de
+   estrutural), estendida com as duas checagens específicas de cada `kind` por último, porque
+   elas dependem de campos (`initialFill`, `points`) que a validação monetária/estrutural básica
+   já não precisa tocar.
+
+### Limitações conhecidas
+
+- Compara exatamente um `BuyAndHoldBenchmark` contra exatamente um `CashBenchmark`; não produz
+  ranking entre agentes nem compara mais de dois benchmarks de uma vez — fora do escopo exato
+  desta tarefa.
+- Não valida nenhum campo de `initialFill` além de `side`/`agentId`/`asset`/`quote` (por
+  exemplo, `quantityAtoms` ou `totalMicros`): esses valores não são usados pela comparação, e
+  validá-los duplicaria checagens que já pertencem a `buildBuyAndHoldBenchmark`.
+- Não persiste nada em arquivo; opera inteiramente em memória, como as milestones anteriores.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa única e
+mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git fetch origin`/`git pull` exigiram aprovação de rede não concedida neste
+ambiente sandboxed — mesma limitação já registrada na entrega da TASK-014; `git status`/`git
+log`/`git branch -a` confirmaram que a branch de trabalho (`claude/issue-26-20260919-1558`) já
+partia do commit mais recente disponível localmente, sem alterações pendentes, então nenhuma
+sincronização adicional era possível ou necessária.
+
+### Commit
+
+- **Mensagem:** `feat: compara buy and hold com cash`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
