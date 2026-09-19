@@ -1,34 +1,32 @@
 # Tarefa atual
 
-- **ID:** TASK-018
-- **Milestone:** M3 — relatório determinístico consolidado de benchmarks
+- **ID:** TASK-019
+- **Milestone:** M3 — relatório triangular completo de benchmarks
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_017.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_018.md`
 
 ## Objetivo
 
-Consolidar, em uma única função pura, as comparações já existentes da estratégia contra cash e buy-and-hold, sem recalcular métricas nem executar qualquer operação financeira.
+Completar o relatório consolidado de benchmarks incluindo a comparação já existente entre buy-and-hold e cash, sem recalcular métricas ou alterar os comparadores.
 
-`EquitySeriesSummary + CashBenchmark + BuyAndHoldBenchmark → StrategyBenchmarkReport`
+`StrategyBenchmarkReport + comparação existente BuyAndHoldVsCash → relatório triangular auditável`
 
 ## Leitura obrigatória
 
-Leia integralmente `CLAUDE.md`, os documentos de contexto, arquitetura, decisões e roadmap, `docs/coordination/CHATGPT_REVIEW_TASK_017.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/benchmark/compare-to-cash-benchmark.ts`, `src/benchmark/compare-strategy-to-buy-and-hold.ts`, `src/benchmark/build-cash-benchmark.ts`, `src/benchmark/build-buy-and-hold-benchmark.ts` e esta tarefa.
+Leia integralmente `CLAUDE.md`, os documentos de contexto, arquitetura, decisões e roadmap, `docs/coordination/CHATGPT_REVIEW_TASK_018.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/benchmark/build-strategy-benchmark-report.ts`, `src/benchmark/compare-to-cash-benchmark.ts`, `src/benchmark/compare-strategy-to-buy-and-hold.ts`, `src/benchmark/compare-buy-and-hold-to-cash.ts` e esta tarefa.
 
 ## Escopo exato
 
-Crie `src/benchmark/build-strategy-benchmark-report.ts`.
+Evolua `buildStrategyBenchmarkReport` para:
 
-Implemente uma função pura que:
-
-- receba um `EquitySeriesSummary`, um `CashBenchmark` e um `BuyAndHoldBenchmark`;
-- reutilize obrigatoriamente as duas funções de comparação existentes;
-- falhe fechado quando qualquer entrada for incompatível ou inconsistente;
-- devolva um relatório imutável com a identificação comum do experimento e as duas comparações;
-- não replique fórmulas ou validações monetárias já existentes;
-- preserve os resultados exatos em micros e os sentidos das comparações.
+- chamar também `compareBuyAndHoldToCash` exatamente uma vez;
+- incluir no relatório o objeto completo `BuyAndHoldVsCashComparison`, sem transformação;
+- preservar os três resultados e diferenças exatas em micros;
+- manter a identificação comum do experimento;
+- herdar fail-closed exclusivamente dos comparadores existentes;
+- não adicionar fórmulas, reconstrução de benchmark ou validações monetárias duplicadas.
 
 ## Regras obrigatórias
 
@@ -42,11 +40,11 @@ Implemente uma função pura que:
 
 ## Testes obrigatórios
 
-- relatório consolidado com estratégia superando ambos os benchmarks;
-- combinações distintas de resultado, incluindo empate;
-- propagação fail-closed de divergências em cash e buy-and-hold;
-- prova de que as funções existentes são a fonte das comparações;
-- imutabilidade do relatório, não mutação e determinismo;
+- relatório contém as três comparações completas;
+- combinações coerentes de vitória, derrota e empate;
+- comparação buy-and-hold versus cash preservada verbatim;
+- propagação fail-closed de inconsistência entre os dois benchmarks;
+- imutabilidade, não mutação e determinismo;
 - testes offline.
 
 ## Documentação
@@ -59,8 +57,9 @@ Win rate, P&L realizado por trade, ranking multiagente, novas estratégias, exec
 
 ## Critérios de aceite
 
-- composição correta e auditável das duas comparações existentes;
-- validação fail-closed herdada sem duplicação de fórmula;
+- relatório triangular correto e auditável;
+- reutilização integral dos três comparadores existentes;
+- nenhuma duplicação de fórmula ou validação monetária;
 - resultado imutável e determinístico;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
@@ -68,4 +67,4 @@ Win rate, P&L realizado por trade, ranking multiagente, novas estratégias, exec
 
 ## Entrega
 
-Faça um único commit com a mensagem `feat: consolida relatório de benchmarks`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
+Faça um único commit com a mensagem `feat: completa relatório triangular de benchmarks`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
