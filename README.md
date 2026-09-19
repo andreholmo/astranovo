@@ -54,7 +54,8 @@ look-ahead para replay**.
   mede se o resumo de uma estratégia terminou acima, abaixo ou empatado com o benchmark
   buy-and-hold;
 - `src/benchmark/build-strategy-benchmark-report.ts` — `buildStrategyBenchmarkReport`, que
-  consolida as duas comparações acima num único relatório imutável, sem recalcular nada;
+  consolida as três comparações acima num único relatório triangular imutável, sem
+  recalcular nada;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -566,12 +567,14 @@ patrimônios finais, sempre a partir do ponto de vista da estratégia;
 `subtractChecked` de `src/money/fixed-point.ts` — nunca em ponto flutuante. O
 `StrategyVsBuyAndHoldComparison` devolvido é imutável; nenhuma entrada é mutada.
 
-## Relatório determinístico consolidado de benchmarks
+## Relatório triangular determinístico consolidado de benchmarks
 
 `src/benchmark/build-strategy-benchmark-report.ts` define `buildStrategyBenchmarkReport`: a
-menor composição das duas comparações acima em um único relatório auditável. Não executa
-nenhuma ordem, não reconstrói nenhum benchmark e não recalcula nenhuma fórmula monetária —
-reutiliza integralmente `compareToCashBenchmark` e `compareStrategyToBuyAndHold`.
+menor composição das três comparações pareadas entre estratégia, caixa e buy-and-hold —
+`compareToCashBenchmark`, `compareStrategyToBuyAndHold` e `compareBuyAndHoldToCash` — em um
+único relatório triangular auditável. Não executa nenhuma ordem, não reconstrói nenhum
+benchmark e não recalcula nenhuma fórmula monetária — reutiliza integralmente as três
+funções de comparação já existentes.
 
 ```text
 EquitySeriesSummary da estratégia + CashBenchmark + BuyAndHoldBenchmark → StrategyBenchmarkReport
@@ -579,15 +582,17 @@ EquitySeriesSummary da estratégia + CashBenchmark + BuyAndHoldBenchmark → Str
 
 Toda a validação fail-closed — mesmo experimento (`agentId`, `startedAt`, `endedAt`,
 `pointCount` e patrimônio inicial da estratégia igual ao `initialCashMicros` de cada
-benchmark) e a consistência interna de cada benchmark — é herdada inteiramente das duas
-chamadas de comparação; nada é duplicado aqui. Como as duas comparações exigem
-independentemente que o resumo da estratégia coincida com cada benchmark nesses mesmos
-campos, chamar as duas garante, por transitividade, que os benchmarks cash e buy-and-hold
-concordam entre si sobre a mesma identificação de experimento — nenhuma checagem cruzada
-adicional entre os dois benchmarks foi necessária.
+benchmark) e a consistência interna de cada benchmark — é herdada inteiramente das três
+chamadas de comparação; nada é duplicado aqui. Como `compareToCashBenchmark` e
+`compareStrategyToBuyAndHold` exigem independentemente que o resumo da estratégia coincida
+com cada benchmark nesses mesmos campos, chamar as duas já garante, por transitividade, que
+os benchmarks cash e buy-and-hold concordam entre si sobre a mesma identificação de
+experimento; `compareBuyAndHoldToCash` continua sendo chamada diretamente sobre os dois
+benchmarks porque ela verifica uma invariante que nenhuma das outras duas chamadas checa —
+que o patrimônio final do benchmark cash é igual ao seu próprio `initialCashMicros`.
 
-O relatório devolvido carrega os dois objetos de comparação exatamente como
-`compareToCashBenchmark` e `compareStrategyToBuyAndHold` os produziram — mesmos valores em
+O relatório devolvido carrega os três objetos de comparação (`vsCash`, `vsBuyAndHold` e
+`buyAndHoldVsCash`) exatamente como as três funções os produziram — mesmos valores em
 micros, mesma direção (`OUTPERFORMED`, `UNDERPERFORMED` ou `TIED`) — junto da identificação
 comum do experimento. O `StrategyBenchmarkReport` devolvido é imutável; nenhuma das três
 entradas é mutada.
