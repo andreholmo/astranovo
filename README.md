@@ -388,7 +388,44 @@ drawdown é duplicada; até a validação do capital inicial (tipo, sinal e limi
 Como a carteira nunca opera, cada ponto tem caixa e patrimônio exatamente iguais ao capital
 inicial, posições e `snapshotIds` sempre vazios, e o resumo é sempre `FLAT` com
 `pnlMagnitudeMicros` e `maxDrawdownMicros` zero — por construção, não por um caso especial
-verificado à parte. Buy-and-hold e outros benchmarks ainda não existem.
+verificado à parte.
+
+## Benchmark buy-and-hold (compra única com custos paper)
+
+`src/benchmark/build-buy-and-hold-benchmark.ts` define `buildBuyAndHoldBenchmark`, o segundo
+benchmark de M3: uma única compra paper no primeiro instante da série de replay, mantida sem
+nenhuma outra ordem e marcada a mercado em todos os pontos seguintes.
+
+```text
+snapshots + decisionTimes + capital + policy → BuyAndHoldBenchmark auditável
+```
+
+Cada peça é reaproveitada, nunca reimplementada:
+
+- `buildReplaySnapshotSeries` (`src/replay/`) monta a linha temporal sem look-ahead sobre
+  `decisionTimes` (D-009);
+- `createWallet` (`src/portfolio/portfolio.ts`) cria a carteira cash-only inicial;
+- `parseOrderIntent` (`src/domain/contracts.ts`) valida a única ordem BUY de 100% do caixa,
+  com o preço do primeiro snapshot convertido por `microsFromUsdNumber`/`formatIntegerString`
+  (`src/money/fixed-point.ts`);
+- `PaperBroker.execute` (`src/broker/paper-broker.ts`) é a única fonte de custo do fill — fee,
+  spread e slippage da política vêm inteiramente dele, nenhuma fórmula é duplicada;
+- `applyEvent` (`src/portfolio/portfolio.ts`) aplica o fill à carteira;
+- `valueWalletAt` e `summarizeEquitySeries` (`src/metrics/`) valoram cada ponto da série e
+  resumem o patrimônio resultante, exatamente como qualquer estratégia usaria;
+- `parseExecutionPolicy` valida a política de custo recebida antes de chegar ao broker.
+
+Nenhum Risk Manager ou agente participa: é um controle determinístico, não uma estratégia. Uma
+compra rejeitada pelo broker — caixa insuficiente, quantidade pequena demais para preencher —
+falha o benchmark inteiro fechado; nunca vira silenciosamente um benchmark cash. Este benchmark
+**não vende**: o patrimônio final é marcação a mercado da posição comprada, e nenhum custo de
+saída/liquidação está incluído nele.
+
+O resultado devolvido é imutável e registra `kind: "BUY_AND_HOLD"`, `agentId`, `asset`, `quote`,
+`initialCashMicros`, a `executionPolicy` efetivamente validada, o `initialFill`, a
+`walletAfterPurchase`, a `series` de replay usada, os `points` de patrimônio e o `summary`
+final. Nada aqui lê o relógio, gera aleatoriedade ou faz I/O; `snapshots`, `decisionTimes` e a
+política recebida nunca são mutados.
 
 ## Comparação com o benchmark cash
 
