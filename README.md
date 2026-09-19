@@ -11,8 +11,8 @@ Experimento de trading autônomo multiagente, **exclusivamente em paper trading*
 
 Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperBroker**, a
 primeira fatia de **M2 — Risk Manager determinístico**, a fachada determinística que
-integra as duas e a liquidação contábil determinística do resultado dessa fachada no
-ledger.
+integra as duas, a liquidação contábil determinística do resultado dessa fachada no
+ledger, e a primeira fatia de **M3 — valoração de patrimônio sem look-ahead**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -27,13 +27,16 @@ ledger.
 - `src/execution/` — `executePaperOrderWithRisk`, a fachada pura que obriga a sequência
   `evaluateRisk → bloqueio OU PaperBroker.execute`, e `settlePaperExecution`, que registra
   o evento resultante no ledger e deriva a carteira;
+- `src/metrics/value-wallet-at.ts` — `valueWalletAt`, a valoração determinística de
+  patrimônio de uma carteira num instante, sem look-ahead;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
-multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, métricas,
-persistência em arquivo, servidor ou banco de dados. O roadmap está em `docs/ROADMAP.md`.
+multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, série temporal de
+patrimônio, P&L, drawdown, win rate, benchmarks, persistência em arquivo, servidor ou banco
+de dados. O roadmap está em `docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -262,6 +265,39 @@ exatamente as regras já existentes de idempotência e de invariantes de carteir
 
 Pura e determinística: não lê o relógio, não usa aleatoriedade, não faz I/O e não muta
 nenhuma entrada. Nenhuma persistência em arquivo é adicionada nesta fatia.
+
+## Valoração de patrimônio sem look-ahead
+
+`src/metrics/value-wallet-at.ts` define `valueWalletAt`, a menor base de métricas do
+replay (M3): patrimônio é caixa mais posições marcadas a mercado, num único instante.
+
+```text
+Wallet + MarketSnapshot(s) disponíveis → EquityPoint auditável
+```
+
+Esta fatia valora apenas um instante. Ainda não calcula série temporal, P&L, drawdown, win
+rate ou benchmark.
+
+A valoração usa somente snapshots `complete === true`, cotados em `USD`, e já disponíveis
+até `valuedAt` — reaproveitando `parseMarketSnapshot(snapshot, { notAfter: valuedAt })` para
+essa prova de disponibilidade, sem duplicar a regra anti-look-ahead. Dados futuros,
+ausentes, duplicados ou incompatíveis falham fechados:
+
+- cada posição detida precisa ter exatamente um snapshot do mesmo ativo — zero ou mais de
+  um falham fechados;
+- um snapshot de um ativo que a carteira não possui é rejeitado, não ignorado;
+- `snapshot.price` é convertido para micros por `microsFromUsdNumber`; uma precisão
+  incompatível com seis casas decimais falha fechada em vez de arredondar;
+- a soma dos valores usa limites protegidos (`addBounded`/`MAX_MICROS`); overflow falha
+  fechado;
+- uma carteira somente em caixa aceita lista de snapshots vazia e tem
+  `equityMicros === cashMicros`.
+
+O `EquityPoint` devolvido é imutável e traz, para cada posição, a evidência de preço usada
+(`priceMicros`, `snapshotId`, `snapshotAvailableAt`), além de `positionsValueMicros`,
+`equityMicros` e os `snapshotIds` efetivamente usados — todos ordenados por ativo, então a
+ordem de entrada dos snapshots não altera o resultado. Nem a carteira, nem suas posições,
+nem os snapshots recebidos são mutados.
 
 ## Documentação
 
