@@ -2794,3 +2794,181 @@ sincronização adicional era possível ou necessária.
 
 - **Commit:** `fix: valida coerencia de totalMicros com gross e fee`
 - **Hash:** informado a André na resposta após o push.
+
+## TASK-021 — Agregação determinística de desempenho realizado e win rate exato (M3)
+
+- **ID da tarefa:** TASK-021
+- **Milestone:** M3 — agregação de resultados realizados e win rate exato
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Menor agregação auditável de M3: `summarizeRealizedPerformance` recebe um `agentId` e uma
+lista readonly de `ClosedRoundTripResult` já produzidos por `summarizeClosedRoundTrip`
+(TASK-020), e devolve um `RealizedPerformanceSummary` imutável com contagens de trades
+fechados/vitórias/derrotas/empates, ganhos e perdas absolutas somados separadamente com
+proteção de overflow, o resultado líquido (`WIN | LOSS | BREAK_EVEN` com magnitude exata) e
+o win rate representado sem ponto flutuante como a fração inteira `winRateNumerator /
+winRateDenominator`. Não reconstrói fills, posições, FIFO/LIFO ou carteira; não pareia BUY
+com SELL — isso já aconteceu em `summarizeClosedRoundTrip`, a única fonte de todo resultado
+agregado aqui. Reutiliza integralmente `addBounded`, `subtractChecked` e `MAX_MICROS` de
+`src/money/fixed-point.ts`; nenhuma fórmula monetária é duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_020.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/metrics/summarize-closed-round-trip.ts`,
+`src/money/fixed-point.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/metrics/summarize-realized-performance.ts` | criado — `summarizeRealizedPerformance`, `RealizedPerformanceSummary` |
+| `tests/summarize-realized-performance.test.ts` | criado |
+| `README.md` | atualizado (seção "Agregação determinística de desempenho realizado e win rate exato"; lista "O que existe hoje"; lista "Ainda não existem" corrigida — win rate e P&L realizado por trade já existiam/passam a existir) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design de `summarizeRealizedPerformance`
+
+Recebe `(agentId: string, results: readonly ClosedRoundTripResult[])` e percorre a lista uma
+única vez, validando à medida que avança, antes de qualquer soma:
+
+1. `agentId` deve ser uma string não vazia;
+2. cada resultado deve pertencer a `agentId` — um agente divergente falha fechado, na mesma
+   convenção já usada por `summarizeExecutionCosts` (`event.agentId !== agentId`);
+3. `buyEventId` e `sellEventId` de cada resultado são checados contra um único `Set`
+   compartilhado entre as duas pernas e entre todos os resultados da lista — um id
+   reutilizado em qualquer ponto, inclusive entre pernas distintas (o `buyEventId` de um
+   round trip reaparecendo como `sellEventId` de outro), falha fechado antes de contar
+   qualquer coisa;
+4. `realizedCostMicros` e `netProceedsMicros` de cada resultado são revalidados como
+   `bigint` em `[0, MAX_MICROS]`, e a mesma comparação exata usada por
+   `summarizeClosedRoundTrip` é reexecutada para derivar a direção e a magnitude esperadas;
+   se `result.direction` ou `result.resultMagnitudeMicros` divergirem do que essa
+   revalidação produz, o resultado é forjado ou inconsistente e a agregação falha fechada
+   em vez de confiar cegamente no campo já tipado.
+
+Só então o resultado é contado: `winCount`/`totalGainMicros` para `WIN`,
+`lossCount`/`totalLossMicros` para `LOSS` (ambos os totais somados com `addBounded` contra
+`MAX_MICROS`, para que uma soma que estourasse o limite falhe fechado em vez de dar a volta
+silenciosamente), `breakEvenCount` para `BREAK_EVEN`. Ao final, `closedTradeCount` é
+`results.length`, o resultado líquido é a mesma comparação `WIN | LOSS | BREAK_EVEN` com
+magnitude exata aplicada a `totalGainMicros` contra `totalLossMicros`
+(`subtractChecked`), e `winRateNumerator`/`winRateDenominator` são exatamente `winCount` e
+`closedTradeCount` — nunca reduzidos, nunca convertidos para `number` fracionário. Para lista
+vazia, toda contagem e todo total saem zerados sem nenhuma iteração.
+
+### Por que o resultado independe da ordem de entrada
+
+Toda soma acumulada (`totalGainMicros`, `totalLossMicros`) opera sobre valores não negativos
+limitados por `MAX_MICROS`; `addBounded` sobre valores não negativos é comutativa e
+associativa, e como cada soma parcial nunca excede a soma final, nenhuma ordem de iteração
+pode fazer uma soma estourar quando a soma final não estouraria — a rejeição por overflow
+também independe da ordem. A detecção de id repetido depende apenas de pertencimento a um
+`Set`, nunca de posição. Há teste dedicado (`tests/summarize-realized-performance.test.ts`,
+describe "order invariance, immutability, non-mutation and determinism") que agrega a mesma
+lista em ordem direta e invertida e confirma `deepEqual` entre os dois resumos.
+
+### Testes cobertos em `tests/summarize-realized-performance.test.ts`
+
+Lista vazia (toda contagem/total zerado, win rate 0/0); listas homogêneas de somente
+vitórias, somente derrotas e somente empates; combinação de vitória, derrota e empate na
+mesma lista; resultado líquido `WIN`, `LOSS` e `BREAK_EVEN`; diferença exata de 1 micro em
+ganho e em perda; fração exata do win rate, incluindo empate contado no denominador mas não
+no numerador, e o caso trivial 1/1 sem qualquer simplificação; rejeição por um resultado de
+agente divergente (isolado e misturado com resultados válidos); rejeição por `buyEventId`
+reutilizado entre dois resultados, por `sellEventId` reutilizado entre dois resultados, e por
+um id reutilizado entre pernas distintas; rejeição por `direction` inconsistente com o
+próprio custo/receita do resultado, por `resultMagnitudeMicros` inconsistente, e por dinheiro
+inválido (`realizedCostMicros` negativo); proteção contra overflow tanto na soma de ganhos
+quanto na soma de perdas, construindo um primeiro resultado no limite de `MAX_MICROS` e um
+segundo que o excede; invariância à ordem de entrada, congelamento do resumo devolvido,
+ausência de mutação de qualquer resultado recebido, e determinismo do resumo completo para o
+mesmo input canônico. Toda a suíte é offline: nenhum valor monetário sai de `bigint`, nenhuma
+chamada de rede, relógio ou aleatoriedade.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **511 testes, 511 passaram, 0 falharam** (485 preexistentes + 26 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum
+uso de `random`. A branch de trabalho (`claude/issue-38-20260919-2003`) já partia
+sincronizada com `main`: `git rev-parse HEAD main origin/main` confirmou os três apontando
+para o mesmo commit (`dcc4165`) e `git status` confirmou árvore de trabalho limpa antes de
+iniciar.
+
+### Decisões técnicas tomadas
+
+1. **`assertValidMicros` duplicada localmente**, em vez de importada de
+   `summarize-closed-round-trip.ts` ou `summarize-execution-costs.ts`, seguindo o mesmo
+   precedente já registrado nas TASK-004, TASK-007, TASK-008, TASK-018 e TASK-020: a função
+   é privada e não exportada em nenhum dos dois módulos, e o escopo exato desta tarefa é
+   criar `src/metrics/summarize-realized-performance.ts`, não alterar as exportações de
+   outro módulo.
+2. **Um único `Set` compartilhado para `buyEventId` e `sellEventId`**, em vez de dois `Set`s
+   separados. A tarefa exige rejeitar "um ID reutilizado entre pernas distintas" — um
+   `buyEventId` reaparecendo como `sellEventId` de outro resultado — o que só é detectável
+   com um único espaço de nomes compartilhado; dois `Set`s separados perderiam exatamente
+   esse caso.
+3. **Nomes dos campos (`closedTradeCount`, `winCount`, `lossCount`, `breakEvenCount`,
+   `totalGainMicros`, `totalLossMicros`, `netResultDirection`, `netResultMagnitudeMicros`,
+   `winRateNumerator`, `winRateDenominator`) espelham diretamente a redação do escopo exato
+   em `TASK.md`** ("conte trades fechados, vitórias, derrotas e empates"; "some
+   separadamente ganhos e perdas absolutas"; "resultado líquido"; "winRateNumerator /
+   winRateDenominator"), evitando qualquer nome genérico que exigisse reinterpretação.
+4. **`totalLossMicros` é uma magnitude positiva, não um valor com sinal.** A mesma convenção
+   já usada em `ClosedRoundTripResult.resultMagnitudeMicros` e em
+   `EquitySeriesSummary`/`DrawdownRateSummary`: nenhum valor monetário deste repositório é
+   representado como `bigint` negativo; a direção vem sempre de um campo discriminador
+   separado (`netResultDirection`), nunca do sinal do número.
+5. **`winRateNumerator`/`winRateDenominator` são `number`, não `bigint`.** São contagens de
+   trades, não quantias monetárias — a mesma convenção já usada por `eventCount`/
+   `fillCount`/`buyFillCount`/`sellFillCount` em `ExecutionCostSummary`
+   (`src/metrics/summarize-execution-costs.ts`) e por `pointCount` em
+   `EquitySeriesSummary`.
+6. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/
+   `ContractValidationError`, o mesmo mecanismo de todo o resto do repositório.
+
+### Limitações conhecidas
+
+- Opera exclusivamente sobre `ClosedRoundTripResult` já produzidos; não pareia fills, não
+  trata posição parcial, múltiplos lotes, FIFO/LIFO ou short — essas regras já vivem em
+  `summarizeClosedRoundTrip` (TASK-020) e não são reimplementadas aqui, conforme o escopo
+  exato desta tarefa.
+- Não calcula retorno percentual, Sharpe ou qualquer métrica ajustada a risco — fora do
+  escopo exato desta fatia.
+- Não calcula ranking multiagente: agrega exatamente um agente por chamada, exatamente como
+  a assinatura `agentId + ClosedRoundTripResult[] → RealizedPerformanceSummary` define;
+  comparar vários agentes entre si é trabalho futuro que compõe várias chamadas desta
+  função, não uma responsabilidade desta fatia.
+- Não persiste nada em arquivo; opera inteiramente em memória, como as milestones
+  anteriores.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as seis decisões acima têm alternativa única
+e mais simples descartada por motivo explícito, com precedente direto em tarefas anteriores.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git fetch origin` exigiu aprovação não concedida neste ambiente sandboxed,
+na mesma linha já registrada nas correções e tarefas anteriores (TASK-017 a TASK-020);
+`git rev-parse HEAD main origin/main` (os três iguais) e `git status` (árvore limpa)
+confirmaram que a branch de trabalho já partia sincronizada com `main`, então nenhuma
+sincronização adicional era possível ou necessária.
+
+### Commit
+
+- **Mensagem:** `feat: agrega desempenho realizado exato`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
