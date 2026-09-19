@@ -715,3 +715,147 @@ Nenhum bloqueio.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-008 — Resumo determinístico da série de patrimônio (segunda fatia de M3)
+
+- **ID da tarefa:** TASK-008
+- **Milestone:** M3 — resumo determinístico de série de patrimônio, segunda fatia
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Menor redução de série do replay: `summarizeEquitySeries` recebe uma coleção não vazia de
+`EquityPoint` de um único agente, já ordenada cronologicamente pelo chamador, e devolve um
+`EquitySeriesSummary` imutável e auditável com P&L final (direção + magnitude, sem tipo
+monetário assinado) e o maior drawdown absoluto observado, com evidência de onde ocorreu
+(timestamp do pico e do vale). Não calcula replay de ciclos, drawdown percentual, win rate,
+fees agregadas ou benchmarks — fora do escopo exato desta fatia. Reutiliza integralmente
+`subtractChecked` e `MAX_MICROS` de `src/money/fixed-point.ts` para toda comparação
+monetária; nenhuma fórmula foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_007.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/metrics/value-wallet-at.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/metrics/summarize-equity-series.ts` | criado — `summarizeEquitySeries`, `EquitySeriesSummary`, `PnlDirection` |
+| `tests/summarize-equity-series.test.ts` | criado |
+| `README.md` | atualizado (seção "Resumo determinístico da série de patrimônio") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design de `summarizeEquitySeries`
+
+Recebe `points: readonly EquityPoint[]` e percorre a série uma única vez, validando à medida
+que avança:
+
+1. lista vazia falha fechado antes de qualquer leitura;
+2. todo ponto deve pertencer ao mesmo `agentId` do primeiro ponto — agente divergente falha
+   fechado;
+3. `valuedAt` de cada ponto precisa ser canônico (mesma checagem de
+   `src/metrics/value-wallet-at.ts`) e estritamente maior que o anterior — timestamp não
+   canônico, duplicado ou fora de ordem falha fechado, sem ordenar silenciosamente;
+4. `equityMicros` de cada ponto é validado como `bigint` não negativo e no máximo
+   `MAX_MICROS`, mesmo que a tarefa receba `EquityPoint`s já tipados — um chamador pode
+   montá-los manualmente (como os próprios testes fazem), e a fatia falha fechada perante
+   um valor fora do intervalo em vez de confiar cegamente no tipo.
+
+Um pico corrente (`peakEquityMicros`/`peakAt`) é atualizado sempre que o patrimônio do ponto
+atual é maior ou igual ao pico já visto — assim uma recuperação completa que empata com o
+pico anterior passa a referenciar o instante mais recente dessa recuperação, sem alterar o
+valor do pico nem apagar um drawdown máximo já registrado antes dela. O drawdown de cada
+ponto é `subtractChecked(pico corrente, patrimônio do ponto)`, nunca negativo por construção
+(o pico corrente nunca é menor que o patrimônio atual). `maxDrawdownMicros` só é substituído
+por um drawdown estritamente maior, o que garante que um empate entre dois episódios mantém
+o primeiro cronológico, exatamente como a tarefa exige.
+
+P&L é a diferença exata entre o patrimônio do último e do primeiro ponto, calculada com
+`subtractChecked` sobre o maior menos o menor e reportada como `pnlDirection`
+(`GAIN`/`LOSS`/`FLAT`) mais `pnlMagnitudeMicros` não negativo — nunca um delta assinado.
+
+### Testes cobertos em `tests/summarize-equity-series.test.ts`
+
+Série de um único ponto (P&L `FLAT`, drawdown zero); ganho; perda; resultado flat com dois
+pontos iguais; novo pico seguido de drawdown; recuperação parcial mantendo o drawdown mais
+profundo; recuperação completa retornando a P&L `FLAT` sem apagar o drawdown máximo
+histórico; múltiplos drawdowns escolhendo o maior; empate de drawdown mantendo o primeiro
+episódio cronológico; rejeição de lista vazia; rejeição de agentes misturados; rejeição de
+timestamp duplicado; rejeição de timestamps fora de ordem; rejeição de timestamp não
+canônico; rejeição de patrimônio negativo; rejeição de patrimônio acima de `MAX_MICROS`;
+congelamento do `EquitySeriesSummary`; ausência de mutação dos pontos recebidos;
+determinismo para o mesmo input canônico.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **262 testes, 262 passaram, 0 falharam** (243 preexistentes + 19 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio (todo
+`valuedAt` já vem nos `EquityPoint` de entrada, injetados pelo chamador em cada teste),
+nenhum uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **`isCanonicalTimestamp` duplicado localmente pela terceira vez** (após
+   `src/domain/contracts.ts`, `src/risk/risk-manager.ts` e
+   `src/metrics/value-wallet-at.ts`). O escopo exato desta tarefa é criar `src/metrics/`, e
+   a checagem não é exportada de `contracts.ts`; segue o precedente já registrado nas
+   TASK-004 e TASK-007 para esse mesmo trade-off.
+2. **Pico corrente atualizado com `>=`, não apenas `>`.** Isso faz `peakAt` acompanhar a
+   ocorrência mais recente de um patrimônio máximo (por exemplo, após uma recuperação
+   completa que empata com o pico anterior), o que é a base mais intuitiva para um drawdown
+   futuro medido a partir dali. Não afeta o valor de `peakEquityMicros` (idêntico em caso de
+   empate) nem o registro de um drawdown máximo já ocorrido antes da atualização, porque
+   `maxDrawdownMicros` só é observado, nunca recalculado retroativamente.
+3. **`equityMicros` de cada ponto é revalidado (bigint, não negativo, ≤ `MAX_MICROS`)**, em
+   vez de confiar que todo `EquityPoint` recebido veio de `valueWalletAt`. A tarefa pede
+   explicitamente "validar limites monetários e falhar fechado diante de valores inválidos";
+   como `EquityPoint` é apenas um tipo estrutural em tempo de compilação, nada impede um
+   chamador (ou um teste) de construir um com um valor fora do intervalo.
+4. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/
+   `ContractValidationError`, o mesmo mecanismo de todo o resto do repositório.
+5. **Nenhum tipo monetário assinado foi criado.** `pnlDirection` mais `pnlMagnitudeMicros`
+   (sempre não negativo) descrevem o P&L completamente, exatamente como a tarefa autoriza:
+   "não crie um tipo monetário signed se a representação direção + magnitude for
+   suficiente".
+
+### Limitações conhecidas
+
+- Não calcula drawdown percentual, win rate, fees agregadas, benchmarks ou replay de ciclos
+  — fatias futuras de M3, fora do escopo exato desta tarefa.
+- Não seleciona nem busca `EquityPoint`s: o chamador precisa fornecer a série já ordenada
+  cronologicamente e já filtrada para um único agente.
+- Não há verificação de que os `EquityPoint`s recebidos foram de fato produzidos por
+  `valueWalletAt` para o mesmo conjunto de snapshots/carteira — apenas os campos usados aqui
+  (`agentId`, `valuedAt`, `equityMicros`) são validados.
+- Não persiste nada em arquivo; o `EquitySeriesSummary` vive apenas em memória, como as
+  milestones anteriores.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git pull --ff-only origin main` não pôde ser executado neste ambiente
+sandboxed (operações de rede exigem aprovação que não foi concedida); a branch já havia sido
+criada a partir do topo de `main` (commit `23c814d`), confirmado por `git log`/`git status`
+antes de iniciar o trabalho, então nenhuma sincronização adicional era necessária.
+
+### Commit
+
+- **Mensagem:** `feat: resume serie de patrimonio`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.

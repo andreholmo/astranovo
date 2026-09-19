@@ -12,7 +12,8 @@ Experimento de trading autônomo multiagente, **exclusivamente em paper trading*
 Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperBroker**, a
 primeira fatia de **M2 — Risk Manager determinístico**, a fachada determinística que
 integra as duas, a liquidação contábil determinística do resultado dessa fachada no
-ledger, e a primeira fatia de **M3 — valoração de patrimônio sem look-ahead**.
+ledger, e a segunda fatia de **M3 — valoração de patrimônio sem look-ahead e resumo
+determinístico da série de patrimônio**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -29,14 +30,16 @@ ledger, e a primeira fatia de **M3 — valoração de patrimônio sem look-ahead
   o evento resultante no ledger e deriva a carteira;
 - `src/metrics/value-wallet-at.ts` — `valueWalletAt`, a valoração determinística de
   patrimônio de uma carteira num instante, sem look-ahead;
+- `src/metrics/summarize-equity-series.ts` — `summarizeEquitySeries`, o resumo
+  determinístico de P&L final e drawdown absoluto de uma série de `EquityPoint`;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
-multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, série temporal de
-patrimônio, P&L, drawdown, win rate, benchmarks, persistência em arquivo, servidor ou banco
-de dados. O roadmap está em `docs/ROADMAP.md`.
+multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, replay completo de
+ciclos, drawdown percentual, win rate, fees agregadas, benchmarks, persistência em arquivo,
+servidor ou banco de dados. O roadmap está em `docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -298,6 +301,34 @@ O `EquityPoint` devolvido é imutável e traz, para cada posição, a evidência
 `equityMicros` e os `snapshotIds` efetivamente usados — todos ordenados por ativo, então a
 ordem de entrada dos snapshots não altera o resultado. Nem a carteira, nem suas posições,
 nem os snapshots recebidos são mutados.
+
+## Resumo determinístico da série de patrimônio
+
+`src/metrics/summarize-equity-series.ts` define `summarizeEquitySeries`, a segunda fatia de
+M3: reduz uma série já calculada de `EquityPoint`s de um agente a um P&L final e ao maior
+drawdown absoluto observado, com evidência de onde ocorreu.
+
+```text
+EquityPoint[] (canônicos, cronológicos, um agente) → EquitySeriesSummary auditável
+```
+
+Ainda não calcula replay de ciclos, drawdown percentual, win rate, fees agregadas ou
+benchmarks — isso permanece fora do escopo desta fatia.
+
+A entrada precisa já vir ordenada cronologicamente pelo chamador: timestamps não canônicos,
+duplicados ou fora de ordem, ou pontos de agentes diferentes, falham fechados em vez de
+serem silenciosamente reordenados ou misturados. O P&L é deliberadamente livre de dinheiro
+em `number`: `pnlDirection` (`GAIN | LOSS | FLAT`) mais `pnlMagnitudeMicros`, a diferença
+exata entre patrimônio final e inicial, dispensam um tipo monetário assinado.
+
+O drawdown em cada ponto é `pico anterior ou atual − patrimônio atual`, nunca negativo;
+`maxDrawdownMicros` é o maior valor observado na série, com `maxDrawdownPeakAt` e
+`maxDrawdownTroughAt` como evidência dos instantes do pico e do vale. Em empate entre dois
+episódios de mesma magnitude, o primeiro cronológico prevalece. Uma série de um único ponto
+sempre produz P&L `FLAT` e drawdown zero. Toda comparação monetária reaproveita
+`subtractChecked`/`MAX_MICROS` de `src/money/fixed-point.ts`; nenhuma fórmula é duplicada.
+O `EquitySeriesSummary` devolvido é imutável; nem a lista de pontos recebida, nem seus
+campos, são mutados.
 
 ## Documentação
 
