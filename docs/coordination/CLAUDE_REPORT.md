@@ -859,3 +859,158 @@ antes de iniciar o trabalho, então nenhuma sincronização adicional era necess
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-009 — Métricas determinísticas de execução e custos (terceira fatia de M3)
+
+- **ID da tarefa:** TASK-009
+- **Milestone:** M3 — resumo determinístico de custos de execução, terceira fatia
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Menor resumo de custos do ledger paper: `summarizeExecutionCosts` recebe `agentId` e uma
+coleção readonly de `LedgerEvent` (qualquer ordem, possivelmente vazia) e devolve um
+`ExecutionCostSummary` imutável e auditável — contagens de fills/rejeições, fees e o impacto
+de spread/slippage embutido no preço de cada fill, separados da fee. Não reconstrói
+carteira, não calcula win rate, P&L realizado por trade, drawdown percentual ou benchmarks —
+fora do escopo exato desta fatia. Reutiliza integralmente `mulDivFloor`, `addBounded`,
+`subtractChecked`, `parseAssetScale`, `MAX_MICROS` e `MAX_ATOMS` de
+`src/money/fixed-point.ts`, e `REJECTION_CODES` de `src/ledger/events.ts`; nenhuma fórmula
+monetária ou lista de códigos foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_008.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/ledger/events.ts`, `src/money/fixed-point.ts` e
+`TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/metrics/summarize-execution-costs.ts` | criado — `summarizeExecutionCosts`, `ExecutionCostSummary`, `RejectionCounts` |
+| `tests/summarize-execution-costs.test.ts` | criado |
+| `README.md` | atualizado (seção "Resumo determinístico de custos de execução") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design de `summarizeExecutionCosts`
+
+Percorre `events` uma única vez, validando à medida que avança:
+
+1. todo evento precisa ter `agentId` igual ao solicitado — um agente divergente falha
+   fechado;
+2. todo `eventId` só pode aparecer uma vez num `Set` — uma duplicata falha fechado, para
+   impedir dupla contagem (não importa se o conteúdo é idêntico ou não: a identidade do
+   evento é o que conta);
+3. uma `RejectionEvent` incrementa `rejectionCount` e a contagem do seu `code`, validado
+   contra a lista estável `REJECTION_CODES` — um código fora dessa lista falha fechado — e
+   não toca em nenhum total monetário;
+4. uma `FillEvent` incrementa `fillCount`/`buyFillCount`/`sellFillCount`, revalida
+   `quantityAtoms`, `referencePriceMicros`, `effectivePriceMicros`, `grossMicros` e
+   `feeMicros` como `bigint` não negativos dentro dos limites de sanidade existentes
+   (`MAX_ATOMS`/`MAX_MICROS`) e `assetScale` com `parseAssetScale` — mesmo que `FillEvent`
+   já seja tipado, nada impede um chamador de construir um evento com um campo fora do
+   intervalo, o mesmo trade-off já registrado nas TASK-007/TASK-008.
+
+O impacto de execução de cada fill usa exatamente a fórmula da tarefa: `BUY` usa
+`subtractChecked(effectivePriceMicros, referencePriceMicros, ...)`, `SELL` usa
+`subtractChecked(referencePriceMicros, effectivePriceMicros, ...)` — a checagem direcional
+(`effectivePriceMicros >= referencePriceMicros` para BUY, `<=` para SELL) roda antes, então
+`subtractChecked` nunca vê um delta negativo por construção; um fill que viole essa direção
+falha fechado como preço "direcionalmente inválido". O custo do fill é
+`mulDivFloor(quantityAtoms, deltaPriceMicros, scaleFactor(assetScale))`, e a soma protegida
+de `grossMicros`, `feeMicros` e do impacto usa `addBounded(..., MAX_MICROS, ...)` — uma
+única fill cujo custo já exceda `MAX_MICROS`, ou uma soma que ultrapasse esse limite, falha
+fechada por overflow.
+
+As contagens por código de rejeição são construídas iterando `REJECTION_CODES` (não os
+eventos recebidos) para inicializar um objeto com todo código presente e zerado; a ordem das
+chaves desse objeto é portanto sempre a ordem declarada em `REJECTION_CODES`, qualquer que
+seja a ordem em que os eventos chegaram — não há necessidade de ordenar nada depois. Como
+tanto a detecção de duplicata quanto toda soma são independentes de ordem, a saída completa
+não depende da ordem de `events`.
+
+### Testes cobertos em `tests/summarize-execution-costs.test.ts`
+
+Lista vazia com todas as contagens/totais zerados; um fill BUY; um fill SELL; múltiplos
+fills somando gross e fees; cálculo exato do impacto de um fill BUY; cálculo exato do
+impacto de um fill SELL; arredondamento conservador por floor no impacto
+(`floor(1 * 3_333_333 / 100) = 33_333`, não 33_334); rejeições contadas sem alterar nenhum
+total monetário; contagem de cada código de rejeição usado no fixture, com a ordem das
+chaves igual a `REJECTION_CODES`; mesmo conjunto de eventos em ordens diferentes produzindo
+resultado idêntico; evento de agente divergente rejeitado; `eventId` duplicado rejeitado
+(dois fills com o mesmo conteúdo produzem o mesmo `eventId` via `createFillEvent`, e a
+segunda ocorrência é rejeitada); fill BUY abaixo do preço de referência rejeitado; fill SELL
+acima do preço de referência rejeitado; valor negativo rejeitado (evento construído à mão,
+já que `createFillEvent` por si só nunca produz um `bigint` negativo — `formatIntegerString`
+rejeitaria isso ao computar o `eventId`); escala de ativo inválida rejeitada; overflow do
+impacto total de execução falhando fechado; overflow do total de gross falhando fechado;
+congelamento do resumo e de `rejectionCounts`; ausência de mutação dos eventos recebidos;
+determinismo para o mesmo input canônico.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **283 testes, 283 passaram, 0 falharam** (262 preexistentes + 21 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio (todo
+`occurredAt` já vem nos eventos de entrada, injetados pelo chamador em cada teste), nenhum
+uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **`eventId` duplicado é detectado com um `Set`, independentemente de conteúdo.** A tarefa
+   pede "duplicata deve falhar fechada para impedir dupla contagem"; a identidade do evento
+   já é o `eventId` (hash de conteúdo, por `src/ledger/events.ts`), então duas ocorrências do
+   mesmo id — venham de conteúdo idêntico ou (impossível na prática, mas não verificado aqui)
+   de uma colisão — nunca devem ser somadas duas vezes.
+2. **`rejectionCounts` inclui todos os `REJECTION_CODES`, com zero para os não usados**, em
+   vez de listar apenas os códigos observados. Construir o objeto iterando a lista estável
+   entrega "ordem determinística" sem nenhuma ordenação adicional, e um consumidor não
+   precisa checar a presença de uma chave antes de lê-la.
+3. **Todo campo monetário do fill é revalidado (bigint, não negativo, dentro do limite de
+   sanidade), mesmo que `FillEvent` já seja tipado.** Mesmo trade-off já registrado nas
+   TASK-007 e TASK-008: nada impede um chamador de montar um evento fora do intervalo, e a
+   tarefa pede explicitamente falha fechada para esse caso.
+4. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/
+   `ContractValidationError`, o mesmo mecanismo do resto do repositório.
+5. **Nenhum tipo monetário assinado foi criado.** `totalGrossMicros`, `totalFeeMicros` e
+   `totalExecutionImpactMicros` são sempre não negativos por construção (gross, fee e o
+   próprio impacto — já garantido não negativo pela checagem direcional — nunca são
+   subtraídos de um total).
+
+### Limitações conhecidas
+
+- Não calcula P&L realizado por trade, win rate, drawdown percentual, benchmarks ou replay
+  completo — fatias futuras de M3, fora do escopo exato desta tarefa.
+- Não seleciona nem filtra eventos: o chamador precisa fornecer a coleção já pertencente a
+  um único agente (o resumo apenas valida essa condição e falha fechado se violada).
+- Não persiste nada em arquivo; o `ExecutionCostSummary` vive apenas em memória, como as
+  milestones anteriores.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git pull`/`git fetch origin main` não puderam ser executados neste
+ambiente sandboxed (operações de rede exigem aprovação que não foi concedida); `git log`/
+`git status` confirmaram que a branch já estava no mesmo commit de `main` (`69dbdb6`) antes
+de iniciar o trabalho, então nenhuma sincronização adicional era necessária — mesma
+limitação já registrada na entrega da TASK-008.
+
+### Commit
+
+- **Mensagem:** `feat: resume custos de execucao paper`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.

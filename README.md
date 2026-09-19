@@ -12,8 +12,8 @@ Experimento de trading autônomo multiagente, **exclusivamente em paper trading*
 Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperBroker**, a
 primeira fatia de **M2 — Risk Manager determinístico**, a fachada determinística que
 integra as duas, a liquidação contábil determinística do resultado dessa fachada no
-ledger, e a segunda fatia de **M3 — valoração de patrimônio sem look-ahead e resumo
-determinístico da série de patrimônio**.
+ledger, e a terceira fatia de **M3 — valoração de patrimônio sem look-ahead, resumo
+determinístico da série de patrimônio e resumo determinístico de custos de execução**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -32,14 +32,17 @@ determinístico da série de patrimônio**.
   patrimônio de uma carteira num instante, sem look-ahead;
 - `src/metrics/summarize-equity-series.ts` — `summarizeEquitySeries`, o resumo
   determinístico de P&L final e drawdown absoluto de uma série de `EquityPoint`;
+- `src/metrics/summarize-execution-costs.ts` — `summarizeExecutionCosts`, o resumo
+  determinístico de fills, rejeições, fees e impacto de execução do ledger paper de
+  um agente;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
 multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, replay completo de
-ciclos, drawdown percentual, win rate, fees agregadas, benchmarks, persistência em arquivo,
-servidor ou banco de dados. O roadmap está em `docs/ROADMAP.md`.
+ciclos, drawdown percentual, win rate, P&L realizado por trade, benchmarks, persistência em
+arquivo, servidor ou banco de dados. O roadmap está em `docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -329,6 +332,36 @@ sempre produz P&L `FLAT` e drawdown zero. Toda comparação monetária reaprovei
 `subtractChecked`/`MAX_MICROS` de `src/money/fixed-point.ts`; nenhuma fórmula é duplicada.
 O `EquitySeriesSummary` devolvido é imutável; nem a lista de pontos recebida, nem seus
 campos, são mutados.
+
+## Resumo determinístico de custos de execução
+
+`src/metrics/summarize-execution-costs.ts` define `summarizeExecutionCosts`, a terceira
+fatia de M3: resume os fills e rejeições já registrados no ledger paper de um agente,
+incluindo fees e o impacto de spread/slippage embutido no preço — sem reconstruir carteira
+nem calcular win rate.
+
+```text
+agentId + LedgerEvent[] (qualquer ordem, possivelmente vazia) → ExecutionCostSummary auditável
+```
+
+Ainda não calcula P&L realizado por trade, win rate, drawdown percentual, benchmarks ou
+replay completo — isso permanece fora do escopo desta fatia.
+
+Fee e impacto de execução são reportados separadamente: a fee vem de `feeMicros` em cada
+fill; o impacto mede quanto do spread/slippage foi embutido no preço efetivo, calculado por
+fill como `BUY: effectivePriceMicros − referencePriceMicros`, `SELL: referencePriceMicros −
+effectivePriceMicros`, com o custo do fill em `floor(quantityAtoms * deltaPriceMicros /
+10^assetScale)`. Toda soma usa `addBounded`/`MAX_MICROS` de `src/money/fixed-point.ts` e
+falha fechada em overflow; nenhuma fórmula monetária é duplicada.
+
+Todo evento precisa pertencer ao `agentId` pedido e ter um `eventId` nunca repetido — um
+agente divergente ou um `eventId` duplicado falha fechado, para impedir dupla contagem. Um
+fill BUY com `effectivePriceMicros` abaixo do preço de referência, ou um fill SELL acima
+dele, é direcionalmente inválido e falha fechado. A ordem de entrada dos eventos nunca
+altera o resultado; uma lista vazia produz todas as contagens e totais zerados. Contagens de
+rejeição usam somente os `REJECTION_CODES` estáveis de `src/ledger/events.ts`, sempre na
+mesma ordem determinística. O `ExecutionCostSummary` devolvido é imutável; nem os eventos
+recebidos, nem a coleção, são mutados.
 
 ## Documentação
 
