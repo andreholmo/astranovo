@@ -1647,3 +1647,165 @@ necessária — mesma limitação já registrada nas entregas anteriores.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-014 — Benchmark buy-and-hold com custos paper (quarta fatia de M3)
+
+- **ID da tarefa:** TASK-014
+- **Milestone:** M3 — benchmark buy-and-hold com custos paper
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Segundo benchmark de M3: `buildBuyAndHoldBenchmark` recebe `agentId`, `initialCashMicros`, uma
+coleção não confiável de snapshots, `asset`, `quote`, `assetScale`, uma coleção de
+`decisionTimes` e uma `ExecutionPolicy` não confiável, e devolve um `BuyAndHoldBenchmark`
+imutável: uma única compra paper no primeiro instante da série de replay, mantida sem nenhuma
+outra ordem e marcada a mercado em todos os pontos seguintes. Não vende ao final — o patrimônio
+devolvido é marcação a mercado, sem custo de saída. Reutiliza integralmente
+`buildReplaySnapshotSeries` (`src/replay/`), `createWallet`/`applyEvent`
+(`src/portfolio/portfolio.ts`), `parseOrderIntent`/`parseExecutionPolicy`
+(`src/domain/contracts.ts`), `PaperBroker.execute` (`src/broker/paper-broker.ts`),
+`microsFromUsdNumber`/`formatIntegerString` (`src/money/fixed-point.ts`) e
+`valueWalletAt`/`summarizeEquitySeries` (`src/metrics/`); nenhuma fórmula de preço, fee,
+spread, slippage, contabilidade, valoração ou resumo foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_013.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/replay/build-replay-snapshot-series.ts`,
+`src/benchmark/build-cash-benchmark.ts`, `src/broker/paper-broker.ts`,
+`src/domain/contracts.ts`, `src/portfolio/portfolio.ts`, `src/metrics/value-wallet-at.ts`,
+`src/metrics/summarize-equity-series.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/benchmark/build-buy-and-hold-benchmark.ts` | criado — `buildBuyAndHoldBenchmark`, `BuyAndHoldBenchmark` |
+| `tests/build-buy-and-hold-benchmark.test.ts` | criado |
+| `README.md` | atualizado (seção "Benchmark buy-and-hold (compra única com custos paper)") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `buildBuyAndHoldBenchmark`
+
+Segue exatamente a sequência descrita no escopo exato da tarefa, na mesma ordem:
+
+1. `buildReplaySnapshotSeries(snapshots, asset, quote, decisionTimes)` monta a série sem
+   look-ahead; qualquer rejeição dela (série vazia, instante não canônico/fora de ordem,
+   ausência de snapshot elegível, empate, snapshot malformado) propaga sem captura;
+2. `quote !== "USD"` falha fechado antes de gastar qualquer caixa;
+3. `createWallet(agentId, initialCashMicros)` cria a carteira cash-only;
+4. `parseExecutionPolicy(executionPolicy)` valida a política de custo recebida;
+5. o preço do primeiro ponto da série (`series[0].snapshot.price`) é convertido para micros por
+   `microsFromUsdNumber` e devolvido à string decimal canônica por `formatIntegerString`, para
+   compor um `OrderIntent` BUY de `positionPct: 1` validado por `parseOrderIntent`, com
+   `orderId`/`cycleId` determinísticos (`${agentId}-buy-and-hold-${asset}`) e
+   `createdAt`/`occurredAt` iguais a `series[0].decisionAt`;
+6. `new PaperBroker().execute(...)` roda exatamente uma vez;
+7. se o resultado não for `FILLED`, a função falha fechado imediatamente — uma rejeição do
+   broker (caixa insuficiente, quantidade pequena demais) nunca vira um benchmark cash nem um
+   resultado parcial;
+8. `applyEvent(startingWallet, outcome.event)` aplica o fill e deriva `walletAfterPurchase`;
+9. cada ponto de `series` é valorado por `valueWalletAt(walletAfterPurchase, point.decisionAt,
+   [point.snapshot])` — a carteira nunca muda entre pontos, só o snapshot usado para marcar a
+   posição a mercado, o que já garante "sem venda final" por construção;
+10. `summarizeEquitySeries(points)` reduz a série valorada ao resumo final.
+
+O `BuyAndHoldBenchmark` devolvido é congelado, junto com `points` (array próprio construído
+aqui) — `series`, `walletAfterPurchase`, `initialFill` e `executionPolicy` já chegam congelados
+dos módulos reutilizados, então nenhum congelamento é duplicado além do necessário.
+
+### Testes cobertos em `tests/build-buy-and-hold-benchmark.test.ts`
+
+Compra única no primeiro instante mantendo a posição, sem custos; fill incorporando fee, spread
+e slippage sob `COSTED_POLICY` (980 atoms, gross 98.980.000, fee 989.800, total 99.969.800 —
+mesmos números hand-checkable já documentados na TASK-003); primeiro ponto de patrimônio
+refletindo o custo da compra (US$98.030.200 de US$100 iniciais); preço subsequente maior
+aumentando o patrimônio e preço menor reduzindo; um snapshot mais novo só afetando pontos após
+ficar disponível (réplica do teste de look-ahead da TASK-013, agora sobre o patrimônio);
+`availableAt === decisionAt` aceito na fronteira; rejeição de `quote` diferente de "USD",
+de série sem snapshot elegível, de `decisionTimes` vazio, de política de execução inválida, de
+caixa inicial zero (rejeição `INSUFFICIENT_CASH` do broker) e de preço alto demais para o caixa
+disponível (rejeição `QUANTITY_TOO_SMALL` do broker) — todas propagadas como
+`ContractValidationError`; ausência de venda final (quantidade detida idêntica em todos os
+pontos); exatamente um fill (custo e quantidade final consistentes com uma única ordem sob
+`COSTED_POLICY`); ausência de mutação de `snapshots`, `decisionTimes` e da política recebida;
+congelamento do resultado e de cada coleção/objeto aninhado; determinismo para o mesmo input
+canônico.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **371 testes, 371 passaram, 0 falharam** (353 preexistentes + 18 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio (todo
+instante é injetado pelo chamador em cada teste), nenhum uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **`orderId`/`cycleId` determinísticos, derivados apenas de `agentId` e `asset`
+   (`${agentId}-buy-and-hold-${asset}`).** A tarefa exige "mesmo input canônico deve produzir
+   resultado idêntico" e proíbe qualquer relógio ou aleatoriedade; um identificador aleatório
+   ou baseado em timestamp quebraria o determinismo. Como o benchmark nunca executa mais de uma
+   ordem por chamada, um identificador estável por agente/ativo é suficiente e nunca colide
+   dentro de uma mesma execução.
+2. **`executionPolicy` recebido como `unknown` e validado com `parseExecutionPolicy` dentro da
+   função**, em vez de exigir um `ExecutionPolicy` já tipado. A regra obrigatória "Validar
+   `ExecutionPolicy` com o parser existente" só faz sentido como uma validação em tempo de
+   execução — `ExecutionPolicy` é apenas um tipo estrutural em tempo de compilação, então nada
+   impede um chamador de montar um objeto malformado; validar aqui, com o parser já existente,
+   evita duplicar as regras de `feeBps`/`spreadBps`/`slippageBps` e ainda documenta a "política
+   efetivamente usada" pedida na saída mínima.
+3. **A verificação de `quote === "USD"` roda depois de `buildReplaySnapshotSeries`, na ordem
+   exata listada em "Escopo exato" da tarefa**, mesmo sendo tecnicamente possível verificar
+   antes. Segui a ordem declarada da tarefa em vez de reordenar por preferência própria, porque
+   nenhuma das duas ordens muda o comportamento observável (ambas falham fechado sem gastar
+   caixa) e a tarefa é explícita sobre a sequência.
+4. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/`ContractValidationError`
+   sob o nome de contrato `BuyAndHoldBenchmark`, incluindo a rejeição fail-closed de uma compra
+   que não produz `FILL` — a mensagem não repete o código de rejeição do broker (`INSUFFICIENT_CASH`,
+   `QUANTITY_TOO_SMALL`, ...) para não se afastar da convenção do repositório de nunca embutir o
+   valor/motivo bruto recebido na mensagem de erro.
+5. **`points` é o único array congelado por esta função.** `series`, `walletAfterPurchase`,
+   `initialFill` e `executionPolicy` já chegam congelados de `buildReplaySnapshotSeries`,
+   `applyEvent`/`createWallet`, `PaperBroker.execute` e `parseExecutionPolicy` respectivamente;
+   recongelá-los seria redundante.
+
+### Limitações conhecidas
+
+- Não implementa venda ou custo de saída: o patrimônio final é marcação a mercado da posição
+  aberta na primeira compra, e um custo de liquidação real ainda não está incluído em nenhum
+  ponto da série — documentado no README e no cabeçalho do módulo, como a tarefa exige.
+- Não compara o benchmark contra nenhuma estratégia; `compareToCashBenchmark`
+  (`src/benchmark/compare-to-cash-benchmark.ts`) só sabe comparar contra `CashBenchmark`, e uma
+  comparação genérica está fora do escopo desta tarefa.
+- Um par `asset`/`quote` por chamada, como as demais primitivas de replay reutilizadas; um
+  benchmark multiativo exigiria uma chamada por ativo.
+- Não persiste nada em arquivo; roda inteiramente em memória, como as milestones anteriores.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa única e
+mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git pull --ff-only origin main`/`git fetch origin main` não puderam ser
+executados neste ambiente sandboxed (operações de rede exigem aprovação que não foi concedida);
+`git status`/`git log`/`git branch -a` confirmaram que a branch já estava no mesmo commit de
+`main` (`d4e2eba`) antes de iniciar o trabalho, então nenhuma sincronização adicional era
+necessária — mesma limitação já registrada nas entregas anteriores.
+
+### Commit
+
+- **Mensagem:** `feat: adiciona benchmark buy and hold`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
