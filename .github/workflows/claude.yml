@@ -53,7 +53,7 @@ jobs:
           steps.claude.outputs.conclusion == 'success' &&
           steps.claude.outputs.branch_name != ''
         env:
-          GH_TOKEN: ${{ steps.claude.outputs.github_token || github.token }}
+          GH_TOKEN: ${{ github.token }}
           CLAUDE_BRANCH: ${{ steps.claude.outputs.branch_name }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_TITLE: ${{ github.event.issue.title }}
