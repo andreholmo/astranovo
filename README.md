@@ -15,7 +15,8 @@ integra as duas, a liquidação contábil determinística do resultado dessa fac
 ledger, e **M3 — valoração de patrimônio sem look-ahead, resumo determinístico da série
 de patrimônio, drawdown percentual determinístico, resumo determinístico de custos de
 execução, os benchmarks cash e buy-and-hold, a comparação determinística de cada um deles
-com o cash, e a seleção/série de snapshots sem look-ahead para replay**.
+com o cash, a comparação determinística de uma estratégia com o buy-and-hold, e a
+seleção/série de snapshots sem look-ahead para replay**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -48,6 +49,9 @@ com o cash, e a seleção/série de snapshots sem look-ahead para replay**.
   resumo de uma estratégia terminou acima, abaixo ou empatado com o benchmark cash;
 - `src/benchmark/compare-buy-and-hold-to-cash.ts` — `compareBuyAndHoldToCash`, que mede se o
   benchmark buy-and-hold terminou acima, abaixo ou empatado com o benchmark cash;
+- `src/benchmark/compare-strategy-to-buy-and-hold.ts` — `compareStrategyToBuyAndHold`, que
+  mede se o resumo de uma estratégia terminou acima, abaixo ou empatado com o benchmark
+  buy-and-hold;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -529,6 +533,35 @@ patrimônios finais, sempre a partir do ponto de vista do buy-and-hold;
 `differenceMagnitudeMicros` é a diferença absoluta exata entre eles, calculada com
 `subtractChecked` de `src/money/fixed-point.ts` — nunca em ponto flutuante. O
 `BuyAndHoldVsCashComparison` devolvido é imutável; nenhuma entrada é mutada.
+
+## Comparação entre estratégia e buy-and-hold
+
+`src/benchmark/compare-strategy-to-buy-and-hold.ts` define `compareStrategyToBuyAndHold`:
+mede se o `EquitySeriesSummary` de uma estratégia terminou acima, abaixo ou empatado com o
+`BuyAndHoldBenchmark` do mesmo experimento. Não executa nenhuma ordem, não reconstrói o
+benchmark e não altera carteira.
+
+```text
+EquitySeriesSummary da estratégia + BuyAndHoldBenchmark → StrategyVsBuyAndHoldComparison
+```
+
+Antes de comparar, a função exige que os dois resumos descrevam o mesmo experimento — mesmo
+`agentId`, `startedAt`, `endedAt`, `pointCount` e patrimônio inicial da estratégia igual ao
+`initialCashMicros` do benchmark — e que todo valor monetário lido seja um `bigint` dentro do
+limite de sanidade existente (`MAX_MICROS`). Como `BuyAndHoldBenchmark` é só um tipo
+estrutural em tempo de compilação, a própria consistência interna mínima do benchmark
+recebido também é verificada, reutilizando as mesmas checagens já feitas por
+`compareBuyAndHoldToCash`: `kind` precisa ser exatamente `"BUY_AND_HOLD"`; o `agentId`
+aninhado em `summary` precisa coincidir com o `agentId` do benchmark; `initialFill` precisa
+ser uma `BUY` cujo `agentId`/`asset`/`quote` coincidam com os campos externos do benchmark; e
+o último ponto de patrimônio precisa ser igual ao `endingEquityMicros` do próprio `summary`.
+Qualquer incompatibilidade ou valor forjado falha fechado com `ContractValidationError`.
+
+A direção (`OUTPERFORMED`, `UNDERPERFORMED` ou `TIED`) vem apenas da comparação dos dois
+patrimônios finais, sempre a partir do ponto de vista da estratégia;
+`differenceMagnitudeMicros` é a diferença absoluta exata entre eles, calculada com
+`subtractChecked` de `src/money/fixed-point.ts` — nunca em ponto flutuante. O
+`StrategyVsBuyAndHoldComparison` devolvido é imutável; nenhuma entrada é mutada.
 
 ## Seleção de snapshot sem look-ahead para replay
 
