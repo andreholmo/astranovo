@@ -18,7 +18,8 @@ execução, o resultado realizado determinístico de um round trip paper fechado
 determinística de desempenho realizado e win rate exato, os benchmarks cash e buy-and-hold, a
 comparação determinística de cada um deles com o cash, a comparação determinística de uma
 estratégia com o buy-and-hold, o relatório determinístico consolidado dessas duas
-comparações, e a seleção/série de snapshots sem look-ahead para replay**.
+comparações, e a seleção/série de snapshots sem look-ahead para replay**, e **M4 — o
+adaptador de agente stub determinístico**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -63,6 +64,10 @@ comparações, e a seleção/série de snapshots sem look-ahead para replay**.
 - `src/benchmark/build-strategy-benchmark-report.ts` — `buildStrategyBenchmarkReport`, que
   consolida as três comparações acima num único relatório triangular imutável, sem
   recalcular nada;
+- `src/agent/agent-adapter.ts` — `AgentAdapter`, `AgentRequest` e `parseAgentRequest`, a
+  menor fronteira auditável para obter uma resposta bruta de agente;
+- `src/agent/stub-agent-adapter.ts` — `StubAgentAdapter`, o adaptador local e determinístico
+  configurado com respostas roteirizadas;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -719,6 +724,31 @@ snapshot. Para cada instante, a seleção é delegada inteiramente a
 Cada ponto contém somente `decisionAt` e o `MarketSnapshot` validado e congelado devolvido
 pelo seletor. Nem os snapshots de entrada nem `decisionTimes` são ordenados ou mutados; cada
 ponto e a coleção externa são congelados.
+
+## Adaptador de agente stub determinístico
+
+`src/agent/agent-adapter.ts` define a menor fronteira auditável para obter uma resposta
+bruta de agente:
+
+```text
+AgentRequest + resposta roteirizada → resposta bruta (unknown)
+```
+
+`AgentRequest` identifica exatamente `agentId`, `cycleId` e `snapshotId`; `parseAgentRequest`
+valida e congela essa identificação. A interface `AgentAdapter` só devolve `unknown` — a
+validação de `AgentProposal` continua inteiramente fora do adaptador, a cargo de
+`parseAgentProposal` (`src/domain/contracts.ts`), chamado por uma camada posterior.
+
+`src/agent/stub-agent-adapter.ts` define `StubAgentAdapter`, a única implementação desta
+tarefa: local, determinística, sem relógio, aleatoriedade, rede, SDK ou I/O. Cada rota é
+configurada com a tripla exata `agentId`/`cycleId`/`snapshotId` e uma `response` bruta, que o
+stub nunca inspeciona, valida, corrige ou completa — ela é encaminhada exatamente como
+configurada, mesmo malformada. Cada chave só responde uma vez: falha fechada com
+`ContractValidationError` para solicitação inválida, chave ausente na configuração, chave
+duplicada na configuração e segunda chamada da mesma chave.
+
+Esta tarefa não integra Astra, LLM ou qualquer serviço externo — é a fronteira que uma
+integração real preencherá depois, sem alterar `AgentAdapter`.
 
 ## Documentação
 

@@ -2972,3 +2972,172 @@ sincronização adicional era possível ou necessária.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-022 — Adaptador de agente stub determinístico (M4)
+
+- **ID da tarefa:** TASK-022
+- **Milestone:** M4 — adaptador de agente stub determinístico
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Menor fronteira auditável para obter uma resposta bruta de agente em testes:
+`AgentRequest + resposta roteirizada → resposta bruta`. `src/agent/agent-adapter.ts` define o
+contrato mínimo `AgentAdapter` e `AgentRequest`/`parseAgentRequest`; `src/agent/stub-agent-adapter.ts`
+define `StubAgentAdapter`, a única implementação desta tarefa — local, determinística,
+sem relógio, aleatoriedade, rede, SDK, autenticação, credenciais, retry, persistência ou
+concorrência. Esta tarefa não integra Astra, LLM ou qualquer serviço externo.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_021.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/domain/contracts.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/agent-adapter.ts` | criado — `AgentAdapter`, `AgentRequest`, `parseAgentRequest` |
+| `src/agent/stub-agent-adapter.ts` | criado — `StubAgentAdapter`, `StubAgentAdapterConfig`, `StubAgentRoute` |
+| `tests/agent-adapter.test.ts` | criado |
+| `README.md` | atualizado (seção "Adaptador de agente stub determinístico") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `AgentAdapter` e `AgentRequest`
+
+`AgentRequest` carrega apenas `schemaVersion`, `agentId`, `cycleId` e `snapshotId` — a
+identificação exata exigida pela tarefa. `parseAgentRequest` valida e devolve uma cópia
+congelada; `agentId` segue a mesma regra de slug minúsculo de `AgentConfig.id`/
+`AgentProposal.agentId`, e `cycleId`/`snapshotId` seguem a mesma regra de identificador de
+`AgentProposal.cycleId`/`MarketSnapshot.snapshotId` em `src/domain/contracts.ts`. Essas
+checagens são duplicadas localmente em miniatura porque os helpers de slug/identificador de
+`src/domain/contracts.ts` não são exportados e a tarefa não autoriza alterar as exportações
+desse módulo — o mesmo precedente já registrado nas TASK-004 e TASK-007.
+
+`AgentAdapter.call(request: AgentRequest): unknown` devolve deliberadamente `unknown`: a
+validação de `AgentProposal` fica inteiramente fora do adaptador, a cargo de
+`parseAgentProposal` (`src/domain/contracts.ts`), chamado por uma camada posterior — o
+adaptador nunca importa nem chama `parseAgentProposal`.
+
+### Design de `StubAgentAdapter`
+
+Recebe uma configuração de rotas — cada uma com `agentId`, `cycleId`, `snapshotId` e uma
+`response: unknown` — e valida cada tripla de identificação com `parseAgentRequest` no
+momento da construção, sem nunca inspecionar, validar, corrigir ou completar o campo
+`response`: ele é copiado por referência para um `Map` interno privado (`#responsesByKey`),
+exatamente como recebido, mesmo malformado.
+
+- **Chave exata:** a chave é `JSON.stringify([agentId, cycleId, snapshotId])` dos três campos
+  já validados — duas rotas com a mesma tripla são "chave duplicada na configuração" e falham
+  fechado na construção, antes de qualquer chamada.
+- **Consumo único, sem fallback:** um segundo `Set` privado (`#consumedKeys`) marca cada chave
+  já respondida; uma segunda chamada com a mesma chave falha fechado em vez de repetir a
+  resposta ou escolher parcialmente.
+- **Chave ausente:** uma solicitação cuja tripla não foi configurada falha fechado, sem
+  inferir ou aproximar por semelhança.
+- **Solicitação inválida:** `call` chama `parseAgentRequest` de novo sobre o argumento
+  recebido — mesmo que o tipo declarado já seja `AgentRequest` — porque nada garante em tempo
+  de execução que um chamador não tenha construído ou repassado um objeto inconsistente; os
+  testes exercitam isso construindo deliberadamente um objeto inválido do tipo declarado.
+- **Imutabilidade e não mutação:** o construtor consome a lista de rotas recebida uma única
+  vez, no momento da chamada, para dentro do `Map`/`Set` privados; uma mutação posterior do
+  array de configuração pelo chamador não afeta o adaptador já construído (testado
+  explicitamente). Nenhuma cópia defensiva do valor de `response` é feita — copiar ou congelar
+  um valor arbitrário contaria como uma forma de tocá-lo além do que a tarefa autoriza
+  ("o stub não deve validar, corrigir, completar ou interpretar a resposta bruta"); a
+  imutabilidade exigida é a da configuração e do estado do adaptador, não a do conteúdo opaco
+  da resposta.
+- **Sem relógio, aleatoriedade, rede ou I/O:** nenhuma dessas primitivas aparece em nenhum dos
+  dois módulos.
+
+Toda inconsistência de ambos os módulos lança `ContractValidationError`
+(`src/domain/errors.ts`), reexportado por `agent-adapter.ts`.
+
+### Testes cobertos em `tests/agent-adapter.test.ts`
+
+`parseAgentRequest`: aceitação e congelamento de uma solicitação válida; rejeição de valor não
+objeto, `agentId` vazio, `agentId` fora do padrão slug, `cycleId` ausente, `snapshotId` em
+branco e `schemaVersion` incorreto. `StubAgentAdapter`: retorno exato da resposta roteirizada
+para a chave correspondente; duas chaves independentes resolvendo para respostas distintas;
+rejeição de solicitação inválida, de chave ausente, de chave duplicada na configuração e de
+segunda chamada da mesma chave; preservação por referência de uma resposta malformada e de
+respostas primitivas/`undefined`, sem qualquer interpretação; integração demonstrativa com
+`parseAgentProposal` — uma resposta roteirizada válida é aceita e uma inválida é rejeitada por
+ele, nunca pelo stub; ausência de mutação da configuração recebida (incluindo o caso de o
+chamador mutar seu próprio array de rotas depois da construção, sem efeito no adaptador já
+construído) e da `AgentRequest` passada a `call`; determinismo entre instâncias
+independentemente construídas com a mesma configuração canônica.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **531 testes, 531 passaram, 0 falharam** (511 preexistentes + 20 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum uso
+de `random`, nenhum SDK ou credencial.
+
+### Decisões técnicas tomadas
+
+1. **`AgentAdapter.call` recebe `AgentRequest` (tipo já validado/imutável), não `unknown`.** A
+   tarefa pede um contrato "para receber uma solicitação imutável identificada por `agentId`,
+   `cycleId` e `snapshotId`" — a leitura mais literal é que a interface declara o tipo
+   imutável já identificado, e não um valor bruto de fronteira. `StubAgentAdapter.call`
+   permanece, ainda assim, fail-closed em tempo de execução: ele revalida com
+   `parseAgentRequest` internamente, então um chamador que efetivamente repasse um valor
+   inconsistente (testado via cast deliberado, no mesmo padrão já usado em
+   `tests/settle-paper-execution.test.ts` para forjar um evento de outro agente) continua
+   sendo rejeitado.
+2. **Chave composta via `JSON.stringify([agentId, cycleId, snapshotId])`**, em vez de
+   concatenação com separador. Os três campos já são restritos a um alfabeto sem aspas nem
+   colchetes por `parseAgentRequest`, então um separador simples já seria seguro, mas a
+   serialização estrutural remove qualquer dependência implícita desse alfabeto e deixa a
+   regra de igualdade de chave auditável por inspeção.
+3. **Nenhuma cópia ou congelamento do valor de `response`.** Ver "Design de
+   `StubAgentAdapter`" acima — a tarefa proíbe explicitamente qualquer forma de interpretação
+   da resposta bruta, e `Object.freeze` sobre um valor arbitrário do chamador seria mutar
+   (ainda que superficialmente) algo que a tarefa pede para apenas encaminhar.
+4. **Validação de `agentId`/`cycleId`/`snapshotId` duplicada localmente em
+   `src/agent/agent-adapter.ts`**, em vez de importada de `src/domain/contracts.ts`. Mesmo
+   motivo e mesmo precedente das TASK-004/TASK-007: os helpers relevantes não são exportados
+   de lá e o escopo exato desta tarefa não autoriza alterar as exportações desse módulo.
+5. **Nenhuma nova classe de erro.** Toda rejeição usa `ContractValidationError`/
+   `rejectContract` já existentes em `src/domain/errors.ts`, exatamente como a tarefa exige
+   ("toda inconsistência do adaptador gera `ContractValidationError`").
+
+### Limitações conhecidas
+
+- `StubAgentAdapter` é local e determinístico por construção; não há adaptador real de Astra
+  ou de qualquer modelo — isso é integração futura, fora do escopo exato desta tarefa.
+- Não há retry, backoff nem seleção de modelo: a tarefa proíbe explicitamente essas
+  funcionalidades nesta fatia.
+- Não há verificação de consistência entre os campos da `response` roteirizada e o
+  `AgentRequest` que a solicitou (por exemplo, que `response.cycleId` combine com
+  `request.cycleId`); isso pertenceria a `parseAgentProposal`/a uma camada posterior, nunca ao
+  adaptador.
+
+### Decisões pendentes para André / revisor
+
+1. **`AgentAdapter.call` tipado com `AgentRequest`** — decisão técnica nº 1 acima; se o
+   arquiteto pretendia a interface aceitando `unknown` diretamente (com `parseAgentRequest`
+   chamado só internamente pelo adaptador, nunca pelo chamador), é uma mudança de assinatura
+   contida em `src/agent/agent-adapter.ts` e `src/agent/stub-agent-adapter.ts`, sem mudança de
+   comportamento observável em `StubAgentAdapter`.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. A única decisão de interpretação (nº 1 acima) foi resolvida com a leitura
+mais literal do texto da tarefa e não afeta o comportamento fail-closed observável do stub.
+
+### Commit
+
+- **Mensagem:** `feat: adiciona adaptador de agente stub`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
