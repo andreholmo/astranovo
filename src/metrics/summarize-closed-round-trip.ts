@@ -22,6 +22,7 @@
 
 import { rejectContract } from "../domain/errors.js";
 import {
+  addBounded,
   MAX_ATOMS,
   MAX_MICROS,
   parseAssetScale,
@@ -119,7 +120,12 @@ export interface ClosedRoundTripResult {
  * `agentId`, `asset`, `quote`, `assetScale` or `quantityAtoms`; a non-
  * canonical `occurredAt` on either fill, or a `sellFill.occurredAt` that is
  * not strictly after `buyFill.occurredAt`; and a `totalMicros` on either
- * fill that is not a `bigint` in `[0, MAX_MICROS]`.
+ * fill that is not a `bigint` in `[0, MAX_MICROS]`; and a `totalMicros` on
+ * either leg that does not exactly equal `grossMicros + feeMicros` (BUY) or
+ * `grossMicros - feeMicros` (SELL) — `createFillEvent` freezes a draft and
+ * computes its `eventId`, it never checks this relationship, so a forged
+ * `FillEvent` could otherwise disagree with `src/ledger/events.ts` and still
+ * be accepted.
  */
 export function summarizeClosedRoundTrip(buyFill: FillEvent, sellFill: FillEvent): ClosedRoundTripResult {
   if (buyFill.type !== "FILL") rejectContract(CLOSED_ROUND_TRIP_RESULT, "buyFill.type", 'must be "FILL"');
@@ -163,8 +169,36 @@ export function summarizeClosedRoundTrip(buyFill: FillEvent, sellFill: FillEvent
     rejectContract(CLOSED_ROUND_TRIP_RESULT, "sellFill.occurredAt", "must be strictly after buyFill.occurredAt");
   }
 
+  const buyGrossMicros = assertValidMicros(buyFill.grossMicros, "buyFill.grossMicros");
+  const buyFeeMicros = assertValidMicros(buyFill.feeMicros, "buyFill.feeMicros");
+  const sellGrossMicros = assertValidMicros(sellFill.grossMicros, "sellFill.grossMicros");
+  const sellFeeMicros = assertValidMicros(sellFill.feeMicros, "sellFill.feeMicros");
+
   const realizedCostMicros = assertValidMicros(buyFill.totalMicros, "buyFill.totalMicros");
   const netProceedsMicros = assertValidMicros(sellFill.totalMicros, "sellFill.totalMicros");
+
+  const expectedRealizedCostMicros = addBounded(
+    buyGrossMicros,
+    buyFeeMicros,
+    MAX_MICROS,
+    "expectedRealizedCostMicros"
+  );
+  if (expectedRealizedCostMicros !== realizedCostMicros) {
+    rejectContract(
+      CLOSED_ROUND_TRIP_RESULT,
+      "buyFill.totalMicros",
+      "must equal buyFill.grossMicros + buyFill.feeMicros"
+    );
+  }
+
+  const expectedNetProceedsMicros = subtractChecked(sellGrossMicros, sellFeeMicros, "expectedNetProceedsMicros");
+  if (expectedNetProceedsMicros !== netProceedsMicros) {
+    rejectContract(
+      CLOSED_ROUND_TRIP_RESULT,
+      "sellFill.totalMicros",
+      "must equal sellFill.grossMicros - sellFill.feeMicros"
+    );
+  }
 
   let direction: ClosedRoundTripDirection;
   let resultMagnitudeMicros: Micros;

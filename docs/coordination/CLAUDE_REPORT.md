@@ -2739,3 +2739,58 @@ sincronização adicional era possível ou necessária.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+### Correção — revisão técnica ciclo 1/3 (sobre o SHA `9af9c31`)
+
+A revisão do ChatGPT/GPT-5.6 Sol apontou que `summarizeClosedRoundTrip` usava `totalMicros`
+como autoridade do P&L validando apenas seu tipo/faixa (`assertValidMicros`), sem checar que
+ele de fato equivale a `grossMicros + feeMicros` (BUY) ou `grossMicros - feeMicros` (SELL) —
+a relação que `src/ledger/events.ts` define para `totalMicros`. `createFillEvent` apenas
+congela o rascunho e calcula `eventId`; nunca validou essa coerência monetária, então um
+`FillEvent` forjado com `totalMicros` divergente de `gross`/`fee` era aceito sem erro, uma
+inconsistência estrutural relevante que `TASK.md` já exigia rejeitar ("rejeite lados
+invertidos, fills repetidos e qualquer inconsistência estrutural relevante").
+
+**Correção em `src/metrics/summarize-closed-round-trip.ts`:** depois de validar
+`totalMicros` de cada perna com `assertValidMicros` (como antes), a função agora também
+valida `grossMicros` e `feeMicros` das duas pernas com a mesma checagem, deriva o total
+esperado exclusivamente com as primitivas monetárias já existentes —
+`addBounded(grossMicros, feeMicros, MAX_MICROS, ...)` na BUY,
+`subtractChecked(grossMicros, feeMicros, ...)` na SELL — e rejeita com
+`ContractValidationError` quando o total derivado não coincide exatamente com
+`totalMicros`. Reaproveitar `subtractChecked` na SELL também cobre, de graça, o caso de
+`feeMicros` maior que `grossMicros`: a própria primitiva já rejeita fail-closed antes de
+qualquer comparação, sem checagem duplicada. O cálculo final de `direction` e
+`resultMagnitudeMicros` continua exclusivamente sobre `totalMicros`, sem nenhuma dupla
+contagem de fee — nenhuma mudança nessa parte.
+
+Três testes novos em `tests/summarize-closed-round-trip.test.ts` (describe "fail-closed
+structural rules"): BUY forjada com `totalMicros` divergente de `grossMicros + feeMicros`;
+SELL forjada com `totalMicros` divergente de `grossMicros - feeMicros`; SELL forjada com
+`feeMicros` maior que `grossMicros`. Cinco testes preexistentes que só sobrescreviam
+`sellFill({ totalMicros: ... })` sem ajustar `grossMicros` (nos describes "gain, loss and
+tie", "exact 1 micro difference" e "immutability, non-mutation and determinism") deixaram de
+ser fixtures válidas sob a nova invariante — cada um foi ajustado para também sobrescrever
+`grossMicros` com o mesmo valor de `totalMicros` (a fixture usa `feeMicros: 0n` por padrão,
+então `gross - fee === gross`), preservando exatamente o cenário e a asserção originais.
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **485 testes, 485 passaram, 0 falharam** (482 preexistentes + 3 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum
+uso de `random`. Nenhuma integração, dependência, wallet externa, corretora, testnet,
+credencial ou dinheiro real foi adicionada. Pureza, imutabilidade e determinismo
+preservados.
+
+Nenhum bloqueio: `git status` confirmou árvore de trabalho limpa e idêntica ao SHA `9af9c31`
+antes de iniciar; `git fetch origin` exigiu aprovação não concedida neste ambiente
+sandboxed, na mesma linha já registrada nas correções anteriores, mas os refs locais de
+`origin/main` e da própria branch já estavam presentes e atualizados, então nenhuma
+sincronização adicional era possível ou necessária.
+
+- **Commit:** `fix: valida coerencia de totalMicros com gross e fee`
+- **Hash:** informado a André na resposta após o push.

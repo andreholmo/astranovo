@@ -446,10 +446,13 @@ Falha fechada, antes de qualquer cálculo, diante de: lado invertido (BUY que n�
 SELL que não é `SELL`); os dois fills compartilhando o mesmo `eventId` (fill repetido, não
 um round trip); `agentId`, `asset`, `quote`, `assetScale` ou `quantityAtoms` divergentes
 entre as duas pernas; um `occurredAt` não canônico em qualquer perna, ou um fechamento que
-não é estritamente posterior à abertura; e um `totalMicros` que não seja um `bigint` válido
-em `[0, MAX_MICROS]` em qualquer perna. O `ClosedRoundTripResult` devolvido é imutável e
-carrega os `eventId` das duas pernas para auditoria; nenhum dos dois fills recebidos é
-mutado.
+não é estritamente posterior à abertura; um `totalMicros`, `grossMicros` ou `feeMicros` que
+não seja um `bigint` válido em `[0, MAX_MICROS]` em qualquer perna; e um `totalMicros` que
+não coincida exatamente com `grossMicros + feeMicros` na BUY ou `grossMicros - feeMicros` na
+SELL — `createFillEvent` (`src/ledger/events.ts`) congela o rascunho e calcula `eventId`,
+mas nunca valida essa coerência, então um `FillEvent` forjado poderia discordar da relação
+que o próprio ledger define. O `ClosedRoundTripResult` devolvido é imutável e carrega os
+`eventId` das duas pernas para auditoria; nenhum dos dois fills recebidos é mutado.
 
 ## Benchmark cash (controle sem operações)
 

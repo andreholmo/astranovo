@@ -76,7 +76,7 @@ describe("gain, loss and tie", () => {
   it("reports WIN when net proceeds exceed realised cost", () => {
     const result = summarizeClosedRoundTrip(
       buyFill({ totalMicros: 100_000_000n }),
-      sellFill({ totalMicros: 110_000_000n })
+      sellFill({ grossMicros: 110_000_000n, totalMicros: 110_000_000n })
     );
 
     assert.equal(result.direction, "WIN");
@@ -88,7 +88,7 @@ describe("gain, loss and tie", () => {
   it("reports LOSS when net proceeds fall short of realised cost", () => {
     const result = summarizeClosedRoundTrip(
       buyFill({ totalMicros: 100_000_000n }),
-      sellFill({ totalMicros: 90_000_000n })
+      sellFill({ grossMicros: 90_000_000n, totalMicros: 90_000_000n })
     );
 
     assert.equal(result.direction, "LOSS");
@@ -110,7 +110,7 @@ describe("exact 1 micro difference", () => {
   it("reports WIN with magnitude 1 when proceeds exceed cost by exactly 1 micro", () => {
     const result = summarizeClosedRoundTrip(
       buyFill({ totalMicros: 100_000_000n }),
-      sellFill({ totalMicros: 100_000_001n })
+      sellFill({ grossMicros: 100_000_001n, totalMicros: 100_000_001n })
     );
 
     assert.equal(result.direction, "WIN");
@@ -120,7 +120,7 @@ describe("exact 1 micro difference", () => {
   it("reports LOSS with magnitude 1 when proceeds fall short of cost by exactly 1 micro", () => {
     const result = summarizeClosedRoundTrip(
       buyFill({ totalMicros: 100_000_000n }),
-      sellFill({ totalMicros: 99_999_999n })
+      sellFill({ grossMicros: 99_999_999n, totalMicros: 99_999_999n })
     );
 
     assert.equal(result.direction, "LOSS");
@@ -239,6 +239,35 @@ describe("fail-closed structural rules", () => {
 
     assert.throws(() => summarizeClosedRoundTrip(buyFill(), forgedSell), ContractValidationError);
   });
+
+  it("rejects a BUY whose totalMicros disagrees with grossMicros + feeMicros", () => {
+    // gross 100_000_000 + fee 1_000_000 = 101_000_000, not the forged 100_000_000.
+    const forgedBuy = Object.freeze({
+      ...buyFill({ grossMicros: 100_000_000n, feeMicros: 1_000_000n }),
+      totalMicros: 100_000_000n
+    });
+
+    assert.throws(() => summarizeClosedRoundTrip(forgedBuy, sellFill()), ContractValidationError);
+  });
+
+  it("rejects a SELL whose totalMicros disagrees with grossMicros - feeMicros", () => {
+    // gross 100_000_000 - fee 1_000_000 = 99_000_000, not the forged 100_000_000.
+    const forgedSell = Object.freeze({
+      ...sellFill({ grossMicros: 100_000_000n, feeMicros: 1_000_000n }),
+      totalMicros: 100_000_000n
+    });
+
+    assert.throws(() => summarizeClosedRoundTrip(buyFill(), forgedSell), ContractValidationError);
+  });
+
+  it("rejects a SELL whose feeMicros exceeds grossMicros", () => {
+    const forgedSell = Object.freeze({
+      ...sellFill({ grossMicros: 100_000_000n, feeMicros: 150_000_000n }),
+      totalMicros: 0n
+    });
+
+    assert.throws(() => summarizeClosedRoundTrip(buyFill(), forgedSell), ContractValidationError);
+  });
 });
 
 describe("immutability, non-mutation and determinism", () => {
@@ -262,7 +291,7 @@ describe("immutability, non-mutation and determinism", () => {
 
   it("produces an identical result for the same canonical input", () => {
     const buy = buyFill();
-    const sell = sellFill({ totalMicros: 110_000_000n });
+    const sell = sellFill({ grossMicros: 110_000_000n, totalMicros: 110_000_000n });
 
     const first = summarizeClosedRoundTrip(buy, sell);
     const second = summarizeClosedRoundTrip(buy, sell);
