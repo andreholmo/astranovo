@@ -6,7 +6,7 @@ Este repositório pertence ao projeto **Verificação de alegação cripto / Ast
 
 Antes de iniciar qualquer trabalho:
 
-1. Execute `git pull --ff-only origin main`.
+1. Sincronize o trabalho com a branch `main` sem sobrescrever alterações remotas.
 2. Leia `docs/PROJECT_CONTEXT.md`.
 3. Leia `docs/DECISIONS.md`.
 4. Leia `docs/ARCHITECTURE.md`.
@@ -19,7 +19,7 @@ Quando `TASK.md` indicar documentos adicionais, a leitura também é obrigatóri
 
 - André é o proprietário e decide produto e mudanças de alto impacto.
 - ChatGPT/GPT-5.6 Sol é arquiteto, especificador e revisor.
-- Claude Code implementa, testa, commita e faz push.
+- Claude Code implementa, testa, commita e entrega por pull request.
 - Astra será futuramente o motor de propostas de decisão.
 
 ## Regras obrigatórias
@@ -41,7 +41,8 @@ Quando `TASK.md` indicar documentos adicionais, a leitura também é obrigatóri
 
 1. Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limitações e decisões.
 2. Use a mensagem de commit definida em `TASK.md`.
-3. Faça push para `origin main`.
-4. Informe o hash completo.
+3. Entregue as alterações na branch criada pela Claude Code Action; nunca faça push direto para `main`.
+4. A automação abrirá ou reutilizará um pull request dessa branch para `main`.
+5. Informe no relatório o hash completo do commit e os testes executados.
 
-Claude não aprova a própria tarefa. A aprovação é feita pelo ChatGPT após revisão do commit.
+Claude não aprova nem mescla a própria tarefa. A aprovação e o merge são feitos pelo ChatGPT após revisão do diff e da CI.
