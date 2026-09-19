@@ -14,10 +14,11 @@ primeira fatia de **M2 — Risk Manager determinístico**, a fachada determinís
 integra as duas, a liquidação contábil determinística do resultado dessa fachada no
 ledger, e **M3 — valoração de patrimônio sem look-ahead, resumo determinístico da série
 de patrimônio, drawdown percentual determinístico, resumo determinístico de custos de
-execução, os benchmarks cash e buy-and-hold, a comparação determinística de cada um deles
-com o cash, a comparação determinística de uma estratégia com o buy-and-hold, o relatório
-determinístico consolidado dessas duas comparações, e a seleção/série de snapshots sem
-look-ahead para replay**.
+execução, o resultado realizado determinístico de um round trip paper fechado, os
+benchmarks cash e buy-and-hold, a comparação determinística de cada um deles com o cash, a
+comparação determinística de uma estratégia com o buy-and-hold, o relatório determinístico
+consolidado dessas duas comparações, e a seleção/série de snapshots sem look-ahead para
+replay**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -42,6 +43,9 @@ look-ahead para replay**.
 - `src/metrics/summarize-execution-costs.ts` — `summarizeExecutionCosts`, o resumo
   determinístico de fills, rejeições, fees e impacto de execução do ledger paper de
   um agente;
+- `src/metrics/summarize-closed-round-trip.ts` — `summarizeClosedRoundTrip`, o resultado
+  realizado determinístico de exatamente um BUY e um SELL integrais da mesma quantidade,
+  ativo e agente;
 - `src/benchmark/build-cash-benchmark.ts` — `buildCashBenchmark`, o benchmark de
   controle que permanece integralmente em caixa;
 - `src/benchmark/build-buy-and-hold-benchmark.ts` — `buildBuyAndHoldBenchmark`, o benchmark
@@ -415,6 +419,40 @@ altera o resultado; uma lista vazia produz todas as contagens e totais zerados. 
 rejeição usam somente os `REJECTION_CODES` estáveis de `src/ledger/events.ts`, sempre na
 mesma ordem determinística. O `ExecutionCostSummary` devolvido é imutável; nem os eventos
 recebidos, nem a coleção, são mutados.
+
+## Resultado realizado de um round trip paper fechado
+
+`src/metrics/summarize-closed-round-trip.ts` define `summarizeClosedRoundTrip`, a menor
+primitiva auditável de P&L realizado de M3: recebe exatamente um `FillEvent` de abertura
+BUY e um `FillEvent` de fechamento SELL da mesma quantidade, ativo, quote e agente, e
+devolve o resultado realizado dessa operação totalmente encerrada.
+
+```text
+FillEvent BUY + FillEvent SELL → ClosedRoundTripResult auditável
+```
+
+Esta fatia aceita somente um round trip integral: posição parcial, múltiplos lotes,
+FIFO/LIFO e short ficam fora do escopo, assim como qualquer execução de ordem, broker,
+risco ou replay. Agregação de múltiplos trades e win rate permanecem trabalho futuro
+construído sobre esta primitiva.
+
+O custo realizado e a receita líquida vêm exclusivamente de `totalMicros` de cada fill —
+já `gross + fee` na BUY e `gross - fee` na SELL, por definição em `src/ledger/events.ts` —
+então nenhuma fee é contada duas vezes e nenhuma fórmula de `src/money/fixed-point.ts` é
+reimplementada. A direção (`WIN | LOSS | BREAK_EVEN`) e a magnitude exata em micros vêm de
+uma única comparação `bigint` entre os dois totais, reaproveitando `subtractChecked`.
+
+Falha fechada, antes de qualquer cálculo, diante de: lado invertido (BUY que não é `BUY`,
+SELL que não é `SELL`); os dois fills compartilhando o mesmo `eventId` (fill repetido, não
+um round trip); `agentId`, `asset`, `quote`, `assetScale` ou `quantityAtoms` divergentes
+entre as duas pernas; um `occurredAt` não canônico em qualquer perna, ou um fechamento que
+não é estritamente posterior à abertura; um `totalMicros`, `grossMicros` ou `feeMicros` que
+não seja um `bigint` válido em `[0, MAX_MICROS]` em qualquer perna; e um `totalMicros` que
+não coincida exatamente com `grossMicros + feeMicros` na BUY ou `grossMicros - feeMicros` na
+SELL — `createFillEvent` (`src/ledger/events.ts`) congela o rascunho e calcula `eventId`,
+mas nunca valida essa coerência, então um `FillEvent` forjado poderia discordar da relação
+que o próprio ledger define. O `ClosedRoundTripResult` devolvido é imutável e carrega os
+`eventId` das duas pernas para auditoria; nenhum dos dois fills recebidos é mutado.
 
 ## Benchmark cash (controle sem operações)
 
