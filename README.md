@@ -13,7 +13,8 @@ Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperB
 primeira fatia de **M2 — Risk Manager determinístico**, a fachada determinística que
 integra as duas, a liquidação contábil determinística do resultado dessa fachada no
 ledger, e **M3 — valoração de patrimônio sem look-ahead, resumo determinístico da série
-de patrimônio, resumo determinístico de custos de execução e o benchmark cash**.
+de patrimônio, resumo determinístico de custos de execução, os benchmarks cash e
+buy-and-hold, e a comparação determinística de cada um deles com o cash**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -37,15 +38,21 @@ de patrimônio, resumo determinístico de custos de execução e o benchmark cas
   um agente;
 - `src/benchmark/build-cash-benchmark.ts` — `buildCashBenchmark`, o benchmark de
   controle que permanece integralmente em caixa;
+- `src/benchmark/build-buy-and-hold-benchmark.ts` — `buildBuyAndHoldBenchmark`, o benchmark
+  de controle de compra única mantida sem venda;
+- `src/benchmark/compare-to-cash-benchmark.ts` — `compareToCashBenchmark`, que mede se o
+  resumo de uma estratégia terminou acima, abaixo ou empatado com o benchmark cash;
+- `src/benchmark/compare-buy-and-hold-to-cash.ts` — `compareBuyAndHoldToCash`, que mede se o
+  benchmark buy-and-hold terminou acima, abaixo ou empatado com o benchmark cash;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
 multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, replay completo de
-ciclos, drawdown percentual, win rate, P&L realizado por trade, benchmark buy-and-hold ou
-outro benchmark além do cash, persistência em arquivo, servidor ou banco de dados. O
-roadmap está em `docs/ROADMAP.md`.
+ciclos, drawdown percentual, win rate, P&L realizado por trade, benchmark aleatório
+controlado, persistência em arquivo, servidor ou banco de dados. O roadmap está em
+`docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -452,6 +459,41 @@ A direção (`OUTPERFORMED`, `UNDERPERFORMED` ou `TIED`) vem apenas da comparaç
 patrimônios finais; `differenceMagnitudeMicros` é a diferença absoluta exata entre eles,
 calculada com `subtractChecked` de `src/money/fixed-point.ts` — nunca em ponto flutuante. O
 `BenchmarkComparison` devolvido é imutável; nenhuma entrada é mutada.
+
+## Comparação entre buy-and-hold e cash
+
+`src/benchmark/compare-buy-and-hold-to-cash.ts` define `compareBuyAndHoldToCash`: mede,
+sempre da perspectiva do benchmark **buy-and-hold**, se ele terminou acima, abaixo ou
+empatado com o benchmark **cash** do mesmo experimento. Compara apenas os dois benchmarks já
+construídos — não executa nenhuma ordem, não reconstrói nenhum dos dois e não altera carteira.
+
+```text
+BuyAndHoldBenchmark + CashBenchmark → BuyAndHoldVsCashComparison auditável
+```
+
+Antes de comparar, a função exige que os dois benchmarks descrevam o mesmo experimento —
+mesmo `agentId`, mesmo `initialCashMicros`, e mesmo `startedAt`, `endedAt` e `pointCount` nos
+seus resumos — e que todo valor monetário lido seja um `bigint` não negativo dentro do limite
+de sanidade existente (`MAX_MICROS`). Como `BuyAndHoldBenchmark` e `CashBenchmark` são apenas
+tipos estruturais em tempo de compilação, a consistência interna de cada um também é
+verificada: `kind` precisa ser exatamente `"BUY_AND_HOLD"`/`"CASH"`; o `agentId` aninhado em
+cada `summary` precisa coincidir com o `agentId` externo do respectivo benchmark; o cash
+precisa ter patrimônio inicial **e** final iguais ao seu próprio `initialCashMicros`, porque
+uma carteira que nunca opera não pode se mover; e o buy-and-hold precisa ter um `initialFill`
+do tipo `BUY` cujo `agentId`/`asset`/`quote` coincidam com os campos externos do benchmark, com
+o último ponto de patrimônio igual ao `endingEquityMicros` do próprio `summary`. Qualquer
+incompatibilidade ou valor forjado falha fechado com `ContractValidationError`, sem tentar
+corrigir ou comparar parcialmente.
+
+Um primeiro ponto de patrimônio do buy-and-hold abaixo do capital inicial — por causa de fee e
+spread pagos na compra de entrada — é aceito normalmente: essa checagem só existe para o
+benchmark cash, que nunca paga custo nenhum.
+
+A direção (`OUTPERFORMED`, `UNDERPERFORMED` ou `TIED`) vem apenas da comparação dos dois
+patrimônios finais, sempre a partir do ponto de vista do buy-and-hold;
+`differenceMagnitudeMicros` é a diferença absoluta exata entre eles, calculada com
+`subtractChecked` de `src/money/fixed-point.ts` — nunca em ponto flutuante. O
+`BuyAndHoldVsCashComparison` devolvido é imutável; nenhuma entrada é mutada.
 
 ## Seleção de snapshot sem look-ahead para replay
 
