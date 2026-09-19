@@ -2116,3 +2116,162 @@ sincronização adicional era possível ou necessária.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-017 — Comparação determinística entre estratégia e buy-and-hold (sétima fatia de M3)
+
+- **ID da tarefa:** TASK-017
+- **Milestone:** M3 — comparação determinística estratégia versus buy-and-hold
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Sétima fatia de M3: `compareStrategyToBuyAndHold` recebe o `EquitySeriesSummary` de uma
+estratégia e um `BuyAndHoldBenchmark` do mesmo experimento e devolve um
+`StrategyVsBuyAndHoldComparison` imutável e auditável, medindo apenas se a estratégia
+terminou acima, abaixo ou empatada com o benchmark — sempre da perspectiva da estratégia.
+Não executa nenhuma ordem, não reconstrói o benchmark, não reavalia carteira e não usa
+Risk Manager, Broker ou replay. Reutiliza integralmente `EquitySeriesSummary`
+(`src/metrics/summarize-equity-series.ts`) e `BuyAndHoldBenchmark`
+(`src/benchmark/build-buy-and-hold-benchmark.ts`) como entrada já computada, e
+`subtractChecked`/`MAX_MICROS` de `src/money/fixed-point.ts` para a única aritmética
+monetária desta fatia; nenhuma fórmula de patrimônio, P&L ou custo é duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_016.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/metrics/summarize-equity-series.ts`,
+`src/benchmark/build-buy-and-hold-benchmark.ts`,
+`src/benchmark/compare-to-cash-benchmark.ts`, `src/benchmark/compare-buy-and-hold-to-cash.ts`
+e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/benchmark/compare-strategy-to-buy-and-hold.ts` | criado — `compareStrategyToBuyAndHold`, `StrategyVsBuyAndHoldComparison`, `StrategyVsBuyAndHoldResult` |
+| `tests/compare-strategy-to-buy-and-hold.test.ts` | criado |
+| `README.md` | atualizado (seção "Comparação entre estratégia e buy-and-hold"; listas "O que existe hoje" atualizadas) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime. Nenhum dos módulos reutilizados (`summarize-equity-series.ts`,
+`build-buy-and-hold-benchmark.ts`, `compare-to-cash-benchmark.ts`,
+`compare-buy-and-hold-to-cash.ts`) foi alterado.
+
+### Design de `compareStrategyToBuyAndHold`
+
+A função funde os dois padrões já estabelecidos pelos comparadores existentes, porque este é
+o primeiro comparador cujos dois lados (um `EquitySeriesSummary` externo e um
+`BuyAndHoldBenchmark`) exigem, ao mesmo tempo, checagem de compatibilidade entre dois
+resumos independentes (como em `compareToCashBenchmark`) **e** checagem de consistência
+interna do próprio `BuyAndHoldBenchmark` (como em `compareBuyAndHoldToCash`):
+
+1. Todo valor monetário lido — `strategySummary.startingEquityMicros`,
+   `strategySummary.endingEquityMicros`, `buyAndHoldBenchmark.initialCashMicros`,
+   `buyAndHoldBenchmark.summary.endingEquityMicros` e
+   `buyAndHoldBenchmark.points[último].equityMicros` — é revalidado como `bigint` em
+   `[0, MAX_MICROS]` antes de qualquer comparação, porque `EquitySeriesSummary` e
+   `BuyAndHoldBenchmark` são apenas tipos estruturais em tempo de compilação.
+2. Consistência estrutural mínima do benchmark recebido, reutilizando exatamente as mesmas
+   checagens que `compareBuyAndHoldToCash` já aplica ao lado buy-and-hold: `kind` precisa
+   ser `"BUY_AND_HOLD"`; `summary.agentId` precisa coincidir com o `agentId` externo do
+   benchmark; `initialFill` precisa ser uma `BUY` cujo `agentId`/`asset`/`quote` coincidam
+   com os campos externos do benchmark; e o último ponto de `points` precisa ter
+   `equityMicros` igual ao `endingEquityMicros` do próprio `summary`.
+3. Compatibilidade entre a estratégia e o benchmark — mesmo experimento: `agentId`,
+   `startedAt`, `endedAt`, `pointCount` idênticos, e `strategySummary.startingEquityMicros`
+   igual a `buyAndHoldBenchmark.initialCashMicros`.
+4. Só então compara os dois patrimônios finais: `strategyEndingEquityMicros` contra
+   `buyAndHoldEndingEquityMicros`. `result` é `OUTPERFORMED`/`UNDERPERFORMED`/`TIED` da
+   perspectiva da estratégia; `differenceMagnitudeMicros` é a diferença absoluta exata,
+   calculada com `subtractChecked`. Qualquer falha nas etapas 1–3 lança
+   `ContractValidationError` antes de qualquer comparação — nunca um resultado parcial.
+
+Um primeiro ponto de patrimônio do buy-and-hold abaixo do capital inicial (fee/spread da
+compra de entrada) é aceito normalmente, como já é o caso em `compareBuyAndHoldToCash`: essa
+fatia compara apenas os patrimônios finais, nunca o caminho intermediário da série.
+
+### Testes cobertos em `tests/compare-strategy-to-buy-and-hold.test.ts`
+
+Estratégia supera buy-and-hold (`OUTPERFORMED`) e perde (`UNDERPERFORMED`), com diferença
+exata; empate (`TIED`) com diferença zero; diferença exata de 1 micro nos dois sentidos;
+rejeição por divergência de `agentId`, `startedAt`, `endedAt`, `pointCount` e patrimônio
+inicial entre estratégia e benchmark; rejeição de benchmark estruturalmente inconsistente —
+`kind` forjado, `summary.agentId` interno divergente, `initialFill` que não é `BUY` ou cujo
+`agentId`/`asset`/`quote` divergem do benchmark, e último ponto divergente do
+`endingEquityMicros` do próprio resumo; rejeição de dinheiro inválido — `endingEquityMicros`
+não-`bigint`, negativo, acima de `MAX_MICROS`, e `initialCashMicros` forjado no benchmark;
+cenário de custos de entrada deixando o primeiro/único ponto do buy-and-hold abaixo do
+capital inicial, comparado corretamente; congelamento do resultado; ausência de mutação de
+ambas as entradas; determinismo para o mesmo input canônico; suíte offline (sem relógio,
+rede ou aleatoriedade, apenas `bigint`).
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **438 testes, 438 passaram, 0 falharam** (412 preexistentes + 26 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum
+uso de `random`. Nenhuma wallet externa, blockchain, testnet, corretora, credencial ou
+dinheiro real foi tocado — a tarefa só compara resumos de patrimônio já computados em
+memória.
+
+### Decisões técnicas tomadas
+
+1. **A checagem de consistência interna do benchmark é copiada literalmente de
+   `compareBuyAndHoldToCash`, não fatorada num helper compartilhado.** `TASK.md` restringe o
+   escopo exato desta tarefa à criação de
+   `src/benchmark/compare-strategy-to-buy-and-hold.ts`; extrair um helper obrigaria alterar
+   `compare-buy-and-hold-to-cash.ts` (ou criar um novo módulo compartilhado não pedido pela
+   tarefa) só para eliminar uma duplicação pequena e já presente no repositório entre
+   `compare-to-cash-benchmark.ts` e `compare-buy-and-hold-to-cash.ts` (a própria
+   `assertValidMicros` já é duplicada nos dois). Repetir a checagem aqui segue o precedente
+   já estabelecido nessas duas tarefas anteriores.
+2. **Nome do tipo de resultado `StrategyVsBuyAndHoldComparison`, do enum
+   `comparisonKind: "STRATEGY_VS_BUY_AND_HOLD"` e da função
+   `compareStrategyToBuyAndHold`.** `TASK.md` define formalmente
+   `EquitySeriesSummary + BuyAndHoldBenchmark → StrategyVsBuyAndHoldComparison`; o nome da
+   função e o `comparisonKind` seguem a mesma convenção de nomenclatura já usada por
+   `compareBuyAndHoldToCash`/`comparisonKind: "BUY_AND_HOLD_VS_CASH"`.
+3. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/
+   `ContractValidationError`, com o nome de contrato `"StrategyVsBuyAndHoldComparison"`, o
+   mesmo mecanismo de todo o resto de `src/benchmark/`.
+4. **A ordem das checagens segue exatamente a de `compareBuyAndHoldToCash`**: primeiro toda
+   validação de dinheiro (`assertValidMicros`), depois a consistência interna do benchmark
+   (`kind`, `summary.agentId`, `initialFill`, último ponto), e só então a compatibilidade
+   entre os dois lados da comparação (`agentId`, `startedAt`, `endedAt`, `pointCount`,
+   patrimônio inicial) — preserva o padrão já revisado e aceito nas duas tarefas anteriores
+   de comparação.
+
+### Limitações conhecidas
+
+- Compara apenas os patrimônios finais; não considera drawdown, volatilidade ou trajetória
+  intermediária da série — fora do escopo exato desta tarefa.
+- Não calcula win rate, P&L realizado por trade ou ranking multiagente — fora do escopo
+  exato desta tarefa e explicitamente listado como fora de escopo em `TASK.md`.
+- Não persiste nada em arquivo; opera inteiramente em memória, como as milestones
+  anteriores.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as quatro decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git fetch` exigiu aprovação não concedida neste ambiente sandboxed;
+`git rev-parse main origin/main HEAD` confirmou que os três apontam para o mesmo commit
+(`d16a26a`) e `git status` confirmou árvore de trabalho limpa antes de iniciar, então a
+branch de trabalho já partia sincronizada com `main` e nenhuma sincronização adicional era
+possível ou necessária.
+
+### Commit
+
+- **Mensagem:** `feat: compara estratégia com buy-and-hold`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
