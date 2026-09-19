@@ -416,6 +416,33 @@ patrimônios finais; `differenceMagnitudeMicros` é a diferença absoluta exata 
 calculada com `subtractChecked` de `src/money/fixed-point.ts` — nunca em ponto flutuante. O
 `BenchmarkComparison` devolvido é imutável; nenhuma entrada é mutada.
 
+## Seleção de snapshot sem look-ahead para replay
+
+`src/replay/select-latest-available-snapshot.ts` define `selectLatestAvailableSnapshot`: a
+primitiva que impede o replay de usar dados futuros ao montar o contexto de uma decisão
+histórica (D-009).
+
+```text
+snapshots + asset + quote + decisionAt → MarketSnapshot disponível mais recente
+```
+
+Toda validação estrutural é reaproveitada de `parseMarketSnapshot`
+(`src/domain/contracts.ts`); este módulo acrescenta apenas a regra de seleção:
+
+- uma entrada bruta cujo `asset`/`quote` não coincidem com o par pedido é ignorada sem ser
+  validada;
+- toda entrada que coincide com o par pedido é validada por completo — inclusive quando
+  `availableAt` é posterior a `decisionAt` — para que um snapshot malformado do par não possa
+  se esconder atrás do filtro temporal;
+- entre os snapshots validados do par, vence o de maior `availableAt` que seja
+  `<= decisionAt`;
+- ausência de snapshot elegível, ou empate entre dois snapshots elegíveis no maior
+  `availableAt`, falham fechados em vez de escolher um vencedor arbitrário.
+
+O snapshot devolvido é exatamente o objeto validado e congelado que `parseMarketSnapshot`
+produz. A coleção de entrada nunca é ordenada nem mutada, e o resultado nunca depende da
+ordem em que os snapshots foram fornecidos.
+
 ## Documentação
 
 `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`,
