@@ -1,19 +1,19 @@
 # Tarefa atual
 
-- **ID:** TASK-014
-- **Milestone:** M3 — benchmark buy-and-hold com custos paper
+- **ID:** TASK-015
+- **Milestone:** M3 — comparação buy-and-hold versus cash
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_013.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_014.md`
 
 ## Objetivo
 
-Criar o primeiro benchmark buy-and-hold determinístico e auditável, usando a série anti-look-ahead e o `PaperBroker` existente para modelar o custo realista da compra inicial.
+Comparar de forma determinística e auditável os dois benchmarks já existentes, respondendo se o buy-and-hold terminou acima, abaixo ou empatado com o cash no mesmo experimento.
 
-`snapshots + decisionTimes + capital + policy → BuyAndHoldBenchmark`
+`CashBenchmark + BuyAndHoldBenchmark → BuyAndHoldVsCashComparison`
 
-O benchmark compra uma única vez no primeiro instante, mantém a posição e marca a carteira a mercado em todos os instantes. Não vende no final nesta tarefa.
+Esta tarefa apenas compara resultados existentes. Não executa ordens, não reconstrói benchmarks e não altera carteira.
 
 ## Leitura obrigatória
 
@@ -24,100 +24,82 @@ Sincronize `main` e leia integralmente:
 3. `docs/ARCHITECTURE.md`;
 4. `docs/DECISIONS.md`;
 5. `docs/ROADMAP.md`;
-6. `docs/coordination/CHATGPT_REVIEW_TASK_013.md`;
+6. `docs/coordination/CHATGPT_REVIEW_TASK_014.md`;
 7. `docs/coordination/CLAUDE_REPORT.md`;
-8. `src/replay/build-replay-snapshot-series.ts`;
-9. `src/benchmark/build-cash-benchmark.ts`;
-10. `src/broker/paper-broker.ts`;
-11. `src/domain/contracts.ts`;
-12. `src/portfolio/portfolio.ts`;
-13. `src/metrics/value-wallet-at.ts`;
-14. `src/metrics/summarize-equity-series.ts`;
-15. esta tarefa.
+8. `src/benchmark/build-cash-benchmark.ts`;
+9. `src/benchmark/build-buy-and-hold-benchmark.ts`;
+10. `src/benchmark/compare-to-cash-benchmark.ts`;
+11. `src/metrics/summarize-equity-series.ts`;
+12. `src/money/fixed-point.ts`;
+13. esta tarefa.
 
 ## Escopo exato
 
-Crie `src/benchmark/build-buy-and-hold-benchmark.ts`.
+Crie `src/benchmark/compare-buy-and-hold-to-cash.ts`.
 
-A função deve receber explicitamente:
+Implemente uma função `compareBuyAndHoldToCash` que receba:
 
+- um `BuyAndHoldBenchmark`;
+- um `CashBenchmark`.
+
+A função deve validar fail-closed, antes da comparação:
+
+- `kind === "BUY_AND_HOLD"` e `kind === "CASH"`;
+- mesmo `agentId`;
+- mesmo `initialCashMicros`;
+- mesmo `startedAt`, `endedAt` e `pointCount` nos resumos;
+- consistência interna entre o `agentId` externo de cada benchmark e o respectivo resumo;
+- consistência do cash: capital inicial igual ao patrimônio inicial e final;
+- consistência mínima do buy-and-hold: fill inicial BUY, agente/ativo/quote do fill iguais aos campos externos e patrimônio final igual ao resumo recebido;
+- todos os valores monetários usados na comparação são `bigint` não negativos dentro de `MAX_MICROS`.
+
+O resultado `BuyAndHoldVsCashComparison` deve ser profundamente imutável e registrar no mínimo:
+
+- `comparisonKind: "BUY_AND_HOLD_VS_CASH"`;
 - `agentId`;
+- `startedAt`;
+- `endedAt`;
+- `pointCount`;
 - `initialCashMicros`;
-- coleção readonly de snapshots não confiáveis;
-- `asset`;
-- `quote`;
-- `assetScale`;
-- coleção readonly de `decisionTimes`;
-- `ExecutionPolicy`.
-
-A função deve:
-
-1. construir a série por `buildReplaySnapshotSeries`;
-2. exigir `quote === "USD"`;
-3. criar uma carteira cash-only por `createWallet`;
-4. criar e validar um `OrderIntent` BUY de 100% no primeiro ponto, convertendo o preço por `microsFromUsdNumber`;
-5. executar exatamente uma compra pelo `PaperBroker`, em `occurredAt === firstPoint.decisionAt`;
-6. falhar fechado se a compra não produzir `FILL`;
-7. aplicar o fill à carteira usando a primitiva contábil existente;
-8. valorar essa carteira em todos os pontos da série por `valueWalletAt`;
-9. resumir por `summarizeEquitySeries`;
-10. devolver um `BuyAndHoldBenchmark` profundamente imutável.
-
-## Saída mínima
-
-O resultado deve registrar:
-
-- `kind: "BUY_AND_HOLD"`;
-- `agentId`;
-- `asset`;
-- `quote`;
-- `initialCashMicros`;
-- política efetivamente usada;
-- fill da compra inicial;
-- carteira após a compra;
-- série de pontos de replay usada;
-- pontos de patrimônio;
-- resumo de patrimônio.
-
-Não implementar venda/liquidação final. Documente claramente que o patrimônio final é marcação a mercado e que custos de saída ainda não estão incluídos.
+- `buyAndHoldEndingEquityMicros`;
+- `cashEndingEquityMicros`;
+- `result: "OUTPERFORMED" | "UNDERPERFORMED" | "TIED"`, sempre da perspectiva do buy-and-hold;
+- `differenceMagnitudeMicros`, diferença absoluta exata em `bigint`.
 
 ## Regras obrigatórias
 
-- Reutilizar todas as primitivas citadas; não duplicar fórmulas de preço, fee, spread, slippage, wallet, valoração ou resumo.
-- Validar `ExecutionPolicy` com o parser existente.
-- Usar somente o snapshot do primeiro `decisionAt` para a compra inicial.
-- Nunca executar mais de uma ordem.
-- O fill deve refletir fee, spread e slippage da política.
-- Nenhum Risk Manager ou agente participa deste benchmark de controle.
-- Nenhum snapshot futuro pode influenciar compra ou valoração.
-- Rejeições devem falhar fechado; não converter rejeição em benchmark cash.
+- Reutilizar `subtractChecked`, `MAX_MICROS` e os tipos existentes.
+- Não usar `number` para dinheiro.
+- Não executar `PaperBroker`, ordens, fills adicionais ou qualquer operação de carteira.
+- Não duplicar construção de benchmark, cálculo de patrimônio, P&L ou drawdown.
 - Não mutar entradas.
 - Mesmo input canônico deve produzir resultado idêntico.
 - Nenhum relógio, aleatoriedade, rede ou I/O.
+- Toda incompatibilidade ou inconsistência deve gerar `ContractValidationError`; nunca tentar corrigir ou comparar parcialmente.
+- Não alterar `compareToCashBenchmark` nesta tarefa, salvo correção mínima indispensável demonstrada por teste.
 
 ## Testes obrigatórios
 
-- compra uma vez no primeiro instante e mantém a posição;
-- fill incorpora fee, spread e slippage;
-- patrimônio inicial após a compra reflete custos;
-- preço crescente aumenta o patrimônio;
-- preço decrescente reduz o patrimônio;
-- snapshot novo só afeta pontos após ficar disponível;
-- aceita `availableAt === decisionAt`;
-- rejeita quote diferente de USD;
-- rejeita série sem snapshot elegível;
-- rejeita política inválida;
-- rejeita capital insuficiente/quantidade pequena quando o broker rejeitar;
-- não executa venda final;
-- exatamente um fill e nenhuma outra ordem;
-- não muta snapshots, decisionTimes ou policy;
-- resultado, coleções e objetos próprios congelados;
+- buy-and-hold supera cash;
+- buy-and-hold perde para cash;
+- empate;
+- diferença absoluta exata nos três casos;
+- aceita que o primeiro patrimônio do buy-and-hold seja menor que o capital inicial por custos de entrada;
+- rejeita `kind` forjado em qualquer benchmark;
+- rejeita `agentId` incompatível ou internamente inconsistente;
+- rejeita capital inicial diferente;
+- rejeita janela temporal ou quantidade de pontos diferente;
+- rejeita cash internamente inconsistente;
+- rejeita fill inicial que não seja BUY ou que divirja em agente, ativo ou quote;
+- rejeita valores monetários inválidos, negativos ou acima de `MAX_MICROS`;
+- não muta entradas;
+- resultado congelado;
 - determinismo;
 - testes offline.
 
 ## Documentação
 
-Atualize o README apenas no necessário para explicar o benchmark e a ausência de liquidação final.
+Atualize o README apenas no necessário para explicar a comparação e deixar claro que o resultado é da perspectiva do buy-and-hold.
 
 Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limitações e decisões técnicas.
 
@@ -125,10 +107,10 @@ Atualize `docs/coordination/CLAUDE_REPORT.md` com resumo, arquivos, testes, limi
 
 Não implementar:
 
-- comparação genérica entre benchmark e estratégia;
-- venda ou custo de saída;
-- estratégia aleatória;
-- replay de decisões de agentes;
+- estratégia de agente ou comparação entre agentes;
+- replay de propostas;
+- ordens novas, venda ou liquidação;
+- benchmark aleatório;
 - Astra/LLM, prompts ou handoffs;
 - novas regras de risco;
 - coleta de mercado ou rede;
@@ -141,11 +123,11 @@ Não adicionar dependência runtime. Não alterar este `TASK.md`.
 
 ## Critérios de aceite
 
-- benchmark realiza uma única compra paper no primeiro instante;
-- custos de entrada usam o `PaperBroker` existente;
-- todos os pontos respeitam anti-look-ahead;
-- carteira e patrimônio são derivados por primitivas existentes;
-- comportamento fail-closed;
+- comparação usa somente benchmarks existentes e compatíveis;
+- resultado correto da perspectiva do buy-and-hold;
+- diferença monetária exata em `bigint`;
+- inconsistências falham fechado;
+- nenhuma ordem ou alteração de carteira;
 - resultado imutável e determinístico;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
@@ -153,7 +135,7 @@ Não adicionar dependência runtime. Não alterar este `TASK.md`.
 
 ## Entrega
 
-1. Faça um único commit com a mensagem `feat: adiciona benchmark buy and hold`.
-2. Faça push em branch própria e abra PR para `main`.
-3. No PR, inclua resumo, testes e `Closes #24`.
+1. Faça um único commit com a mensagem `feat: compara buy and hold com cash`.
+2. Faça push em branch própria; a automação deve abrir o PR para `main`.
+3. No PR, inclua resumo, testes e `Closes #26`.
 4. Não aprove o próprio trabalho e não altere o status desta tarefa.
