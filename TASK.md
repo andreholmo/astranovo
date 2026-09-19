@@ -1,39 +1,39 @@
 # Tarefa atual
 
-- **ID:** TASK-017
-- **Milestone:** M3 — comparação determinística estratégia versus buy-and-hold
+- **ID:** TASK-018
+- **Milestone:** M3 — relatório determinístico consolidado de benchmarks
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_016.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_017.md`
 
 ## Objetivo
 
-Comparar o resumo de patrimônio de uma estratégia com um `BuyAndHoldBenchmark` do mesmo experimento, sem executar ordens ou reconstruir o benchmark.
+Consolidar, em uma única função pura, as comparações já existentes da estratégia contra cash e buy-and-hold, sem recalcular métricas nem executar qualquer operação financeira.
 
-`EquitySeriesSummary + BuyAndHoldBenchmark → StrategyVsBuyAndHoldComparison`
+`EquitySeriesSummary + CashBenchmark + BuyAndHoldBenchmark → StrategyBenchmarkReport`
 
 ## Leitura obrigatória
 
-Leia integralmente `CLAUDE.md`, os documentos de contexto, arquitetura, decisões e roadmap, `docs/coordination/CHATGPT_REVIEW_TASK_016.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/metrics/summarize-equity-series.ts`, `src/benchmark/build-buy-and-hold-benchmark.ts`, `src/benchmark/compare-to-cash-benchmark.ts`, `src/benchmark/compare-buy-and-hold-to-cash.ts` e esta tarefa.
+Leia integralmente `CLAUDE.md`, os documentos de contexto, arquitetura, decisões e roadmap, `docs/coordination/CHATGPT_REVIEW_TASK_017.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/benchmark/compare-to-cash-benchmark.ts`, `src/benchmark/compare-strategy-to-buy-and-hold.ts`, `src/benchmark/build-cash-benchmark.ts`, `src/benchmark/build-buy-and-hold-benchmark.ts` e esta tarefa.
 
 ## Escopo exato
 
-Crie `src/benchmark/compare-strategy-to-buy-and-hold.ts`.
+Crie `src/benchmark/build-strategy-benchmark-report.ts`.
 
 Implemente uma função pura que:
 
-- receba um `EquitySeriesSummary` da estratégia e um `BuyAndHoldBenchmark`;
-- valide que ambos pertencem ao mesmo experimento: `agentId`, `startedAt`, `endedAt`, `pointCount` e patrimônio inicial;
-- valide fail-closed a consistência estrutural mínima do benchmark recebido, reutilizando os tipos e primitivas existentes;
-- compare somente os patrimônios finais;
-- devolva resultado imutável com direção `OUTPERFORMED | UNDERPERFORMED | TIED` da perspectiva da estratégia e diferença absoluta em micros;
-- use `subtractChecked` e `MAX_MICROS`; nenhum ponto flutuante.
+- receba um `EquitySeriesSummary`, um `CashBenchmark` e um `BuyAndHoldBenchmark`;
+- reutilize obrigatoriamente as duas funções de comparação existentes;
+- falhe fechado quando qualquer entrada for incompatível ou inconsistente;
+- devolva um relatório imutável com a identificação comum do experimento e as duas comparações;
+- não replique fórmulas ou validações monetárias já existentes;
+- preserve os resultados exatos em micros e os sentidos das comparações.
 
 ## Regras obrigatórias
 
 - Não executar ordem, broker, risco, replay ou valoração.
-- Não duplicar fórmulas monetárias.
+- Não reconstruir benchmarks.
 - Não mutar entradas.
 - Mesmo input canônico produz resultado idêntico.
 - Nenhum relógio, aleatoriedade, rede ou I/O.
@@ -42,13 +42,11 @@ Implemente uma função pura que:
 
 ## Testes obrigatórios
 
-- estratégia supera buy-and-hold;
-- estratégia perde para buy-and-hold;
-- empate;
-- diferença exata nos dois sentidos;
-- rejeição por divergência de agente, intervalo, quantidade de pontos ou capital inicial;
-- rejeição de benchmark estruturalmente inconsistente e dinheiro inválido;
-- imutabilidade, não mutação e determinismo;
+- relatório consolidado com estratégia superando ambos os benchmarks;
+- combinações distintas de resultado, incluindo empate;
+- propagação fail-closed de divergências em cash e buy-and-hold;
+- prova de que as funções existentes são a fonte das comparações;
+- imutabilidade do relatório, não mutação e determinismo;
 - testes offline.
 
 ## Documentação
@@ -61,9 +59,8 @@ Win rate, P&L realizado por trade, ranking multiagente, novas estratégias, exec
 
 ## Critérios de aceite
 
-- comparação correta e auditável;
-- validação fail-closed do mesmo experimento;
-- somente aritmética monetária inteira existente;
+- composição correta e auditável das duas comparações existentes;
+- validação fail-closed herdada sem duplicação de fórmula;
 - resultado imutável e determinístico;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
@@ -71,4 +68,4 @@ Win rate, P&L realizado por trade, ranking multiagente, novas estratégias, exec
 
 ## Entrega
 
-Faça um único commit com a mensagem `feat: compara estratégia com buy-and-hold`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
+Faça um único commit com a mensagem `feat: consolida relatório de benchmarks`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
