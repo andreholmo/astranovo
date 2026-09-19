@@ -2422,3 +2422,153 @@ iniciar, então nenhuma sincronização adicional era possível ou necessária.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-019 — Relatório triangular completo de benchmarks (M3)
+
+- **ID da tarefa:** TASK-019
+- **Milestone:** M3 — relatório triangular completo de benchmarks
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Completa o relatório consolidado de M3: `buildStrategyBenchmarkReport` agora chama também
+`compareBuyAndHoldToCash` exatamente uma vez, além das duas comparações já existentes
+(`compareToCashBenchmark` e `compareStrategyToBuyAndHold`), e inclui no
+`StrategyBenchmarkReport` o objeto completo `BuyAndHoldVsCashComparison` (campo
+`buyAndHoldVsCash`), verbatim. O relatório passa a conter as três comparações pareadas entre
+estratégia, caixa e buy-and-hold — um relatório triangular. Não recalcula nenhuma métrica,
+não reconstrói nenhum benchmark e não duplica nenhuma fórmula ou validação monetária.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_018.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/benchmark/build-strategy-benchmark-report.ts`,
+`src/benchmark/compare-to-cash-benchmark.ts`, `src/benchmark/compare-strategy-to-buy-and-hold.ts`,
+`src/benchmark/compare-buy-and-hold-to-cash.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/benchmark/build-strategy-benchmark-report.ts` | atualizado — chama também `compareBuyAndHoldToCash` e adiciona `buyAndHoldVsCash` ao `StrategyBenchmarkReport` |
+| `tests/build-strategy-benchmark-report.test.ts` | atualizado — cobre a terceira comparação e sua checagem fail-closed exclusiva |
+| `README.md` | atualizado (seção "Relatório triangular determinístico consolidado de benchmarks") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design da mudança
+
+`buildStrategyBenchmarkReport(strategySummary, cashBenchmark, buyAndHoldBenchmark)` agora:
+
+1. chama `compareToCashBenchmark(strategySummary, cashBenchmark)` exatamente uma vez (sem
+   mudança em relação à TASK-018);
+2. chama `compareStrategyToBuyAndHold(strategySummary, buyAndHoldBenchmark)` exatamente uma
+   vez (sem mudança);
+3. chama `compareBuyAndHoldToCash(buyAndHoldBenchmark, cashBenchmark)` exatamente uma vez —
+   a nova chamada exigida pela tarefa;
+4. devolve o `StrategyBenchmarkReport` congelado com a mesma identificação comum do
+   experimento de antes, mais os três objetos de comparação (`vsCash`, `vsBuyAndHold`,
+   `buyAndHoldVsCash`) carregados verbatim, sem transformação.
+
+Nenhuma das três chamadas é envolvida em `try/catch`: uma rejeição de qualquer uma delas
+propaga como `ContractValidationError` para o chamador, herdando fail-closed exclusivamente
+dos comparadores existentes, como a tarefa exige.
+
+### Por que `compareBuyAndHoldToCash` não é redundante, mesmo com as outras duas chamadas
+
+Como já registrado na TASK-018, `compareToCashBenchmark` e `compareStrategyToBuyAndHold`
+já garantem, por transitividade (via `strategySummary` comum), que os benchmarks cash e
+buy-and-hold concordam entre si em `agentId`/`startedAt`/`endedAt`/`pointCount`/patrimônio
+inicial. Isso tornaria a maior parte das checagens de compatibilidade de
+`compareBuyAndHoldToCash` redundante. No entanto, `compareBuyAndHoldToCash` verifica uma
+invariante que nenhuma das outras duas chamadas checa: que o patrimônio final do
+`CashBenchmark` (`cashBenchmark.summary.endingEquityMicros`) é igual ao seu próprio
+`initialCashMicros` — "uma carteira só-caixa que nunca negocia não pode se mover".
+`compareToCashBenchmark` valida apenas que o patrimônio **inicial** do resumo do cash
+benchmark bate com `initialCashMicros`; nunca valida o patrimônio final do próprio cash
+benchmark contra esse mesmo valor. Por isso a chamada direta a `compareBuyAndHoldToCash`
+não é apenas uma cópia por simetria: ela fecha uma lacuna de validação real, sem duplicar
+nenhuma fórmula (a checagem já existe dentro da própria função reutilizada). Há teste
+dedicado (`tests/build-strategy-benchmark-report.test.ts`, describe "fail-closed propagation
+from the buy-and-hold-vs-cash comparison") que forja um `CashBenchmark` com patrimônio final
+divergente do `initialCashMicros`, mantendo tudo o mais válido, e confirma que só a terceira
+chamada rejeita esse caso.
+
+### Nome do novo campo (`buyAndHoldVsCash`)
+
+`TASK.md` não define um nome literal para o campo — apenas exige "incluir no relatório o
+objeto completo `BuyAndHoldVsCashComparison`, sem transformação". Nomeei o campo
+`buyAndHoldVsCash`, espelhando o nome do próprio tipo (`BuyAndHoldVsCashComparison`) e a
+convenção já usada pelos outros dois campos (`vsCash`, `vsBuyAndHold`, ambos do ponto de
+vista da estratégia); como esta terceira comparação não envolve a estratégia, um prefixo
+`vs` sozinho seria ambíguo sobre a partir de qual perspectiva.
+
+### Testes cobertos (adicionados/atualizados) em `tests/build-strategy-benchmark-report.test.ts`
+
+Todas as combinações de vitória/derrota/empate já existentes passam a também afirmar
+`buyAndHoldVsCash` (constante nesses casos, pois cash e buy-and-hold não mudam entre eles);
+novo caso de empate entre buy-and-hold e cash quando o preço do ativo do buy-and-hold nunca
+se move; nova checagem fail-closed exclusiva da terceira comparação (patrimônio final do
+`CashBenchmark` divergente do próprio `initialCashMicros`, não capturado por nenhuma das
+outras duas chamadas); prova de que `buyAndHoldVsCash` é exatamente o mesmo objeto que uma
+chamada direta a `compareBuyAndHoldToCash` produziria (`deepEqual`). Os testes de
+congelamento, ausência de mutação, determinismo e offline já existentes cobrem o relatório
+completo (incluindo o novo campo) sem alteração de estrutura.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **459 testes, 459 passaram, 0 falharam** (456 preexistentes + 3 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum
+uso de `random`. A branch de trabalho (`claude/issue-34-20260919-1836`) já partia
+sincronizada com `main`: `git log main..HEAD` e `git log HEAD..main` vazios, e `git status`
+confirmou árvore de trabalho limpa antes de iniciar.
+
+### Decisões técnicas tomadas
+
+1. **`compareBuyAndHoldToCash` é chamada com `(buyAndHoldBenchmark, cashBenchmark)`, na
+   mesma ordem de parâmetros da própria função reutilizada.** Nenhuma inversão ou adaptação
+   foi necessária porque o relatório já recebe os dois benchmarks nessa forma.
+2. **O campo novo se chama `buyAndHoldVsCash`, não `vsBuyAndHoldVsCash` ou similar.** Decisão
+   detalhada acima; segue o nome do próprio tipo devolvido.
+3. **Nenhuma checagem cruzada adicional foi escrita à mão entre `cashBenchmark` e
+   `buyAndHoldBenchmark`.** A tarefa proíbe duplicar validação monetária; a única lacuna real
+   (patrimônio final do cash) já é fechada pela própria chamada a `compareBuyAndHoldToCash`,
+   então nenhum código de checagem adicional foi necessário no corpo de
+   `buildStrategyBenchmarkReport`.
+4. **Nenhuma classe de erro nova.** Toda rejeição continua vindo de uma das três funções de
+   comparação reutilizadas, todas já usando `ContractValidationError`.
+
+### Limitações conhecidas
+
+- Continua sem calcular win rate, P&L realizado por trade ou ranking multiagente —
+  explicitamente fora do escopo desta tarefa em `TASK.md`.
+- O relatório triangular continua operando inteiramente em memória; nenhuma persistência em
+  arquivo foi adicionada.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; a única questão de nomenclatura (campo
+`buyAndHoldVsCash`) tem justificativa única e está registrada acima para revisão.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git fetch origin main` exigiu aprovação não concedida neste ambiente
+sandboxed, na mesma linha já registrada nas TASK-017 e TASK-018; `git log main..HEAD`,
+`git log HEAD..main` (ambos vazios) e `git status` (árvore limpa) confirmaram que a branch de
+trabalho já partia sincronizada com `main`, então nenhuma sincronização adicional era
+possível ou necessária.
+
+### Commit
+
+- **Mensagem:** `feat: completa relatório triangular de benchmarks`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.

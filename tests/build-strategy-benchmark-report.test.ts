@@ -6,6 +6,7 @@ import { buildCashBenchmark } from "../src/benchmark/build-cash-benchmark.js";
 import { buildBuyAndHoldBenchmark } from "../src/benchmark/build-buy-and-hold-benchmark.js";
 import { compareToCashBenchmark } from "../src/benchmark/compare-to-cash-benchmark.js";
 import { compareStrategyToBuyAndHold } from "../src/benchmark/compare-strategy-to-buy-and-hold.js";
+import { compareBuyAndHoldToCash } from "../src/benchmark/compare-buy-and-hold-to-cash.js";
 import { buildStrategyBenchmarkReport } from "../src/benchmark/build-strategy-benchmark-report.js";
 import type { EquitySeriesSummary } from "../src/metrics/summarize-equity-series.js";
 import { AT, FREE_POLICY, LATER, SCALE, START_CASH_MICROS } from "./support/fixtures.js";
@@ -84,6 +85,8 @@ describe("strategy beats both benchmarks", () => {
     assert.equal(report.vsCash.differenceMagnitudeMicros, 30_000_000n);
     assert.equal(report.vsBuyAndHold.result, "OUTPERFORMED");
     assert.equal(report.vsBuyAndHold.differenceMagnitudeMicros, 10_000_000n);
+    assert.equal(report.buyAndHoldVsCash.result, "OUTPERFORMED");
+    assert.equal(report.buyAndHoldVsCash.differenceMagnitudeMicros, 20_000_000n);
   });
 });
 
@@ -94,6 +97,7 @@ describe("distinct result combinations", () => {
 
     assert.equal(report.vsCash.result, "OUTPERFORMED");
     assert.equal(report.vsBuyAndHold.result, "UNDERPERFORMED");
+    assert.equal(report.buyAndHoldVsCash.result, "OUTPERFORMED");
   });
 
   it("ties cash while underperforming buy-and-hold", () => {
@@ -103,6 +107,7 @@ describe("distinct result combinations", () => {
     assert.equal(report.vsCash.result, "TIED");
     assert.equal(report.vsCash.differenceMagnitudeMicros, 0n);
     assert.equal(report.vsBuyAndHold.result, "UNDERPERFORMED");
+    assert.equal(report.buyAndHoldVsCash.result, "OUTPERFORMED");
   });
 
   it("ties buy-and-hold while outperforming cash", () => {
@@ -112,14 +117,39 @@ describe("distinct result combinations", () => {
     assert.equal(report.vsCash.result, "OUTPERFORMED");
     assert.equal(report.vsBuyAndHold.result, "TIED");
     assert.equal(report.vsBuyAndHold.differenceMagnitudeMicros, 0n);
+    assert.equal(report.buyAndHoldVsCash.result, "OUTPERFORMED");
   });
 
-  it("underperforms both benchmarks", () => {
+  it("underperforms both benchmarks while buy-and-hold still beats cash", () => {
     const summary = strategySummary({ endingEquityMicros: 90_000_000n });
     const report = buildStrategyBenchmarkReport(summary, cashBenchmark(), buyAndHoldBenchmark());
 
     assert.equal(report.vsCash.result, "UNDERPERFORMED");
     assert.equal(report.vsBuyAndHold.result, "UNDERPERFORMED");
+    assert.equal(report.buyAndHoldVsCash.result, "OUTPERFORMED");
+  });
+
+  it("ties buy-and-hold against cash when the buy-and-hold price never moves", () => {
+    const flatRaws = [
+      snapshotFor({ snapshotId: "open", price: 10, availableAt: AT }),
+      snapshotFor({ snapshotId: "close", price: 10, availableAt: LATER })
+    ];
+    const flatBuyAndHold = buildBuyAndHoldBenchmark(
+      AGENT_ID,
+      START_CASH_MICROS,
+      flatRaws,
+      "ACME",
+      "USD",
+      SCALE,
+      [AT, LATER],
+      FREE_POLICY
+    );
+    const summary = strategySummary({ endingEquityMicros: START_CASH_MICROS });
+
+    const report = buildStrategyBenchmarkReport(summary, cashBenchmark(), flatBuyAndHold);
+
+    assert.equal(report.buyAndHoldVsCash.result, "TIED");
+    assert.equal(report.buyAndHoldVsCash.differenceMagnitudeMicros, 0n);
   });
 });
 
@@ -195,6 +225,20 @@ describe("fail-closed propagation from the buy-and-hold comparison", () => {
   });
 });
 
+describe("fail-closed propagation from the buy-and-hold-vs-cash comparison", () => {
+  it("propagates a cash benchmark whose ending equity diverges from its own initialCashMicros", () => {
+    const cash = cashBenchmark();
+    const forged = {
+      ...cash,
+      summary: { ...cash.summary, endingEquityMicros: cash.summary.endingEquityMicros + 1n }
+    };
+    assert.throws(
+      () => buildStrategyBenchmarkReport(strategySummary(), forged, buyAndHoldBenchmark()),
+      ContractValidationError
+    );
+  });
+});
+
 describe("existing comparison functions are the source of truth", () => {
   it("carries compareToCashBenchmark's own result verbatim", () => {
     const summary = strategySummary({ endingEquityMicros: 130_000_000n });
@@ -214,6 +258,17 @@ describe("existing comparison functions are the source of truth", () => {
     const directComparison = compareStrategyToBuyAndHold(summary, buyAndHold);
 
     assert.deepEqual(report.vsBuyAndHold, directComparison);
+  });
+
+  it("carries compareBuyAndHoldToCash's own result verbatim", () => {
+    const summary = strategySummary({ endingEquityMicros: 130_000_000n });
+    const cash = cashBenchmark();
+    const buyAndHold = buyAndHoldBenchmark();
+
+    const report = buildStrategyBenchmarkReport(summary, cash, buyAndHold);
+    const directComparison = compareBuyAndHoldToCash(buyAndHold, cash);
+
+    assert.deepEqual(report.buyAndHoldVsCash, directComparison);
   });
 });
 
