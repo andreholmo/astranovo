@@ -12,8 +12,8 @@ Experimento de trading autônomo multiagente, **exclusivamente em paper trading*
 Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperBroker**, a
 primeira fatia de **M2 — Risk Manager determinístico**, a fachada determinística que
 integra as duas, a liquidação contábil determinística do resultado dessa fachada no
-ledger, e a terceira fatia de **M3 — valoração de patrimônio sem look-ahead, resumo
-determinístico da série de patrimônio e resumo determinístico de custos de execução**.
+ledger, e **M3 — valoração de patrimônio sem look-ahead, resumo determinístico da série
+de patrimônio, resumo determinístico de custos de execução e o benchmark cash**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -35,14 +35,17 @@ determinístico da série de patrimônio e resumo determinístico de custos de e
 - `src/metrics/summarize-execution-costs.ts` — `summarizeExecutionCosts`, o resumo
   determinístico de fills, rejeições, fees e impacto de execução do ledger paper de
   um agente;
+- `src/benchmark/build-cash-benchmark.ts` — `buildCashBenchmark`, o benchmark de
+  controle que permanece integralmente em caixa;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
 multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, replay completo de
-ciclos, drawdown percentual, win rate, P&L realizado por trade, benchmarks, persistência em
-arquivo, servidor ou banco de dados. O roadmap está em `docs/ROADMAP.md`.
+ciclos, drawdown percentual, win rate, P&L realizado por trade, benchmark buy-and-hold ou
+outro benchmark além do cash, persistência em arquivo, servidor ou banco de dados. O
+roadmap está em `docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -362,6 +365,30 @@ altera o resultado; uma lista vazia produz todas as contagens e totais zerados. 
 rejeição usam somente os `REJECTION_CODES` estáveis de `src/ledger/events.ts`, sempre na
 mesma ordem determinística. O `ExecutionCostSummary` devolvido é imutável; nem os eventos
 recebidos, nem a coleção, são mutados.
+
+## Benchmark cash (controle sem operações)
+
+`src/benchmark/build-cash-benchmark.ts` define `buildCashBenchmark`, o primeiro benchmark
+experimental de M3: uma carteira que permanece integralmente em caixa durante os mesmos
+instantes de avaliação usados por uma estratégia — o controle contra o qual um sinal de
+vantagem após custos precisa se provar.
+
+```text
+agentId + initialCashMicros + valuedAt[] (não vazio) → CashBenchmark auditável
+```
+
+O benchmark não executa nenhuma ordem: reutiliza integralmente `createWallet`
+(`src/portfolio/portfolio.ts`), `valueWalletAt` com lista de snapshots vazia
+(`src/metrics/value-wallet-at.ts`) e `summarizeEquitySeries`
+(`src/metrics/summarize-equity-series.ts`) — a mesma valoração e o mesmo resumo que
+qualquer estratégia usa. Nenhuma validação de timestamp, cálculo de patrimônio, P&L ou
+drawdown é duplicada; até a validação do capital inicial (tipo, sinal e limite) vem de
+`addBounded`/`MAX_MICROS`, acionado dentro de `valueWalletAt`, não de uma checagem própria.
+
+Como a carteira nunca opera, cada ponto tem caixa e patrimônio exatamente iguais ao capital
+inicial, posições e `snapshotIds` sempre vazios, e o resumo é sempre `FLAT` com
+`pnlMagnitudeMicros` e `maxDrawdownMicros` zero — por construção, não por um caso especial
+verificado à parte. Buy-and-hold e outros benchmarks ainda não existem.
 
 ## Documentação
 

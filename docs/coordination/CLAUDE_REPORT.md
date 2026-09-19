@@ -1014,3 +1014,143 @@ limitação já registrada na entrega da TASK-008.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-010 — Benchmark cash determinístico (quarta fatia de M3)
+
+- **ID da tarefa:** TASK-010
+- **Milestone:** M3 — benchmark cash determinístico, quarta fatia
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Primeiro benchmark experimental do replay: `buildCashBenchmark` recebe `agentId`,
+`initialCashMicros` e uma coleção readonly e não vazia de timestamps `valuedAt`, e devolve
+um `CashBenchmark` imutável e auditável — uma carteira que permanece integralmente em caixa
+durante os mesmos instantes em que uma estratégia seria avaliada. Não executa nenhuma ordem,
+não cria `LedgerEvent`, fill ou custo. Reutiliza integralmente `createWallet`
+(`src/portfolio/portfolio.ts`), `valueWalletAt` com lista de snapshots vazia e
+`summarizeEquitySeries` (`src/metrics/`); nenhuma validação de timestamp, cálculo de
+patrimônio, P&L ou drawdown foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_009.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/portfolio/portfolio.ts`,
+`src/metrics/value-wallet-at.ts`, `src/metrics/summarize-equity-series.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/benchmark/build-cash-benchmark.ts` | criado — `buildCashBenchmark`, `CashBenchmark` |
+| `tests/build-cash-benchmark.test.ts` | criado |
+| `README.md` | atualizado (seção "Benchmark cash (controle sem operações)" e listas de escopo) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design de `buildCashBenchmark`
+
+A função constrói uma única `Wallet` com `createWallet(agentId, initialCashMicros)` e chama
+`valueWalletAt(wallet, instant, [])` uma vez por timestamp de `valuedAt`, na mesma ordem
+recebida, produzindo um `EquityPoint` por instante. A lista completa de pontos é passada
+inteira para `summarizeEquitySeries`, que devolve o `EquitySeriesSummary`. Nenhuma outra
+lógica existe na função: toda regra exigida pela tarefa é uma consequência da reutilização
+dessas três primitivas, não de uma checagem escrita para esta tarefa:
+
+- **canônico, estritamente crescente, sem duplicata** — `valueWalletAt` rejeita um
+  `valuedAt` não canônico em cada chamada individual; `summarizeEquitySeries` rejeita
+  duplicata ou ordem inválida ao validar a série completa construída na mesma ordem de
+  entrada;
+- **lista vazia rejeitada** — `valuedAt: []` produz zero `EquityPoint`s, e
+  `summarizeEquitySeries([])` já falha fechado com "must contain at least one EquityPoint";
+  nenhuma checagem de tamanho foi escrita aqui;
+- **capital inicial: tipo inválido, negativo ou acima do limite rejeitados** —
+  `valueWalletAt` calcula `equityMicros = addBounded(wallet.cashMicros, 0n, MAX_MICROS, ...)`;
+  como a carteira não tem posições, esse é exatamente `initialCashMicros`, e `addBounded`
+  já rejeita um valor que não seja `bigint`, que seja negativo, ou cuja soma exceda
+  `MAX_MICROS` — nenhuma validação monetária própria foi escrita;
+- **caixa e patrimônio exatamente iguais ao capital inicial em todo ponto** — consequência
+  direta de uma carteira que nunca recebe um evento: `wallet.cashMicros` nunca muda entre as
+  chamadas de `valueWalletAt`;
+- **posições e `snapshotIds` sempre vazios** — `valueWalletAt` itera `wallet.positions`, que
+  está vazio, e a lista de snapshots recebida também está vazia;
+- **resumo sempre `FLAT`, com `pnlMagnitudeMicros` e `maxDrawdownMicros` zero** — como todo
+  ponto tem `equityMicros` idêntico, o primeiro e o último ponto empatam (`FLAT`) e o pico
+  corrente nunca fica acima do patrimônio atual (drawdown zero) — não é um caso especial
+  verificado, é o resultado de `summarizeEquitySeries` sobre uma série constante.
+
+### Testes cobertos em `tests/build-cash-benchmark.test.ts`
+
+Um único instante com ponto flat igual ao capital fictício de US$100; vários instantes com
+caixa/patrimônio constantes, timestamps preservados e alinhados na mesma ordem de entrada, e
+resumo flat com drawdown zero; lista vazia rejeitada; timestamp duplicado rejeitado;
+timestamps fora de ordem rejeitados; timestamp não canônico rejeitado; capital negativo
+rejeitado; capital de tipo inválido rejeitado (`bigint` forjado via `as unknown as bigint`,
+já que o tipo estático do parâmetro é `Micros`); capital acima do limite de sanidade
+rejeitado; isolamento entre dois agentes com capitais diferentes; congelamento do
+`CashBenchmark`, de `points`, de cada `EquityPoint` e de suas coleções próprias; ausência de
+mutação da coleção de timestamps recebida; determinismo para o mesmo input canônico.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **296 testes, 296 passaram, 0 falharam** (283 preexistentes + 13 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio (todo
+`valuedAt` é injetado pelo chamador em cada teste), nenhum uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **Nenhuma validação própria de `initialCashMicros`, `valuedAt` (canonicidade, ordem,
+   duplicata) ou tamanho da lista foi escrita.** A tarefa exige explicitamente reutilizar
+   `createWallet`, `valueWalletAt` e `summarizeEquitySeries`, e não replicar validação de
+   timestamp ou cálculo de patrimônio/P&L/drawdown. Como essas três funções já impõem, juntas,
+   toda regra obrigatória da tarefa sobre o input recebido, escrever uma checagem equivalente
+   aqui seria exatamente a duplicação que a tarefa proíbe.
+2. **Assinatura posicional (`agentId, initialCashMicros, valuedAt`), não um objeto de
+   opções.** Mantém a mesma convenção de `createWallet(agentId, initialCashMicros)`
+   (`src/portfolio/portfolio.ts`) e de `valueWalletAt(wallet, valuedAt, snapshots)`
+   (`src/metrics/value-wallet-at.ts`), as duas funções mais próximas que este módulo compõe.
+3. **`CashBenchmark` expõe `points: readonly EquityPoint[]` e `summary: EquitySeriesSummary`
+   sem reexportar ou redefinir esses tipos.** A tarefa pede a série de `EquityPoint` "alinhada
+   aos timestamps recebidos" e o `EquitySeriesSummary` "calculado pela função existente";
+   como os dois tipos já existem e já são exportados por `src/metrics/`, não havia motivo
+   para uma cópia ou um alias local.
+4. **Nenhuma classe de erro nova.** Toda rejeição chega de `ContractValidationError`, lançada
+   dentro de `valueWalletAt`/`summarizeEquitySeries`; este módulo não chama `rejectContract`
+   em nenhum ponto.
+
+### Limitações conhecidas
+
+- Não implementa buy-and-hold, benchmark aleatório, comparação ou ranking entre agentes —
+  fora do escopo exato desta tarefa e do M3 atual.
+- Não persiste nada em arquivo; o `CashBenchmark` vive apenas em memória, como as milestones
+  anteriores.
+- Como em `summarizeEquitySeries`, o chamador precisa fornecer `valuedAt` já em ordem
+  cronológica; a função não ordena nem deduplica silenciosamente.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as quatro decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git fetch`/`git pull --ff-only origin main` não puderam ser executados
+neste ambiente sandboxed (operações de rede exigem aprovação que não foi concedida);
+`git log`/`git status` confirmaram que a branch já estava no mesmo commit de `main`
+(`a344acf`) antes de iniciar o trabalho, então nenhuma sincronização adicional era
+necessária — mesma limitação já registrada nas entregas das TASK-008 e TASK-009.
+
+### Commit
+
+- **Mensagem:** `feat: adiciona benchmark cash`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
