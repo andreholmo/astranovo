@@ -14,11 +14,11 @@ primeira fatia de **M2 — Risk Manager determinístico**, a fachada determinís
 integra as duas, a liquidação contábil determinística do resultado dessa fachada no
 ledger, e **M3 — valoração de patrimônio sem look-ahead, resumo determinístico da série
 de patrimônio, drawdown percentual determinístico, resumo determinístico de custos de
-execução, o resultado realizado determinístico de um round trip paper fechado, os
-benchmarks cash e buy-and-hold, a comparação determinística de cada um deles com o cash, a
-comparação determinística de uma estratégia com o buy-and-hold, o relatório determinístico
-consolidado dessas duas comparações, e a seleção/série de snapshots sem look-ahead para
-replay**.
+execução, o resultado realizado determinístico de um round trip paper fechado, a agregação
+determinística de desempenho realizado e win rate exato, os benchmarks cash e buy-and-hold, a
+comparação determinística de cada um deles com o cash, a comparação determinística de uma
+estratégia com o buy-and-hold, o relatório determinístico consolidado dessas duas
+comparações, e a seleção/série de snapshots sem look-ahead para replay**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -46,6 +46,9 @@ replay**.
 - `src/metrics/summarize-closed-round-trip.ts` — `summarizeClosedRoundTrip`, o resultado
   realizado determinístico de exatamente um BUY e um SELL integrais da mesma quantidade,
   ativo e agente;
+- `src/metrics/summarize-realized-performance.ts` — `summarizeRealizedPerformance`, a
+  agregação determinística de vários `ClosedRoundTripResult` de um agente em contagens,
+  ganhos/perdas exatos, resultado líquido e win rate como fração inteira exata;
 - `src/benchmark/build-cash-benchmark.ts` — `buildCashBenchmark`, o benchmark de
   controle que permanece integralmente em caixa;
 - `src/benchmark/build-buy-and-hold-benchmark.ts` — `buildBuyAndHoldBenchmark`, o benchmark
@@ -66,8 +69,8 @@ replay**.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
 multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, replay completo de
-ciclos, win rate, P&L realizado por trade, benchmark aleatório controlado, persistência em
-arquivo, servidor ou banco de dados. O roadmap está em `docs/ROADMAP.md`.
+ciclos, ranking multiagente, retorno percentual, benchmark aleatório controlado,
+persistência em arquivo, servidor ou banco de dados. O roadmap está em `docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -453,6 +456,34 @@ SELL — `createFillEvent` (`src/ledger/events.ts`) congela o rascunho e calcula
 mas nunca valida essa coerência, então um `FillEvent` forjado poderia discordar da relação
 que o próprio ledger define. O `ClosedRoundTripResult` devolvido é imutável e carrega os
 `eventId` das duas pernas para auditoria; nenhum dos dois fills recebidos é mutado.
+
+## Agregação determinística de desempenho realizado e win rate exato
+
+`src/metrics/summarize-realized-performance.ts` define `summarizeRealizedPerformance`, a
+menor agregação auditável de vários `ClosedRoundTripResult` já validados, por agente, sem
+reconstruir fills ou posições.
+
+```text
+agentId + ClosedRoundTripResult[] → RealizedPerformanceSummary auditável
+```
+
+Aceita uma lista vazia (todo campo do resumo sai zerado) e conta trades fechados, vitórias,
+derrotas e empates; soma separadamente ganhos e perdas absolutas com proteção de limite
+(`addBounded`/`MAX_MICROS`); calcula o resultado líquido como `WIN | LOSS | BREAK_EVEN` com
+magnitude absoluta exata (`subtractChecked`); e representa o win rate de modo exato, sem
+ponto flutuante nem arredondamento, como a fração inteira `winRateNumerator /
+winRateDenominator` — número de vitórias sobre total de trades fechados, ambos zero para
+lista vazia. O resultado é imutável e independente da ordem de entrada.
+
+Falha fechada diante de: um resultado que não pertence ao `agentId` solicitado; qualquer
+`buyEventId` ou `sellEventId` reutilizado em qualquer ponto da lista, inclusive um id
+reutilizado entre pernas distintas (evita contar o mesmo fill realizado duas vezes); e uma
+`direction`/`resultMagnitudeMicros` que não corresponda exatamente à comparação `bigint`
+entre `realizedCostMicros` e `netProceedsMicros` do próprio resultado — a mesma regra que
+`summarizeClosedRoundTrip` usa para produzi-los, revalidada aqui porque nada impede um
+`ClosedRoundTripResult` forjado à mão. Não faz pareamento de fills, múltiplos lotes, posição
+parcial, FIFO/LIFO, short, retorno percentual ou ranking multiagente — fora do escopo desta
+fatia. Nenhum dos resultados recebidos é mutado.
 
 ## Benchmark cash (controle sem operações)
 
