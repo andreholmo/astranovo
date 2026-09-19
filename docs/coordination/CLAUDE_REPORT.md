@@ -1297,3 +1297,48 @@ das TASK-008, TASK-009 e TASK-010.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+### Correção — revisão técnica ciclo 1/3 (sobre o SHA `ceadce4d7789a7284b7828f81855b4c890628c4e`)
+
+A revisão do ChatGPT/GPT-5.6 Sol apontou que `compareToCashBenchmark` validava alguns campos
+monetários, mas confiava cegamente na consistência interna do próprio `CashBenchmark`
+recebido: como `CashBenchmark` é só um tipo estrutural em tempo de compilação, nada impedia um
+chamador de passar um objeto forjado com `kind !== "CASH"`, com `summary.agentId` divergente de
+`cashBenchmark.agentId`, ou com `summary.startingEquityMicros` inválido ou divergente de
+`cashBenchmark.initialCashMicros` — e a função ainda produzia uma comparação aparentemente
+válida. Isso viola a compatibilidade contábil fail-closed exigida pela tarefa.
+
+**Correção mínima em `src/benchmark/compare-to-cash-benchmark.ts`:** três checagens novas,
+antes de qualquer comparação de patrimônio final, na mesma linha das já existentes (`agentId`,
+`startedAt`, `endedAt`, `pointCount`, patrimônio inicial da estratégia):
+
+1. `cashBenchmark.summary.startingEquityMicros` passa por `assertValidMicros` (o mesmo
+   validador monetário já usado para os outros quatro campos `bigint`);
+2. `cashBenchmark.kind` precisa ser exatamente `"CASH"`;
+3. `cashBenchmark.summary.agentId` precisa ser igual a `cashBenchmark.agentId`;
+4. `cashBenchmark.summary.startingEquityMicros` (já validado no passo 1) precisa ser igual a
+   `cashBenchmark.initialCashMicros`.
+
+Como a checagem pré-existente já exige `strategySummary.startingEquityMicros ===
+cashBenchmark.initialCashMicros`, a nova checa (4) fecha a cadeia: as três grandezas —
+patrimônio inicial da estratégia, `initialCashMicros` e `summary.startingEquityMicros` do
+benchmark — ficam obrigatoriamente iguais entre si, sem precisar de uma terceira comparação
+redundante.
+
+Quatro testes novos em `tests/compare-to-cash-benchmark.test.ts`, no describe `fail-closed
+compatibility rules`: `kind` forjado; `summary.agentId` interno divergente do `agentId` do
+próprio benchmark; `summary.startingEquityMicros` forjado como não-`bigint`; e
+`summary.startingEquityMicros` divergente de `initialCashMicros`.
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **317 testes, 317 passaram, 0 falharam** (313 preexistentes + 4 novos) |
+
+Nenhuma ordem, rede, credencial ou rota financeira real foi adicionada. Pureza, determinismo,
+imutabilidade e o restante do escopo da TASK-011 preservados sem alteração.
+
+- **Commit:** `fix: valida consistencia interna do cash benchmark fail-closed`
+- **Hash:** informado a André na resposta após o push.

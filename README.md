@@ -404,8 +404,12 @@ EquitySeriesSummary da estratégia + CashBenchmark → BenchmarkComparison audit
 Antes de comparar, a função exige que os dois resumos descrevam o mesmo experimento — mesmo
 `agentId`, `startedAt`, `endedAt`, `pointCount` e patrimônio inicial da estratégia igual ao
 `initialCashMicros` do benchmark — e que todo valor monetário lido seja um `bigint` dentro do
-limite de sanidade existente (`MAX_MICROS`). Qualquer incompatibilidade ou valor forjado falha
-fechado com `ContractValidationError`, em vez de produzir um resultado silenciosamente errado.
+limite de sanidade existente (`MAX_MICROS`). Como `CashBenchmark` é só um tipo estrutural em
+tempo de compilação, a própria consistência interna do benchmark recebido também é verificada:
+`kind` precisa ser exatamente `"CASH"`, o `agentId` aninhado em `summary` precisa coincidir com
+o `agentId` do benchmark, e o `startingEquityMicros` aninhado em `summary` precisa coincidir com
+`initialCashMicros`. Qualquer incompatibilidade ou valor forjado falha fechado com
+`ContractValidationError`, em vez de produzir um resultado silenciosamente errado.
 
 A direção (`OUTPERFORMED`, `UNDERPERFORMED` ou `TIED`) vem apenas da comparação dos dois
 patrimônios finais; `differenceMagnitudeMicros` é a diferença absoluta exata entre eles,

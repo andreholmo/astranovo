@@ -12,9 +12,14 @@
  * A strategy summary is only compatible with a cash benchmark when both
  * describe the exact same experiment: same `agentId`, `startedAt`, `endedAt`,
  * `pointCount` and starting equity (the strategy's starting equity must equal
- * the benchmark's `initialCashMicros`). Any mismatch fails closed with the
- * existing `ContractValidationError`, because comparing two incompatible
- * series would silently fabricate a result. The direction (`OUTPERFORMED`,
+ * the benchmark's `initialCashMicros`). Because `CashBenchmark` is only a
+ * structural type at compile time, the benchmark's own internal consistency
+ * is also verified before trusting it: `kind` must be `"CASH"`, the nested
+ * `summary.agentId` must match `cashBenchmark.agentId`, and
+ * `summary.startingEquityMicros` must be a valid monetary amount equal to
+ * `initialCashMicros`. Any mismatch fails closed with the existing
+ * `ContractValidationError`, because comparing two incompatible or forged
+ * inputs would silently fabricate a result. The direction (`OUTPERFORMED`,
  * `UNDERPERFORMED` or `TIED`) comes only from the two ending equity values;
  * `differenceMagnitudeMicros` is their exact absolute difference, computed
  * with `bigint` and the existing monetary bounds from
@@ -70,10 +75,13 @@ function assertValidMicros(value: unknown, field: string): Micros {
  * same experiment.
  *
  * Rejects fail-closed, before any comparison, when either summary carries a
- * monetary field that is not a `bigint` in `[0, MAX_MICROS]`, or when the two
- * summaries are not compatible: different `agentId`, `startedAt`, `endedAt`,
- * `pointCount`, or a strategy starting equity that does not equal the
- * benchmark's `initialCashMicros`.
+ * monetary field that is not a `bigint` in `[0, MAX_MICROS]`, when the
+ * `cashBenchmark` itself is internally inconsistent (forged `kind`, a nested
+ * `summary.agentId` that disagrees with `cashBenchmark.agentId`, or a nested
+ * `summary.startingEquityMicros` that disagrees with `initialCashMicros`), or
+ * when the two summaries are not compatible: different `agentId`,
+ * `startedAt`, `endedAt`, `pointCount`, or a strategy starting equity that
+ * does not equal the benchmark's `initialCashMicros`.
  */
 export function compareToCashBenchmark(
   strategySummary: EquitySeriesSummary,
@@ -97,9 +105,30 @@ export function compareToCashBenchmark(
     benchmarkSummary.endingEquityMicros,
     "cashBenchmark.summary.endingEquityMicros"
   );
+  const benchmarkStartingEquityMicros = assertValidMicros(
+    benchmarkSummary.startingEquityMicros,
+    "cashBenchmark.summary.startingEquityMicros"
+  );
 
+  if (cashBenchmark.kind !== "CASH") {
+    rejectContract(BENCHMARK_COMPARISON, "cashBenchmark.kind", 'must be "CASH"');
+  }
   if (strategySummary.agentId !== cashBenchmark.agentId) {
     rejectContract(BENCHMARK_COMPARISON, "agentId", "must match the cash benchmark's agentId");
+  }
+  if (benchmarkSummary.agentId !== cashBenchmark.agentId) {
+    rejectContract(
+      BENCHMARK_COMPARISON,
+      "cashBenchmark.summary.agentId",
+      "must match the cash benchmark's agentId"
+    );
+  }
+  if (benchmarkStartingEquityMicros !== initialCashMicros) {
+    rejectContract(
+      BENCHMARK_COMPARISON,
+      "cashBenchmark.summary.startingEquityMicros",
+      "must match the cash benchmark's initialCashMicros"
+    );
   }
   if (strategySummary.startedAt !== benchmarkSummary.startedAt) {
     rejectContract(BENCHMARK_COMPARISON, "startedAt", "must match the cash benchmark's startedAt");

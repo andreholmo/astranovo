@@ -144,6 +144,53 @@ describe("fail-closed compatibility rules", () => {
     const summary = strategySummary({ endingEquityMicros: MAX_MICROS + 1n });
     assert.throws(() => compareToCashBenchmark(summary, cashBenchmark()), ContractValidationError);
   });
+
+  it("rejects a cash benchmark with a forged kind", () => {
+    const benchmark = { ...cashBenchmark(), kind: "FORGED" as unknown as "CASH" };
+    assert.throws(
+      () => compareToCashBenchmark(strategySummary(), benchmark),
+      ContractValidationError
+    );
+  });
+
+  it("rejects a cash benchmark whose internal summary.agentId diverges from its own agentId", () => {
+    const benchmark = cashBenchmark();
+    const forged = {
+      ...benchmark,
+      summary: { ...benchmark.summary, agentId: "momentum" }
+    };
+    assert.throws(
+      () => compareToCashBenchmark(strategySummary(), forged),
+      ContractValidationError
+    );
+  });
+
+  it("rejects a cash benchmark whose internal summary.startingEquityMicros is a forged non-bigint", () => {
+    const benchmark = cashBenchmark();
+    const forged = {
+      ...benchmark,
+      summary: {
+        ...benchmark.summary,
+        startingEquityMicros: "100000000" as unknown as bigint
+      }
+    };
+    assert.throws(
+      () => compareToCashBenchmark(strategySummary(), forged),
+      ContractValidationError
+    );
+  });
+
+  it("rejects a cash benchmark whose internal summary.startingEquityMicros diverges from initialCashMicros", () => {
+    const benchmark = cashBenchmark();
+    const forged = {
+      ...benchmark,
+      summary: { ...benchmark.summary, startingEquityMicros: 90_000_000n }
+    };
+    assert.throws(
+      () => compareToCashBenchmark(strategySummary(), forged),
+      ContractValidationError
+    );
+  });
 });
 
 describe("immutability", () => {
