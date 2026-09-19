@@ -1342,3 +1342,164 @@ imutabilidade e o restante do escopo da TASK-011 preservados sem alteração.
 
 - **Commit:** `fix: valida consistencia interna do cash benchmark fail-closed`
 - **Hash:** informado a André na resposta após o push.
+
+## TASK-012 — Seleção de snapshot sem look-ahead para replay (quarta fatia de M3)
+
+- **ID da tarefa:** TASK-012
+- **Milestone:** M3 — seleção determinística de snapshot sem look-ahead, quarta fatia
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Menor primitiva de seleção do replay: `selectLatestAvailableSnapshot` recebe uma coleção não
+validada de entradas, um `asset`, um `quote` e um `decisionAt` canônico, e devolve o
+`MarketSnapshot` validado e imutável do par pedido com o maior `availableAt` tal que
+`availableAt <= decisionAt`. Não implementa replay completo, coleta de mercado, indicadores
+nem qualquer outra peça fora desta seleção pontual — fora do escopo exato desta fatia.
+Reutiliza integralmente `parseMarketSnapshot` de `src/domain/contracts.ts` para toda validação
+estrutural; nenhuma regra do contrato `MarketSnapshot` foi duplicada ou redefinida.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_011.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/domain/contracts.ts`,
+`src/metrics/value-wallet-at.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/replay/select-latest-available-snapshot.ts` | criado — `selectLatestAvailableSnapshot` |
+| `tests/select-latest-available-snapshot.test.ts` | criado |
+| `README.md` | atualizado (seção "Seleção de snapshot sem look-ahead para replay") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `selectLatestAvailableSnapshot`
+
+Recebe `(snapshots, asset, quote, decisionAt)`, onde `snapshots` é uma lista de valores não
+validados em qualquer ordem — a mesma forma "software valida" já usada em
+`src/metrics/value-wallet-at.ts`. Para cada entrada bruta:
+
+1. um teste estrutural barato (`record.asset === asset && record.quote === quote`, sem chamar
+   `parseMarketSnapshot`) decide se a entrada pertence ao par pedido; entradas de outro par são
+   ignoradas sem validação alguma — mesmo se malformadas;
+2. toda entrada que pertence ao par pedido passa por `parseMarketSnapshot(raw)` **sem** a
+   opção `notAfter` — a tarefa exige validar inclusive snapshots futuros do par, e passar
+   `notAfter` faria `parseMarketSnapshot` rejeitar um snapshot futuro *válido* antes mesmo de a
+   seleção poder simplesmente ignorá-lo por não ser elegível;
+3. a elegibilidade temporal (`candidate.availableAt <= decisionAt`) é então checada
+   manualmente, à parte da validação estrutural.
+
+Entre os candidatos elegíveis, o maior `availableAt` e a contagem de candidatos empatados
+nesse máximo são computados num único laço sobre `snapshots`, sem ordenar a coleção: cada
+candidato estritamente maior que o melhor atual substitui o melhor e zera a marca de empate;
+cada candidato igual ao melhor atual liga a marca de empate. Esse algoritmo de "máximo e
+multiplicidade do máximo" é uma redução comutativa e associativa — o resultado (vencedor e
+se houve empate no topo) não depende da ordem de iteração, verificado por teste dedicado.
+Ausência de candidato elegível e empate no maior `availableAt` falham fechados com
+`ContractValidationError`, sem escolher um vencedor arbitrário.
+
+`decisionAt` é validado com uma checagem de timestamp canônico duplicada localmente — mesma
+regex e mesmo round-trip por `Date` já usados (e já duplicados por precedente) em
+`src/domain/contracts.ts` (privada, não exportada), `src/risk/risk-manager.ts` e
+`src/metrics/value-wallet-at.ts`. Como toda comparação de `availableAt` ocorre apenas entre
+strings que já passaram por essa checagem — e o formato canônico tem largura fixa —, a
+comparação de elegibilidade e de máximo usa comparação de string diretamente (`>`, `===`),
+sem precisar calcular epoch: duas datas UTC canônicas de mesmo formato comparam
+lexicograficamente na mesma ordem que cronologicamente.
+
+### Testes cobertos em `tests/select-latest-available-snapshot.test.ts`
+
+Seleção do único snapshot elegível; escolha do mais recente entre três snapshots passados
+(dois deles com `availableAt` empatado, mas não no máximo); aceitação de
+`availableAt === decisionAt`; snapshot futuro ignorado a favor do passado mais recente;
+snapshot de outro `asset` ignorado; snapshot de outro `quote` ignorado; entrada de outro par
+nunca validada mesmo quando estruturalmente malformada (preço negativo); rejeição de coleção
+vazia; rejeição quando todo snapshot do par é futuro; rejeição quando só há snapshots de
+outros pares; rejeição de empate no maior `availableAt`; confirmação de que um empate que não
+está no máximo não causa rejeição; rejeição de `decisionAt` sem milissegundos; rejeição de
+`decisionAt` com offset diferente de `Z`; rejeição de snapshot malformado do par pedido mesmo
+quando futuro; independência da ordem de entrada (três permutações, resultado idêntico);
+ausência de mutação da coleção e de cada entrada recebida; congelamento do `MarketSnapshot`
+devolvido; determinismo para o mesmo input canônico.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **336 testes, 336 passaram, 0 falharam** (317 preexistentes + 19 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio
+(`decisionAt` é sempre injetado pelo chamador), nenhum uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **`isCanonicalTimestamp` duplicado localmente**, seguindo o mesmo precedente já registrado
+   nas TASK-004/007/008 (hash de `RiskDecision.id`/checagem de timestamp duplicados porque o
+   escopo exato desta tarefa é criar `src/replay/`, não alterar as exportações de
+   `src/domain/contracts.ts`).
+2. **`parseMarketSnapshot` é chamado sem a opção `notAfter`.** A tarefa exige duas coisas que
+   `notAfter` não consegue satisfazer ao mesmo tempo: validar estruturalmente um snapshot
+   futuro do par (para não escondê-lo atrás do filtro temporal) e, separadamente, apenas
+   *ignorar* — não rejeitar toda a chamada — um snapshot futuro que é estruturalmente válido.
+   Passar `notAfter: decisionAt` faria `parseMarketSnapshot` lançar erro para qualquer snapshot
+   futuro do par, válido ou não, o que quebraria "ignora snapshot futuro" sempre que ele fosse
+   estruturalmente correto. A elegibilidade temporal é, por isso, uma checagem manual separada
+   da validação estrutural, feita por comparação de string sobre timestamps já canônicos.
+3. **Comparação de `availableAt`/`decisionAt` por string, não por epoch.** Como os dois lados
+   da comparação já passaram por uma checagem de timestamp canônico (formato fixo,
+   zero-padded, sempre `Z`), a ordem lexicográfica de string coincide exatamente com a ordem
+   cronológica; calcular e comparar epochs seria uma conversão redundante sem mudar nenhum
+   resultado.
+4. **Pertencimento ao par pedido é decidido por uma comparação de campo barata
+   (`record.asset === asset && record.quote === quote`), antes de qualquer chamada a
+   `parseMarketSnapshot`.** É a única forma de cumprir "ignorar snapshots de outros pares" sem
+   validá-los — validar tudo indiscriminadamente rejeitaria a chamada inteira diante de um
+   snapshot malformado de um par que nem interessa à seleção, o que a tarefa proíbe
+   implicitamente ao pedir que apenas o par pedido seja submetido à validação completa.
+5. **Máximo e empate no máximo computados num único laço, sem ordenar `snapshots`.** Ordenar
+   violaria a regra explícita "não ordenar nem alterar a coleção recebida"; o algoritmo de
+   "máximo e contagem de empates no máximo" é uma redução que não depende da ordem de
+   iteração, então entrega "a ordem da entrada não pode mudar o resultado" sem precisar de uma
+   cópia ordenada.
+6. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/`ContractValidationError`
+   sob o nome de contrato `SnapshotSelection`, o mesmo mecanismo do resto do repositório.
+
+### Limitações conhecidas
+
+- Seleciona um único snapshot por chamada; não monta o contexto completo de uma decisão nem
+  itera sobre múltiplos ativos de uma vez — isso, se necessário, é responsabilidade do
+  chamador ou de uma fatia futura de M3.
+- Não verifica frescor além do anti-look-ahead: um snapshot elegível com `availableAt` muito
+  anterior a `decisionAt` é aceito, na mesma linha já documentada em
+  `src/metrics/value-wallet-at.ts`.
+- Não persiste nada em arquivo; roda inteiramente em memória.
+- Não implementa replay de ciclos, indicadores, benchmarks ou qualquer peça listada em "Fora
+  do escopo" da TASK-012.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as seis decisões acima têm alternativa única e
+mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git pull --ff-only origin main`/`git fetch origin main` não puderam ser
+executados neste ambiente sandboxed (operações de rede exigem aprovação que não foi
+concedida); `git status`/`git log`/`git rev-parse HEAD origin/main` confirmaram que a branch já
+estava no mesmo commit de `main` (`896676a`) antes de iniciar o trabalho, então nenhuma
+sincronização adicional era necessária — mesma limitação já registrada nas entregas das
+TASK-008 a TASK-011.
+
+### Commit
+
+- **Mensagem:** `feat: seleciona snapshot sem look-ahead para replay`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
