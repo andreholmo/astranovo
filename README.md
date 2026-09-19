@@ -443,6 +443,33 @@ O snapshot devolvido é exatamente o objeto validado e congelado que `parseMarke
 produz. A coleção de entrada nunca é ordenada nem mutada, e o resultado nunca depende da
 ordem em que os snapshots foram fornecidos.
 
+## Série cronológica de snapshots para replay
+
+`src/replay/build-replay-snapshot-series.ts` define `buildReplaySnapshotSeries`: a
+composição de `selectLatestAvailableSnapshot` que materializa a linha temporal auditável de
+evidências de mercado usada por um replay, sem ainda decidir BUY/SELL/HOLD nem executar
+nada.
+
+```text
+snapshots + asset + quote + decisionTimes → série imutável de pontos de replay
+```
+
+`decisionTimes` precisa ser uma coleção não vazia de timestamps canônicos, estritamente
+crescente e sem duplicatas; qualquer violação falha fechado antes de selecionar qualquer
+snapshot. Para cada instante, a seleção é delegada inteiramente a
+`selectLatestAvailableSnapshot`, então:
+
+- nenhum snapshot com `availableAt > decisionAt` pode aparecer em um ponto;
+- um ponto só troca de snapshot quando um mais recente já está disponível naquele instante —
+  não há herança implícita entre pontos vizinhos, cada um é resolvido de forma independente;
+- ausência de snapshot elegível, empate no maior `availableAt` ou um snapshot malformado do
+  par pedido propagam o mesmo erro fail-closed da primitiva, interrompendo a série inteira em
+  vez de devolver um resultado parcial.
+
+Cada ponto contém somente `decisionAt` e o `MarketSnapshot` validado e congelado devolvido
+pelo seletor. Nem os snapshots de entrada nem `decisionTimes` são ordenados ou mutados; cada
+ponto e a coleção externa são congelados.
+
 ## Documentação
 
 `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`,

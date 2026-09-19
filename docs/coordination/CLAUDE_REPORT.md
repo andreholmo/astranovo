@@ -1503,3 +1503,147 @@ TASK-008 a TASK-011.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-013 — Série cronológica de snapshots para replay (terceira fatia de M3)
+
+- **ID da tarefa:** TASK-013
+- **Milestone:** M3 — série cronológica de snapshots para replay
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Composição pequena da primitiva da TASK-012 numa linha temporal auditável:
+`buildReplaySnapshotSeries` recebe uma coleção não confiável de snapshots, `asset`, `quote` e
+uma coleção de `decisionTimes` já em ordem cronológica estritamente crescente, e devolve uma
+coleção imutável e congelada de pontos `{ decisionAt, snapshot }` — um por instante. Não
+decide BUY/SELL/HOLD, não roda agente, Risk Manager, PaperBroker ou replay de portfólio; monta
+apenas a evidência de mercado que estava disponível em cada instante. Reutiliza integralmente
+`selectLatestAvailableSnapshot` de `src/replay/select-latest-available-snapshot.ts` para toda
+seleção; nenhuma lógica de seleção foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_012.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/domain/contracts.ts`,
+`src/replay/select-latest-available-snapshot.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/replay/build-replay-snapshot-series.ts` | criado — `buildReplaySnapshotSeries`, `ReplaySnapshotPoint` |
+| `tests/build-replay-snapshot-series.test.ts` | criado |
+| `README.md` | atualizado (seção "Série cronológica de snapshots para replay") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `buildReplaySnapshotSeries`
+
+Percorre `decisionTimes` uma única vez, validando à medida que avança:
+
+1. lista vazia falha fechado antes de qualquer seleção;
+2. cada instante precisa ser um timestamp canônico UTC ISO-8601 — a mesma checagem de formato
+   fixo já duplicada em `src/risk/risk-manager.ts`, `src/metrics/value-wallet-at.ts` e
+   `src/replay/select-latest-available-snapshot.ts`;
+3. cada instante precisa ser estritamente maior que o anterior — como o formato canônico é de
+   largura fixa, a comparação de string já concorda com a ordem cronológica, então duplicata e
+   fora de ordem são a mesma checagem (`decisionAt <= previous`);
+4. para cada instante validado, `selectLatestAvailableSnapshot(snapshots, asset, quote,
+   decisionAt)` é chamada exatamente uma vez; qualquer rejeição dela (ausência de snapshot
+   elegível, empate no maior `availableAt`, snapshot malformado do par pedido) propaga sem
+   captura, interrompendo a montagem da série inteira.
+
+Cada instante é resolvido de forma independente — não há reaproveitamento implícito do
+snapshot do ponto anterior. Um ponto só muda de snapshot quando, para aquele `decisionAt`
+específico, um snapshot mais recente já satisfaz `availableAt <= decisionAt`; a "troca de
+snapshot" observável nos testes é, portanto, um efeito emergente de chamar a mesma primitiva
+pura em instantes diferentes, não uma regra nova implementada aqui.
+
+Cada ponto (`{ decisionAt, snapshot }`) é congelado individualmente, e a coleção de pontos é
+congelada por inteiro antes de ser devolvida. `snapshot` é exatamente o objeto validado e
+congelado que `selectLatestAvailableSnapshot`/`parseMarketSnapshot` produziu — não é copiado
+nem recriado.
+
+### Testes cobertos em `tests/build-replay-snapshot-series.test.ts`
+
+Série de um único ponto; série cronológica para vários instantes; troca de snapshot somente
+quando um mais recente já está disponível (com um instante intermediário reutilizando o
+mesmo snapshot do ponto anterior); snapshot aceito com `availableAt === decisionAt`; prova de
+que um snapshot futuro nunca aparece antes de sua disponibilidade, mesmo quando existe no
+conjunto; rejeição de `decisionTimes` vazio, de instante não canônico, de instantes
+duplicados e de instantes fora de ordem; propagação de ausência de snapshot elegível, de
+empate no maior `availableAt` e de snapshot malformado do par pedido; snapshots de outros
+pares ignorados, herdado da primitiva; ausência de mutação de `snapshots` e de
+`decisionTimes`; congelamento de cada ponto, do snapshot aninhado e da coleção externa;
+determinismo para o mesmo input canônico.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **353 testes, 353 passaram, 0 falharam** (336 preexistentes + 17 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio (todo
+instante é injetado pelo chamador em cada teste), nenhum uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **`isCanonicalTimestamp` duplicado localmente**, com o mesmo padrão regex e a mesma
+   checagem de round-trip por `Date` já usadas em `src/domain/contracts.ts` (privada, não
+   exportada) e duplicadas em `src/risk/risk-manager.ts`, `src/metrics/value-wallet-at.ts` e
+   `src/replay/select-latest-available-snapshot.ts`. O escopo exato desta tarefa é criar um
+   módulo em `src/replay/`, não alterar exportações de `src/domain/contracts.ts` ou de
+   `src/replay/select-latest-available-snapshot.ts`; a duplicação de uma checagem de três
+   linhas segue o precedente já registrado nas tarefas anteriores.
+2. **Duplicata e fora de ordem verificados numa única comparação (`decisionAt <=
+   previous`).** A tarefa pede as duas rejeições separadamente, mas como `decisionTimes`
+   deve ser estritamente crescente, qualquer par adjacente que não seja estritamente maior é,
+   por definição, ou uma duplicata ou uma inversão — tratar os dois casos com a mesma
+   comparação evita uma segunda passada ou uma estrutura de dados auxiliar (ex.: um `Set`)
+   sem perder nenhuma cobertura de teste.
+3. **Cada instante é resolvido de forma totalmente independente, sem estado compartilhado
+   além do "instante anterior" usado só para validar ordem.** A tarefa exige "trocar de
+   snapshot somente quando um mais recente já está disponível" como propriedade observável,
+   não como uma regra a ser implementada por comparação entre pontos consecutivos — chamar a
+   primitiva pura de novo para cada `decisionAt` já entrega essa propriedade por construção,
+   e evita duplicar, mesmo que parcialmente, a lógica de seleção que a tarefa proíbe
+   duplicar.
+4. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/`ContractValidationError`
+   sob o nome de contrato `ReplaySnapshotSeries`, o mesmo mecanismo do resto do repositório;
+   erros da primitiva reutilizada propagam sem re-envelopamento, preservando `contract:
+   "SnapshotSelection"` original para quem inspeciona o erro.
+
+### Limitações conhecidas
+
+- Monta a série para um único par `asset`/`quote` por chamada; um replay multiativo precisa
+  chamar a função uma vez por ativo, orquestração que fica fora desta fatia.
+- Não verifica frescor além do anti-look-ahead herdado da primitiva: um snapshot elegível com
+  `availableAt` muito anterior ao `decisionAt` correspondente é aceito.
+- Não persiste nada em arquivo; roda inteiramente em memória.
+- Não implementa replay de ciclos, decisão de agente, indicadores, benchmarks ou qualquer
+  peça listada em "Fora do escopo" da TASK-013.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as quatro decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git pull --ff-only origin main`/`git fetch origin main` não puderam ser
+executados neste ambiente sandboxed (operações de rede exigem aprovação que não foi
+concedida); `git status`/`git log` confirmaram que a branch já estava no mesmo commit de
+`main` (`ead47d9`) antes de iniciar o trabalho, então nenhuma sincronização adicional era
+necessária — mesma limitação já registrada nas entregas anteriores.
+
+### Commit
+
+- **Mensagem:** `feat: constroi serie de snapshots para replay`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
