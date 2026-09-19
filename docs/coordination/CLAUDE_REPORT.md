@@ -1154,3 +1154,191 @@ necessária — mesma limitação já registrada nas entregas das TASK-008 e TAS
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-011 — Comparação determinística com o benchmark cash (quinta fatia de M3)
+
+- **ID da tarefa:** TASK-011
+- **Milestone:** M3 — comparação determinística com benchmark, quinta fatia
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Menor comparação do replay: `compareToCashBenchmark` recebe o `EquitySeriesSummary` de uma
+estratégia e um `CashBenchmark` do mesmo experimento e devolve um `BenchmarkComparison`
+imutável e auditável — se a estratégia terminou acima, abaixo ou empatada com o controle
+cash. Não executa nenhuma ordem e não cria ranking entre agentes. Reutiliza integralmente os
+tipos `EquitySeriesSummary` (`src/metrics/summarize-equity-series.ts`) e `CashBenchmark`
+(`src/benchmark/build-cash-benchmark.ts`), sem redefini-los, e `subtractChecked`/`MAX_MICROS`
+de `src/money/fixed-point.ts` para toda aritmética monetária; nenhuma fórmula foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_010.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/benchmark/build-cash-benchmark.ts`,
+`src/metrics/summarize-equity-series.ts`, `src/money/fixed-point.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/benchmark/compare-to-cash-benchmark.ts` | criado — `compareToCashBenchmark`, `BenchmarkComparison`, `BenchmarkComparisonResult` |
+| `tests/compare-to-cash-benchmark.test.ts` | criado |
+| `README.md` | atualizado (seção "Comparação com o benchmark cash") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com
+zero dependências de runtime.
+
+### Design de `compareToCashBenchmark`
+
+Recebe `(strategySummary, cashBenchmark)`, posicional, na mesma convenção de
+`buildCashBenchmark(agentId, initialCashMicros, valuedAt)` e `valueWalletAt(wallet, valuedAt,
+snapshots)` — as duas funções mais próximas que este módulo compõe, ambas de dois ou três
+parâmetros posicionais em vez de um objeto de opções.
+
+Duas fases, nessa ordem:
+
+1. **Validação monetária de cada campo `bigint` lido** (`strategySummary.startingEquityMicros`,
+   `strategySummary.endingEquityMicros`, `cashBenchmark.initialCashMicros`,
+   `cashBenchmark.summary.endingEquityMicros`): cada um precisa ser um `bigint` entre `0` e
+   `MAX_MICROS`, o mesmo padrão de `assertValidEquityMicros` em
+   `src/metrics/summarize-equity-series.ts`, repetido aqui porque `EquitySeriesSummary` e
+   `CashBenchmark` são apenas tipos estruturais em tempo de compilação — nada impede um
+   chamador (ou um teste) de construir um com um campo forjado.
+2. **Compatibilidade entre os dois resumos**: mesmo `agentId`, mesmo `startedAt`, mesmo
+   `endedAt`, mesmo `pointCount` e patrimônio inicial da estratégia igual a
+   `cashBenchmark.initialCashMicros`. Qualquer divergência falha fechado imediatamente, antes
+   de qualquer comparação de patrimônio final.
+
+Só então a direção é decidida comparando exclusivamente `strategyEndingEquityMicros` e
+`benchmarkEndingEquityMicros`: `OUTPERFORMED` quando a estratégia é maior, `UNDERPERFORMED`
+quando é menor, `TIED` quando são iguais. A magnitude usa `subtractChecked` sobre o maior menos
+o menor — nunca negativa por construção — e é `0n` no caso `TIED`, sem chamar
+`subtractChecked` com operandos iguais.
+
+### Testes cobertos em `tests/compare-to-cash-benchmark.test.ts`
+
+Estratégia supera o cash (`OUTPERFORMED` com diferença exata); estratégia perde para o cash
+(`UNDERPERFORMED` com diferença exata); empate (`TIED`, diferença zero); diferença exata em
+micros (1 micro, não uma aproximação); capital fictício de US$100 compartilhado entre
+estratégia e benchmark; rejeição por `agentId` diferente; rejeição por `startedAt` diferente;
+rejeição por `endedAt` diferente; rejeição por `pointCount` diferente; rejeição por patrimônio
+inicial diferente; rejeição de patrimônio final forjado como não-`bigint`, negativo e acima de
+`MAX_MICROS`; congelamento do `BenchmarkComparison` devolvido; ausência de mutação do
+`EquitySeriesSummary` e do `CashBenchmark` recebidos; determinismo para o mesmo input
+canônico; ausência de relógio, rede ou aleatoriedade (suíte offline, valores só `bigint`
+injetados).
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **313 testes, 313 passaram, 0 falharam** (296 preexistentes + 17 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio (todo
+timestamp já vem nos resumos de entrada, injetados pelo chamador em cada teste), nenhum uso
+de `random`.
+
+### Decisões técnicas tomadas
+
+1. **Assinatura posicional `(strategySummary, cashBenchmark)`, não um objeto de opções.**
+   Segue a mesma convenção de `buildCashBenchmark` e `valueWalletAt`, as funções mais próximas
+   que este módulo compõe; um objeto de request só foi usado em `settlePaperExecution`/
+   `executePaperOrderWithRisk`, que recebem seis ou mais campos.
+2. **`assertValidMicros` duplicado localmente**, no mesmo padrão de `assertValidEquityMicros`
+   em `src/metrics/summarize-equity-series.ts`. A tarefa exige explicitamente reutilizar os
+   tipos existentes sem redefini-los e "rejeitar valores monetários inválidos ou forjados";
+   como nenhum desses tipos é uma classe com validação em tempo de execução, a única forma de
+   cumprir essa exigência é revalidar cada campo `bigint` lido, o mesmo trade-off já registrado
+   nas TASK-007/008/009.
+3. **Compatibilidade do patrimônio inicial comparada contra `cashBenchmark.initialCashMicros`,
+   não contra `cashBenchmark.summary.startingEquityMicros`.** Os dois valores são sempre iguais
+   por construção de `buildCashBenchmark` (a carteira nunca opera), mas `initialCashMicros` é o
+   campo que a tarefa nomeia explicitamente ("mesmo... patrimônio inicial" comparado a um
+   `CashBenchmark`), então comparar contra ele é mais direto e não depende de uma invariante
+   implícita de outro módulo.
+4. **`TIED` nunca chama `subtractChecked`.** Uma subtração de dois valores iguais já devolveria
+   `0n`, mas evitar a chamada nesse ramo deixa explícito, sem uma checagem extra, que a
+   magnitude de um empate é sempre exatamente zero.
+5. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/`ContractValidationError`,
+   o mesmo mecanismo do resto do repositório.
+
+### Limitações conhecidas
+
+- Compara apenas contra o benchmark cash; buy-and-hold, benchmark aleatório ou ranking entre
+  agentes seguem fora do escopo desta fatia e do M3 atual.
+- Não persiste nada em arquivo; o `BenchmarkComparison` vive apenas em memória, como as
+  milestones anteriores.
+- Não recalcula nem revalida a série de `EquityPoint` subjacente a nenhum dos dois resumos —
+  confia que `EquitySeriesSummary` e `CashBenchmark` foram produzidos por
+  `summarizeEquitySeries`/`buildCashBenchmark`, exceto pelos quatro campos monetários
+  explicitamente revalidados.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa única
+e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. `git pull --ff-only origin main`/`git fetch origin main` não puderam ser
+executados neste ambiente sandboxed (operações de rede exigem aprovação que não foi
+concedida); `git status`/`git log --all`/`git rev-parse HEAD main origin/main` confirmaram que
+a branch já estava no mesmo commit de `main` (`a32bcfc`) antes de iniciar o trabalho, então
+nenhuma sincronização adicional era necessária — mesma limitação já registrada nas entregas
+das TASK-008, TASK-009 e TASK-010.
+
+### Commit
+
+- **Mensagem:** `feat: compara estrategia ao benchmark cash`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+### Correção — revisão técnica ciclo 1/3 (sobre o SHA `ceadce4d7789a7284b7828f81855b4c890628c4e`)
+
+A revisão do ChatGPT/GPT-5.6 Sol apontou que `compareToCashBenchmark` validava alguns campos
+monetários, mas confiava cegamente na consistência interna do próprio `CashBenchmark`
+recebido: como `CashBenchmark` é só um tipo estrutural em tempo de compilação, nada impedia um
+chamador de passar um objeto forjado com `kind !== "CASH"`, com `summary.agentId` divergente de
+`cashBenchmark.agentId`, ou com `summary.startingEquityMicros` inválido ou divergente de
+`cashBenchmark.initialCashMicros` — e a função ainda produzia uma comparação aparentemente
+válida. Isso viola a compatibilidade contábil fail-closed exigida pela tarefa.
+
+**Correção mínima em `src/benchmark/compare-to-cash-benchmark.ts`:** três checagens novas,
+antes de qualquer comparação de patrimônio final, na mesma linha das já existentes (`agentId`,
+`startedAt`, `endedAt`, `pointCount`, patrimônio inicial da estratégia):
+
+1. `cashBenchmark.summary.startingEquityMicros` passa por `assertValidMicros` (o mesmo
+   validador monetário já usado para os outros quatro campos `bigint`);
+2. `cashBenchmark.kind` precisa ser exatamente `"CASH"`;
+3. `cashBenchmark.summary.agentId` precisa ser igual a `cashBenchmark.agentId`;
+4. `cashBenchmark.summary.startingEquityMicros` (já validado no passo 1) precisa ser igual a
+   `cashBenchmark.initialCashMicros`.
+
+Como a checagem pré-existente já exige `strategySummary.startingEquityMicros ===
+cashBenchmark.initialCashMicros`, a nova checa (4) fecha a cadeia: as três grandezas —
+patrimônio inicial da estratégia, `initialCashMicros` e `summary.startingEquityMicros` do
+benchmark — ficam obrigatoriamente iguais entre si, sem precisar de uma terceira comparação
+redundante.
+
+Quatro testes novos em `tests/compare-to-cash-benchmark.test.ts`, no describe `fail-closed
+compatibility rules`: `kind` forjado; `summary.agentId` interno divergente do `agentId` do
+próprio benchmark; `summary.startingEquityMicros` forjado como não-`bigint`; e
+`summary.startingEquityMicros` divergente de `initialCashMicros`.
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **317 testes, 317 passaram, 0 falharam** (313 preexistentes + 4 novos) |
+
+Nenhuma ordem, rede, credencial ou rota financeira real foi adicionada. Pureza, determinismo,
+imutabilidade e o restante do escopo da TASK-011 preservados sem alteração.
+
+- **Commit:** `fix: valida consistencia interna do cash benchmark fail-closed`
+- **Hash:** informado a André na resposta após o push.
