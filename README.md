@@ -13,8 +13,9 @@ Milestones **M0 — Fundação e contratos**, **M1 — Carteira, ledger e PaperB
 primeira fatia de **M2 — Risk Manager determinístico**, a fachada determinística que
 integra as duas, a liquidação contábil determinística do resultado dessa fachada no
 ledger, e **M3 — valoração de patrimônio sem look-ahead, resumo determinístico da série
-de patrimônio, resumo determinístico de custos de execução, os benchmarks cash e
-buy-and-hold, e a comparação determinística de cada um deles com o cash**.
+de patrimônio, drawdown percentual determinístico, resumo determinístico de custos de
+execução, os benchmarks cash e buy-and-hold, a comparação determinística de cada um deles
+com o cash, e a seleção/série de snapshots sem look-ahead para replay**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -33,6 +34,9 @@ buy-and-hold, e a comparação determinística de cada um deles com o cash**.
   patrimônio de uma carteira num instante, sem look-ahead;
 - `src/metrics/summarize-equity-series.ts` — `summarizeEquitySeries`, o resumo
   determinístico de P&L final e drawdown absoluto de uma série de `EquityPoint`;
+- `src/metrics/summarize-drawdown-rate.ts` — `summarizeDrawdownRate`, o drawdown
+  percentual determinístico em basis points inteiros, a partir do drawdown absoluto já
+  calculado por `summarizeEquitySeries`;
 - `src/metrics/summarize-execution-costs.ts` — `summarizeExecutionCosts`, o resumo
   determinístico de fills, rejeições, fees e impacto de execução do ledger paper de
   um agente;
@@ -50,9 +54,8 @@ buy-and-hold, e a comparação determinística de cada um deles com o cash**.
 
 Ainda **não** existem: coleta de mercado, chamada de modelo, prompts, orquestrador
 multiagente, perda diária/drawdown/cooldown/liquidez no Risk Manager, replay completo de
-ciclos, drawdown percentual, win rate, P&L realizado por trade, benchmark aleatório
-controlado, persistência em arquivo, servidor ou banco de dados. O roadmap está em
-`docs/ROADMAP.md`.
+ciclos, win rate, P&L realizado por trade, benchmark aleatório controlado, persistência em
+arquivo, servidor ou banco de dados. O roadmap está em `docs/ROADMAP.md`.
 
 ## Requisitos
 
@@ -325,8 +328,9 @@ drawdown absoluto observado, com evidência de onde ocorreu.
 EquityPoint[] (canônicos, cronológicos, um agente) → EquitySeriesSummary auditável
 ```
 
-Ainda não calcula replay de ciclos, drawdown percentual, win rate, fees agregadas ou
-benchmarks — isso permanece fora do escopo desta fatia.
+Ainda não calcula replay de ciclos, win rate, fees agregadas ou benchmarks — isso
+permanece fora do escopo desta fatia. O drawdown percentual, em basis points inteiros, é
+`summarizeDrawdownRate` (próxima seção).
 
 A entrada precisa já vir ordenada cronologicamente pelo chamador: timestamps não canônicos,
 duplicados ou fora de ordem, ou pontos de agentes diferentes, falham fechados em vez de
@@ -341,6 +345,37 @@ episódios de mesma magnitude, o primeiro cronológico prevalece. Uma série de 
 sempre produz P&L `FLAT` e drawdown zero. Toda comparação monetária reaproveita
 `subtractChecked`/`MAX_MICROS` de `src/money/fixed-point.ts`; nenhuma fórmula é duplicada.
 O `EquitySeriesSummary` devolvido é imutável; nem a lista de pontos recebida, nem seus
+campos, são mutados.
+
+## Drawdown percentual determinístico
+
+`src/metrics/summarize-drawdown-rate.ts` define `summarizeDrawdownRate`, a fatia seguinte
+de M3: expressa o maior drawdown absoluto que `summarizeEquitySeries` já encontrou como um
+percentual, em **basis points inteiros** (10_000 bps = 100%), **arredondado para baixo**.
+
+```text
+EquityPoint[] (canônicos, cronológicos, um agente) → DrawdownRateSummary auditável
+```
+
+Não recalcula patrimônio, não reimplementa a detecção de pico/vale e não reavalia carteira
+ou ordens — toda a validação de entrada e a evidência de pico/vale (`maxDrawdownPeakAt`,
+`maxDrawdownTroughAt`) vêm inteiramente de `summarizeEquitySeries`. `maxDrawdownBps` é
+
+```text
+floor(maxDrawdownMicros * 10_000 / maxDrawdownPeakEquityMicros)
+```
+
+calculado só com `bigint` (`mulDivFloor` de `src/money/fixed-point.ts`); o resultado só é
+convertido para `number` depois de provado inteiro em `[0, 10_000]`. Drawdown zero sempre
+devolve `maxDrawdownBps = 0`, sem dividir.
+
+`maxDrawdownPeakEquityMicros` é o patrimônio do ponto exato identificado por
+`maxDrawdownPeakAt` — obtido localizando esse ponto na série recebida, nunca o
+`peakEquityMicros` (pico global final) de `EquitySeriesSummary`, que pode ser um pico
+posterior e maior do que aquele de onde o maior drawdown realmente partiu. Um drawdown
+positivo com esse pico igual a zero falha fechado com `ContractValidationError` — situação
+inatingível a partir de qualquer entrada válida, mantida apenas como salvaguarda explícita.
+O `DrawdownRateSummary` devolvido é imutável; nem a lista de pontos recebida, nem seus
 campos, são mutados.
 
 ## Resumo determinístico de custos de execução

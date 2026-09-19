@@ -1966,3 +1966,153 @@ sincronização adicional era possível ou necessária.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-016 — Drawdown percentual determinístico (sexta fatia de M3)
+
+- **ID da tarefa:** TASK-016
+- **Milestone:** M3 — drawdown percentual determinístico
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-19
+
+### Resumo da entrega
+
+Sexta fatia de M3: `summarizeDrawdownRate` recebe uma coleção não vazia de `EquityPoint`
+já calculados de um agente e devolve um `DrawdownRateSummary` imutável, expressando o maior
+drawdown absoluto que `summarizeEquitySeries` já encontrou como um percentual em basis
+points inteiros, arredondado para baixo. Não recalcula patrimônio, não reimplementa a
+detecção de pico/vale, não reavalia carteira e não executa ordens — reutiliza integralmente
+`summarizeEquitySeries` para o drawdown absoluto e sua evidência de pico/vale, e
+`mulDivFloor`/`MAX_MICROS` de `src/money/fixed-point.ts` para a única divisão desta fatia;
+nenhuma fórmula monetária ou de pico/vale foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_015.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/metrics/value-wallet-at.ts`,
+`src/metrics/summarize-equity-series.ts`, `src/money/fixed-point.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/metrics/summarize-drawdown-rate.ts` | criado — `summarizeDrawdownRate`, `DrawdownRateSummary` |
+| `tests/summarize-drawdown-rate.test.ts` | criado |
+| `README.md` | atualizado (seção "Drawdown percentual determinístico"; listas "O que existe hoje"/"Ainda não existem" corrigidas para refletir a entrega) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime. `src/metrics/summarize-equity-series.ts` não foi alterado: nenhuma
+correção mínima foi necessária nele.
+
+### Design de `summarizeDrawdownRate`
+
+1. Chama `summarizeEquitySeries(points)` exatamente uma vez — toda validação de entrada
+   (coleção vazia, agentes mistos, timestamps não canônicos/duplicados/fora de ordem,
+   dinheiro inválido) e toda a detecção de pico/vale do maior drawdown absoluto vêm
+   inteiramente dessa chamada, sem reimplementação.
+2. Localiza, na própria coleção `points` recebida, o ponto cujo `valuedAt` é exatamente
+   `summary.maxDrawdownPeakAt`, e usa o `equityMicros` **desse ponto específico** como
+   `maxDrawdownPeakEquityMicros` — nunca o `peakEquityMicros` (pico global final) devolvido
+   por `EquitySeriesSummary`, que pode ser um pico posterior e maior do que aquele de onde o
+   maior drawdown realmente partiu (exigência explícita da tarefa). Esse valor é
+   revalidado como `bigint` em `[0, MAX_MICROS]` antes do uso, na mesma linha defensiva já
+   usada por `summarizeEquitySeries`/`valueWalletAt` para valores que um chamador poderia
+   ter construído manualmente.
+3. Se `maxDrawdownMicros === 0n`, devolve `maxDrawdownBps = 0` diretamente, sem dividir.
+4. Caso contrário, calcula `mulDivFloor(maxDrawdownMicros, 10_000n, maxDrawdownPeakEquityMicros)`
+   — a única divisão desta fatia, inteiramente em `bigint`, reaproveitando o `floor` já
+   centralizado em `src/money/fixed-point.ts` — e só converte o resultado para `number`
+   depois de provar que ele é um inteiro em `[0, 10_000]`. Um pico igual a zero com
+   drawdown positivo falha fechado com `ContractValidationError` antes da divisão.
+
+### Testes cobertos em `tests/summarize-drawdown-rate.test.ts`
+
+Drawdown zero em série estritamente crescente (`maxDrawdownBps === 0`); drawdown de 100%
+(equity cai a zero, `maxDrawdownBps === 10_000`); drawdown fracionário com arredondamento
+`FLOOR` (`100_000_000 / 300_000_000` → `3_333`, não `3_334`); maior drawdown absoluto usando
+o pico correto mesmo quando um pico global maior ocorre depois (série 100M → 50M → 1000M →
+990M: `maxDrawdownPeakEquityMicros` é 100M, não 1000M); recuperação após o fundo preservando
+a evidência do maior drawdown; série de um único ponto (`maxDrawdownBps === 0`); rejeição de
+coleção vazia, agentes mistos, timestamp não canônico, timestamps fora de ordem e dinheiro
+inválido (negativo e acima de `MAX_MICROS`) — todos delegados a `summarizeEquitySeries`;
+congelamento do resultado; ausência de mutação dos pontos recebidos; determinismo para o
+mesmo input canônico. Suíte offline: nenhum acesso de rede, nenhuma leitura de relógio,
+nenhum uso de `random`.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **412 testes, 412 passaram, 0 falharam** (397 preexistentes + 15 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum
+uso de `random`. Nenhuma wallet externa, blockchain, testnet, corretora, credencial ou
+dinheiro real foi tocado — a tarefa só reduz pontos de patrimônio já existentes em memória.
+
+### Decisões técnicas tomadas
+
+1. **`assertValidEquityMicros` duplicado localmente**, com a mesma checagem já usada em
+   `summarize-equity-series.ts` e `value-wallet-at.ts` (não exportada de lá). O escopo exato
+   desta tarefa é criar `src/metrics/summarize-drawdown-rate.ts`; a duplicação de uma
+   checagem de quatro linhas segue o precedente já registrado nas TASK-004, TASK-007,
+   TASK-008 e TASK-015.
+2. **O pico é obtido por busca (`Array.find`) na coleção `points` recebida pelo `valuedAt`
+   de `maxDrawdownPeakAt`, nunca por um novo cálculo de pico/vale.** A tarefa proíbe
+   duplicar o algoritmo de pico/vale; localizar o ponto já existente que corresponde à
+   evidência devolvida por `summarizeEquitySeries` prova a correspondência exata sem
+   recalcular nada. Como `summarizeEquitySeries` já garante timestamps estritamente
+   crescentes (portanto únicos) e `maxDrawdownPeakAt` é sempre o `valuedAt` de um ponto
+   real da série, essa busca sempre encontra exatamente um ponto para qualquer entrada que
+   `summarizeEquitySeries` aceitou.
+3. **A checagem "drawdown positivo com pico igual a zero" está implementada, mas é
+   inatingível através da API pública com uma entrada válida.** `summarizeEquitySeries`
+   calcula cada drawdown como `subtractChecked(pico, patrimônio, ...)`, que exige
+   `patrimônio ≤ pico` e nunca produz negativo; e o ponto que localizamos em
+   `maxDrawdownPeakAt` é exatamente o ponto cujo `equityMicros` foi lido como esse mesmo
+   `pico` no momento em que o maior drawdown foi registrado. Logo, se o pico fosse zero, o
+   drawdown também seria zero, e o branch de drawdown positivo nunca seria alcançado. A
+   checagem foi mantida porque a tarefa a exige explicitamente na definição matemática,
+   como salvaguarda documentada contra uma futura mudança em `summarizeEquitySeries` que
+   quebrasse essa invariante — não porque um teste real da suíte a alcança (nenhum teste da
+   lista obrigatória da tarefa pede esse cenário, e não existe forma de construir um
+   `EquityPoint[]` válido, aceito por `summarizeEquitySeries`, que o alcance).
+4. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/
+   `ContractValidationError`, com o nome de contrato `"DrawdownRateSummary"`, o mesmo
+   mecanismo de todo o resto de `src/metrics/`.
+5. **`maxDrawdownBps` é revalidado no intervalo `[0, 10_000]` antes da conversão para
+   `number`**, mesmo sendo matematicamente garantido pela relação `drawdownMicros ≤
+   peakMicros`. A tarefa exige explicitamente que a conversão para `number` só ocorra
+   "já provado no intervalo inteiro `[0, 10_000]`"; a checagem torna essa prova explícita no
+   código, em vez de depender apenas do raciocínio matemático externo a ele.
+
+### Limitações conhecidas
+
+- Não calcula win rate, P&L realizado por trade, replay de ciclos ou benchmarks — fora do
+  escopo exato desta tarefa.
+- Não persiste nada em arquivo; opera inteiramente em memória, como as milestones
+  anteriores.
+- A busca linear do ponto de pico (`Array.find`) é O(n) na quantidade de pontos da série;
+  não há índice por timestamp, porque a tarefa não exige desempenho para séries grandes
+  nesta fatia.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa
+única e mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio. Como nas TASK-014/TASK-015, `git fetch origin main` exigiu aprovação de
+rede não concedida neste ambiente sandboxed; `git status`/`git log`/`git branch -vv`
+confirmaram que a branch de trabalho (`claude/issue-28-20260919-1610`) já partia do commit
+mais recente (`a25ce46`, idêntico a `origin/main`), sem alterações pendentes, então nenhuma
+sincronização adicional era possível ou necessária.
+
+### Commit
+
+- **Mensagem:** `feat: calcula drawdown percentual`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
