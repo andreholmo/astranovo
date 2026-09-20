@@ -3741,3 +3741,203 @@ financeira foi adicionado; nenhuma dependência nova.
 
 CI do SHA anterior estava em `action_required`; a aprovação cabe ao ChatGPT/GPT-5.6 Sol depois
 desta correção.
+
+## TASK-026 — Executa tentativa única de agente stub offline (M4)
+
+- **ID da tarefa:** TASK-026
+- **Milestone:** M4 — tentativa única de agente stub
+- **Issue:** #48
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-20
+
+### Resumo da entrega
+
+Menor composição determinística e fail-closed do pipeline de agente:
+`AgentRequest → StubAgentAdapter → captura auditável → AgentProposal validada`, inteiramente em
+memória e offline. `runSingleAgentAttempt` chama o `AgentAdapter` recebido exatamente uma vez,
+preserva a resposta bruta byte a byte com `captureAgentResponse` e valida a proposta tipada com
+`parseAgentProposal`, exigindo alinhamento exato de identidade (`agentId`, `cycleId`) e
+proveniência (`promptVersion`, `model`). Reutiliza integralmente `parseAgentRequest`
+(`src/agent/agent-adapter.ts`), `captureAgentResponse` (`src/agent/capture-agent-response.ts`) e
+`parseAgentProposal` (`src/domain/contracts.ts`); nenhuma fórmula de validação foi duplicada além
+da revalidação mínima de metadados já convencionada no repositório.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/DECISIONS.md`,
+`docs/ARCHITECTURE.md`, `TASK.md`, `docs/coordination/CHATGPT_REVIEW_TASK_025.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/agent/agent-adapter.ts`,
+`src/agent/stub-agent-adapter.ts`, `src/agent/capture-agent-response.ts`,
+`src/agent/retry-policy.ts` e `src/domain/contracts.ts`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/run-single-agent-attempt.ts` | criado — `runSingleAgentAttempt`, `RunSingleAgentAttemptRequest`, `SingleAgentAttemptResult` |
+| `tests/run-single-agent-attempt.test.ts` | criado |
+| `README.md` | atualizado (seção "Tentativa única de agente stub", lista de módulos, resumo de milestones) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `runSingleAgentAttempt`
+
+Recebe `{ adapter, request, responseId, promptVersion, model }` e executa, sem desvio possível:
+
+1. revalida `request` com `parseAgentRequest` e `responseId`/`promptVersion`/`model` com um
+   validador local de texto limitado (mesmo padrão de `capture-agent-response.ts`, reutilizando
+   `MAX_RESPONSE_ID_LENGTH`/`MAX_PROMPT_VERSION_LENGTH`/`MAX_MODEL_LENGTH` já exportados de lá) —
+   tudo **antes** de tocar o adapter, para que uma tentativa nunca seja gasta com metadados
+   inválidos;
+2. chama `adapter.call(request)` exatamente uma vez;
+3. exige que o retorno seja `string`, ou falha fechado sem nunca inspecionar seu conteúdo;
+4. captura essa string verbatim com `captureAgentResponse`, sem alterá-la, normalizá-la ou
+   corrigi-la;
+5. interpreta a string como JSON (`JSON.parse`) e valida o resultado com `parseAgentProposal`;
+6. exige `proposal.agentId === request.agentId` e `proposal.cycleId === request.cycleId`;
+7. exige `proposal.promptVersion === promptVersion` e `proposal.model === model`, os valores
+   recebidos por esta tentativa, não os que a proposta alega por si só;
+8. devolve `Object.freeze({ capture, proposal })` — nenhum outro campo.
+
+Todo erro usa `ContractValidationError`/`rejectContract`, nomeando apenas o contrato, o campo e o
+requisito violado. Em particular, a falha de `JSON.parse` é capturada e relançada com uma
+mensagem estática (`"must be valid JSON"`), descartando deliberadamente a mensagem original do
+motor JS — que em alguns runtimes ecoa um trecho do texto de entrada — para que nenhuma rejeição
+possa vazar conteúdo bruto do agente.
+
+### Testes cobertos em `tests/run-single-agent-attempt.test.ts`
+
+Caminho feliz com `StubAgentAdapter`; adapter chamado exatamente uma vez tanto no sucesso quanto
+numa rejeição posterior, e zero vezes quando os metadados já são inválidos; rota de uso único do
+`StubAgentAdapter` não responde a uma segunda tentativa; preservação byte a byte da resposta bruta
+(incluindo espaçamento e conteúdo unicode); rejeição de resposta não string (objeto, `undefined`,
+`null`, número); rejeição de JSON inválido e de proposta estruturalmente inválida; rejeição de
+divergência em `agentId`, `cycleId`, `promptVersion` e `model` entre solicitação/metadados e
+proposta; ausência de conteúdo arbitrário do agente (incluindo um "segredo" simulado) em três
+classes de mensagem de erro; congelamento do resultado, da captura e da proposta; ausência de
+mutação da `AgentRequest` e do objeto de entrada; determinismo do resultado completo para o mesmo
+input canônico; ausência de leitura de relógio; ausência de geração implícita de `responseId`;
+validação fail-closed de metadados (solicitação inválida, `promptVersion` em branco, `model`
+vazio, `responseId` não string) sempre sem chamar o adapter.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **657 testes, 657 passaram, 0 falharam** (628 preexistentes + 29 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio (o único teste
+que usa `setTimeout` faz isso para provar que o tempo decorrido não altera o resultado, não para
+esperar por I/O), nenhum uso de `random`.
+
+### Decisões técnicas tomadas
+
+1. **`runSingleAgentAttempt` é `async`, mas `AgentAdapter.call` continua síncrono.** A tarefa pede
+   explicitamente "uma função assíncrona"; `adapter.call` já devolve `unknown` de forma síncrona
+   (`src/agent/agent-adapter.ts`) e esta tarefa não autoriza alterar essa interface. A função
+   `async` apenas envolve essa chamada síncrona — sem `await`, temporizador, fila de microtask
+   adicional ou qualquer efeito colateral novo — deixando o seam pronto para um adapter real que
+   um dia precise ser assíncrono, sem forçar essa mudança nesta tarefa.
+2. **`requireBoundedText` duplicado localmente**, em vez de importado de
+   `capture-agent-response.ts`, cujo helper equivalente é privado e cujas exportações esta tarefa
+   não autoriza alterar. Reaproveita, porém, as constantes `MAX_RESPONSE_ID_LENGTH`,
+   `MAX_PROMPT_VERSION_LENGTH` e `MAX_MODEL_LENGTH` já exportadas de lá, para que o limite nunca
+   divirja entre a validação antecipada (antes da chamada) e a validação repetida dentro de
+   `captureAgentResponse`.
+3. **Falha de `JSON.parse` é relançada com mensagem estática, descartando a mensagem original.**
+   A tarefa exige que nenhuma mensagem de erro exponha a resposta bruta; alguns motores JS incluem
+   um fragmento do texto de entrada na mensagem de `SyntaxError` do `JSON.parse`, então propagar
+   essa mensagem seria um vazamento indireto do conteúdo do agente.
+4. ~~Nenhuma validação estrutural do próprio `adapter`.~~ **Revisto na correção pós-revisão
+   abaixo**: o ChatGPT/GPT-5.6 Sol apontou que uma exceção lançada por `adapter.call` não estava
+   protegida e podia propagar conteúdo arbitrário (potencialmente segredo) intacto. A decisão
+   original — nenhuma checagem além do tipo estático — foi substituída por validação fail-closed
+   mínima de forma (`adapter` deve ser um objeto com função `call`) mais uma guarda em torno da
+   única chamada que sanitiza qualquer exceção. Ver seção "Correção pós-revisão" no fim desta
+   entrada.
+5. **`request`, `responseId`, `promptVersion` e `model` são revalidados aqui mesmo já tipados no
+   parâmetro**, seguindo o precedente explícito de `captureAgentResponse`, que documenta
+   revalidar `request` "regardless of whether it was already parsed" — um chamador pode montar
+   esses valores manualmente, e a tarefa exige validação fail-closed antes da chamada, não apenas
+   confiança no tipo declarado.
+6. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/`ContractValidationError`,
+   reexportado do mesmo `src/domain/errors.ts` já usado por `agent-adapter.ts`,
+   `capture-agent-response.ts` e `retry-policy.ts`.
+
+### Limitações conhecidas
+
+- Não há retry: uma rejeição em qualquer passo encerra a tentativa. Decidir e executar uma nova
+  tentativa cabe ao chamador, junto de `src/agent/retry-policy.ts` — fora do escopo exato desta
+  tarefa.
+- Não há coordenador multiagente, consenso, estratégia, ciclo de replay, provider de mercado,
+  ordem, fill, Risk Manager, PaperBroker, ledger ou persistência — exatamente como a tarefa
+  exclui.
+- `responseId` continua sendo responsabilidade do chamador; esta função não gera identificador,
+  timestamp ou qualquer valor implícito.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as seis decisões acima têm alternativa única e
+mais simples descartada por motivo explícito, especialmente a decisão nº 1 (`async` envolvendo uma
+chamada síncrona), que fica registrada para confirmação explícita do arquiteto.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: executa tentativa unica de agente stub`
+- **Hash:** informado a André na resposta após o push.
+
+### Correção pós-revisão (bloqueio no SHA `e48cccfb63531b682de323ee3c52425dd4f9749e`)
+
+- **Data:** 2026-09-20
+- **Solicitado por:** André (revisão de código no PR #49), repassando o achado do ChatGPT/GPT-5.6
+  Sol.
+
+O achado: `adapter.call(request)` era executado sem proteção. Se um adapter lançasse uma exceção
+cuja mensagem contivesse resposta bruta, token, segredo ou outro conteúdo arbitrário, essa exceção
+se propagava intacta para fora de `runSingleAgentAttempt` — violando a exigência da tarefa de que
+nenhum erro exponha dados arbitrários do agente ou segredos, e deixando a função dependente do
+formato de erro de implementações futuras do adapter.
+
+Correção em `src/agent/run-single-agent-attempt.ts`:
+
+1. **`requireAdapter`** valida fail-closed, antes de qualquer chamada, que `adapter` é um objeto
+   que expõe uma função `call` — sem invocá-lo e sem inspecionar seu retorno. Um `adapter` que não
+   satisfaça essa forma mínima (`null`, não-objeto, objeto sem `call`, `call` não-função) é
+   rejeitado com `ContractValidationError` no contrato `RunSingleAgentAttempt`, campo `adapter`,
+   antes de `parseAgentRequest` sequer ser chamado.
+2. A única chamada `adapter.call(request)` passou a ficar dentro de um `try/catch` que envolve
+   **somente** essa chamada. Qualquer exceção lançada — `Error` ou não — é descartada por
+   completo (mensagem, `cause`, stack e qualquer outra propriedade) e substituída por
+   `rejectContract("AgentAdapterCall", "rawResponse", "adapter.call must not throw")`, uma
+   mensagem estática que não depende em nada do valor lançado.
+3. Nenhum retry foi introduzido: o `catch` só relança fechado e retorna; não há segunda tentativa,
+   laço, delay ou fallback. A garantia "chama o adapter exatamente uma vez" continua valendo tanto
+   no caminho de sucesso quanto no de exceção.
+
+Testes adicionados em `tests/run-single-agent-attempt.test.ts`:
+
+- `runSingleAgentAttempt validates the adapter fail-closed before calling it` — `adapter` nulo,
+  objeto sem `call`, `call` que não é função, e um `adapter` que é uma string simulando um
+  segredo (`"SECRET_TOKEN_NOT_AN_ADAPTER"`), provando que essa string nunca aparece na mensagem
+  de erro.
+- `runSingleAgentAttempt sanitizes exceptions thrown by adapter.call` — um adapter cujo `call`
+  lança `new Error("SECRET_TOKEN_ABC123")` e outro que lança um valor não-`Error` (`throw
+  "another-arbitrary-secret-value"`); em ambos os casos o teste prova que o segredo não aparece em
+  `error.message` **e** que `adapter.call` foi executado exatamente uma vez (`callCount === 1`,
+  via um novo `ThrowingAdapter` de teste que conta chamadas). Um terceiro teste confirma
+  explicitamente a ausência de retry após a exceção.
+
+Comandos executados após a correção: `npm run typecheck` (sem erros) e `npm test`, que reconstrói
+(`npm run build`) e roda toda a suíte — **664 testes, 664 passaram, 0 falharam** (657 anteriores +
+7 novos). Nenhuma rede, relógio, aleatoriedade ou I/O foi introduzida; escopo não foi ampliado além
+do achado apontado na revisão.
+
+Nenhum bloqueio remanescente é conhecido para este achado. A aprovação desta tarefa cabe ao
+ChatGPT/GPT-5.6 Sol, após revisão do novo diff. Não aprovo nem mesclo o próprio trabalho.

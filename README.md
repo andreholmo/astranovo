@@ -20,7 +20,8 @@ comparação determinística de cada um deles com o cash, a comparação determi
 estratégia com o buy-and-hold, o relatório determinístico consolidado dessas duas
 comparações, a seleção/série de snapshots sem look-ahead para replay, e o relatório
 multiagente offline que consolida esses resumos para N agentes**, e **M4 — o
-adaptador de agente stub determinístico**.
+adaptador de agente stub determinístico, o registro imutável de resposta bruta, a política
+de retry controlado, e a execução determinística de uma tentativa única de agente**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -72,6 +73,13 @@ adaptador de agente stub determinístico**.
   menor fronteira auditável para obter uma resposta bruta de agente;
 - `src/agent/stub-agent-adapter.ts` — `StubAgentAdapter`, o adaptador local e determinístico
   configurado com respostas roteirizadas;
+- `src/agent/capture-agent-response.ts` — `captureAgentResponse`, o menor registro imutável em
+  memória entre uma `AgentRequest` e a resposta bruta que ela recebeu;
+- `src/agent/retry-policy.ts` — `AgentRetryPolicy` e `shouldRetryAgentAttempt`, o contrato puro
+  para decidir se resta uma tentativa, sem jamais executar uma;
+- `src/agent/run-single-agent-attempt.ts` — `runSingleAgentAttempt`, a composição determinística
+  e fail-closed de exatamente uma tentativa de agente: chama o adapter uma única vez, preserva a
+  resposta bruta e valida a proposta tipada com alinhamento de identidade e proveniência;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -795,6 +803,40 @@ chamada) ainda for estritamente menor que `policy.maxAttempts`.
 Nenhuma das duas funções cria uma tentativa, chama `AgentAdapter`, executa retry, lê o
 relógio, aguarda, calcula backoff, usa aleatoriedade ou faz I/O — apenas responde, de forma
 pura, se mais uma tentativa está dentro do limite explícito da política.
+
+## Tentativa única de agente stub
+
+`src/agent/run-single-agent-attempt.ts` define `runSingleAgentAttempt`, a menor composição
+determinística e fail-closed que executa exatamente uma tentativa de agente:
+
+```text
+AgentRequest → AgentAdapter.call (uma vez) → captura auditável → AgentProposal validada
+```
+
+Recebe explicitamente um `AgentAdapter`, um `AgentRequest`, `responseId`, `promptVersion` e
+`model`. Sequência sem desvio possível:
+
+1. valida `adapter`, `request`, `responseId`, `promptVersion` e `model` fail-closed **antes** de
+   tocar o adapter — `adapter` precisa ser um objeto que exponha uma função `call`;
+2. chama `adapter.call(request)` exatamente uma vez, dentro de uma guarda que converte qualquer
+   exceção lançada pelo adapter numa `ContractValidationError` com mensagem fixa e sanitizada,
+   descartando por completo a mensagem, `cause`, stack ou qualquer outro conteúdo do erro
+   original — sem retry;
+3. exige que a resposta bruta seja uma `string`;
+4. captura essa string verbatim com `captureAgentResponse`, sem alterá-la nem normalizá-la;
+5. interpreta a string como JSON e valida o objeto com `parseAgentProposal`
+   (`src/domain/contracts.ts`);
+6. exige que `agentId` e `cycleId` da proposta sejam exatamente iguais aos da solicitação;
+7. exige que `promptVersion` e `model` da proposta sejam exatamente iguais aos recebidos por esta
+   tentativa;
+8. devolve `{ capture, proposal }`, congelado — nada além disso.
+
+Toda rejeição usa `ContractValidationError` e nomeia somente o contrato, o campo e o requisito
+violado — nunca a resposta bruta, o JSON interpretado, um token, um segredo ou qualquer outro
+conteúdo arbitrário do agente ou do adapter. Não gera id, timestamp ou qualquer valor implícito, e
+não implementa retry, delay, timeout ou fallback: uma rejeição em qualquer passo — incluindo uma
+exceção lançada pelo próprio adapter — encerra a tentativa, cabendo a `src/agent/retry-policy.ts`
+e ao chamador decidir e executar uma nova tentativa, se houver.
 
 ## Relatório multiagente offline
 
