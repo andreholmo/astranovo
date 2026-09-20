@@ -3685,3 +3685,59 @@ Nenhum bloqueio.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+### Correção — revisão do PR #47 (inconsistências internas fail-closed)
+
+A revisão de André no PR #47 apontou que a composição ainda aceitava inconsistências internas
+nos campos que publica, contrariando a exigência fail-closed da tarefa. Cinco classes de forja
+eram aceitas silenciosamente:
+
+1. `equity` com `pnlDirection`/`pnlMagnitudeMicros` que não correspondiam ao sinal/diferença
+   exata entre `startingEquityMicros` e `endingEquityMicros`;
+2. `realized.winCount` divergente de `winRateNumerator`, ou
+   `winCount + lossCount + breakEvenCount` divergente de `closedTradeCount` — `winCount`,
+   `lossCount` e `breakEvenCount` nem sequer eram lidos antes;
+3. `benchmark.vsCash.strategyEndingEquityMicros` e
+   `benchmark.vsBuyAndHold.strategyEndingEquityMicros` aceitos sem comparação com
+   `equity.endingEquityMicros` — cada comparação podia descrever um patrimônio final diferente
+   do que a própria linha publica;
+4. `result` e `differenceMagnitudeMicros` de `vsCash`/`vsBuyAndHold` aceitos sem recomputar o
+   sinal/diferença esperados a partir dos dois patrimônios efetivamente comparados;
+5. `assertNonNegativeInteger` usava `Number.isInteger`, que aceita valores acima de
+   `Number.MAX_SAFE_INTEGER` (ainda inteiros em ponto flutuante, mas não mais exatos).
+
+**Correção em `src/metrics/build-multi-agent-performance-report.ts`:** cada uma das cinco
+classes agora é revalidada fail-closed em `buildRow`, sempre calculando apenas o valor esperado
+para comparação — nunca substituindo o valor que a linha publica — e rejeitando com
+`ContractValidationError` na primeira divergência, reutilizando `subtractChecked` de
+`src/money/fixed-point.ts` para toda diferença exata, a mesma função já usada por
+`summarizeEquitySeries`, `compareToCashBenchmark` e `compareStrategyToBuyAndHold` para as
+mesmas contas. `assertNonNegativeInteger` passa a usar `Number.isSafeInteger`. Nenhuma fórmula
+de P&L, win rate ou benchmark é recalculada para o valor final devolvido — apenas para a
+checagem de coerência, exatamente como o revisor pediu.
+
+Doze testes forjados novos em `tests/build-multi-agent-performance-report.test.ts`, um ou dois
+por classe: `pnlDirection` forjada com magnitude correta e vice-versa (patrimônio 100 → 90,
+`LOSS 10` esperado); `winCount` divergente de `winRateNumerator`; `lossCount` forjado quebrando
+a soma contra `closedTradeCount`; `closedTradeCount` e `winCount` acima de
+`Number.MAX_SAFE_INTEGER`; `vsCash.strategyEndingEquityMicros` e
+`vsBuyAndHold.strategyEndingEquityMicros` divergentes de `equity.endingEquityMicros`;
+`vsCash.result`/`vsCash.differenceMagnitudeMicros` e
+`vsBuyAndHold.result`/`vsBuyAndHold.differenceMagnitudeMicros` forjados incompatíveis com os
+dois patrimônios de cada comparação.
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **628 testes, 628 passaram, 0 falharam** (616 preexistentes + 12 novos) |
+
+Suíte offline e determinística, sem alteração de escopo: nenhum ranking, rede ou execução
+financeira foi adicionado; nenhuma dependência nova.
+
+- **Commit:** `fix: revalida coerencia interna fail-closed no relatorio multiagente`
+- **Hash:** informado a André na resposta após o push.
+
+CI do SHA anterior estava em `action_required`; a aprovação cabe ao ChatGPT/GPT-5.6 Sol depois
+desta correção.

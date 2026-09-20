@@ -405,6 +405,168 @@ describe("fail-closed validation", () => {
     assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
   });
 
+  it("rejects a pnlDirection that disagrees with the sign of ending minus starting equity", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    // starting 100, ending 90 => LOSS 10, but pnlDirection is forged to GAIN with the correct magnitude.
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      equity: {
+        ...entry.equity,
+        endingEquityMicros: 90_000_000n,
+        pnlDirection: "GAIN",
+        pnlMagnitudeMicros: 10_000_000n
+      }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects a pnlMagnitudeMicros that disagrees with the exact difference between starting and ending equity", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    // starting 100, ending 90 => LOSS 10, but pnlMagnitudeMicros is forged to a different amount.
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      equity: {
+        ...entry.equity,
+        endingEquityMicros: 90_000_000n,
+        pnlDirection: "LOSS",
+        pnlMagnitudeMicros: 5_000_000n
+      }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects a realized.winCount that disagrees with realized.winRateNumerator", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      realized: { ...entry.realized, winCount: entry.realized.winCount + 1 }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects winCount + lossCount + breakEvenCount that disagrees with realized.closedTradeCount", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      realized: { ...entry.realized, lossCount: entry.realized.lossCount + 1 }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects a closedTradeCount above Number.MAX_SAFE_INTEGER", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      realized: { ...entry.realized, closedTradeCount: Number.MAX_SAFE_INTEGER + 1 }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects a winCount above Number.MAX_SAFE_INTEGER", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      realized: { ...entry.realized, winCount: Number.MAX_SAFE_INTEGER + 1 }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects vsCash.strategyEndingEquityMicros diverging from equity.endingEquityMicros", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      benchmark: {
+        ...entry.benchmark,
+        vsCash: {
+          ...entry.benchmark.vsCash,
+          strategyEndingEquityMicros: entry.benchmark.vsCash.strategyEndingEquityMicros + 1n
+        }
+      }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects vsBuyAndHold.strategyEndingEquityMicros diverging from equity.endingEquityMicros", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      benchmark: {
+        ...entry.benchmark,
+        vsBuyAndHold: {
+          ...entry.benchmark.vsBuyAndHold,
+          strategyEndingEquityMicros: entry.benchmark.vsBuyAndHold.strategyEndingEquityMicros + 1n
+        }
+      }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects a vsCash.result incompatible with the two compared ending equities", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      benchmark: {
+        ...entry.benchmark,
+        vsCash: { ...entry.benchmark.vsCash, result: "TIED" }
+      }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects a vsCash.differenceMagnitudeMicros incompatible with the two compared ending equities", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      benchmark: {
+        ...entry.benchmark,
+        vsCash: {
+          ...entry.benchmark.vsCash,
+          differenceMagnitudeMicros: entry.benchmark.vsCash.differenceMagnitudeMicros + 1n
+        }
+      }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects a vsBuyAndHold.result incompatible with the two compared ending equities", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      benchmark: {
+        ...entry.benchmark,
+        vsBuyAndHold: { ...entry.benchmark.vsBuyAndHold, result: "TIED" }
+      }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
+  it("rejects a vsBuyAndHold.differenceMagnitudeMicros incompatible with the two compared ending equities", () => {
+    const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
+    const entry = demoEntryFor(fixture);
+    const forged: MultiAgentPerformanceEntry = {
+      ...entry,
+      benchmark: {
+        ...entry.benchmark,
+        vsBuyAndHold: {
+          ...entry.benchmark.vsBuyAndHold,
+          differenceMagnitudeMicros: entry.benchmark.vsBuyAndHold.differenceMagnitudeMicros + 1n
+        }
+      }
+    };
+    assert.throws(() => buildMultiAgentPerformanceReport([forged]), ContractValidationError);
+  });
+
   it("rejects a non-bigint monetary field", () => {
     const fixture = DEMO_AGENTS[0] as DemoAgentFixture;
     const entry = demoEntryFor(fixture);

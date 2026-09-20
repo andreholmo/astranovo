@@ -22,7 +22,14 @@
  * an entry agree on the same `agentId` and describe the same experiment
  * window (`startedAt`/`endedAt`/`pointCount`), that every agent across the
  * whole list shares that same window, that the win-rate fraction and closed
- * trade count are coherent non-negative integers, and that every consumed
+ * trade count are coherent non-negative safe integers (including that
+ * `winCount` matches `winRateNumerator` and that `winCount + lossCount +
+ * breakEvenCount` matches `closedTradeCount`), that `pnlDirection` and
+ * `pnlMagnitudeMicros` match the sign and exact difference between starting
+ * and ending equity, that each benchmark comparison's own
+ * `strategyEndingEquityMicros` matches `equity.endingEquityMicros` and that
+ * its `result`/`differenceMagnitudeMicros` match the sign and exact
+ * difference of the two equities it compares, and that every consumed
  * monetary amount is a `bigint` in range — without duplicating any of the
  * formulas that produced them.
  *
@@ -33,7 +40,7 @@
  */
 
 import { rejectContract } from "../domain/errors.js";
-import { MAX_MICROS, type Micros } from "../money/fixed-point.js";
+import { MAX_MICROS, subtractChecked, type Micros } from "../money/fixed-point.js";
 import type { EquitySeriesSummary, PnlDirection } from "./summarize-equity-series.js";
 import type { RealizedPerformanceSummary } from "./summarize-realized-performance.js";
 import type { ExecutionCostSummary } from "./summarize-execution-costs.js";
@@ -80,8 +87,8 @@ function assertNonEmptyString(value: unknown, field: string): string {
 }
 
 function assertNonNegativeInteger(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
-    rejectContract(MULTI_AGENT_PERFORMANCE_REPORT, field, "must be a non-negative integer");
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    rejectContract(MULTI_AGENT_PERFORMANCE_REPORT, field, "must be a non-negative safe integer");
   }
   return value;
 }
@@ -205,10 +212,48 @@ function buildRow(entry: MultiAgentPerformanceEntry, index: number): MultiAgentP
   const pnlMagnitudeMicros = assertValidMicros(equity.pnlMagnitudeMicros, `${path}.equity.pnlMagnitudeMicros`);
   const maxDrawdownMicros = assertValidMicros(equity.maxDrawdownMicros, `${path}.equity.maxDrawdownMicros`);
 
+  let expectedPnlDirection: PnlDirection;
+  let expectedPnlMagnitudeMicros: Micros;
+  if (endingEquityMicros > startingEquityMicros) {
+    expectedPnlDirection = "GAIN";
+    expectedPnlMagnitudeMicros = subtractChecked(
+      endingEquityMicros,
+      startingEquityMicros,
+      `${path}.equity.pnlMagnitudeMicros`
+    );
+  } else if (endingEquityMicros < startingEquityMicros) {
+    expectedPnlDirection = "LOSS";
+    expectedPnlMagnitudeMicros = subtractChecked(
+      startingEquityMicros,
+      endingEquityMicros,
+      `${path}.equity.pnlMagnitudeMicros`
+    );
+  } else {
+    expectedPnlDirection = "FLAT";
+    expectedPnlMagnitudeMicros = 0n;
+  }
+  if (pnlDirection !== expectedPnlDirection) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.equity.pnlDirection`,
+      "must match the sign of endingEquityMicros - startingEquityMicros"
+    );
+  }
+  if (pnlMagnitudeMicros !== expectedPnlMagnitudeMicros) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.equity.pnlMagnitudeMicros`,
+      "must equal the exact difference between startingEquityMicros and endingEquityMicros"
+    );
+  }
+
   const closedTradeCount = assertNonNegativeInteger(
     realized.closedTradeCount,
     `${path}.realized.closedTradeCount`
   );
+  const winCount = assertNonNegativeInteger(realized.winCount, `${path}.realized.winCount`);
+  const lossCount = assertNonNegativeInteger(realized.lossCount, `${path}.realized.lossCount`);
+  const breakEvenCount = assertNonNegativeInteger(realized.breakEvenCount, `${path}.realized.breakEvenCount`);
   const winRateNumerator = assertNonNegativeInteger(realized.winRateNumerator, `${path}.realized.winRateNumerator`);
   const winRateDenominator = assertNonNegativeInteger(
     realized.winRateDenominator,
@@ -226,6 +271,20 @@ function buildRow(entry: MultiAgentPerformanceEntry, index: number): MultiAgentP
       MULTI_AGENT_PERFORMANCE_REPORT,
       `${path}.realized.winRateNumerator`,
       "must not exceed realized.winRateDenominator"
+    );
+  }
+  if (winCount !== winRateNumerator) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.realized.winCount`,
+      "must equal realized.winRateNumerator"
+    );
+  }
+  if (winCount + lossCount + breakEvenCount !== closedTradeCount) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.realized.winCount`,
+      "sum of winCount, lossCount and breakEvenCount must equal realized.closedTradeCount"
     );
   }
 
@@ -249,19 +308,61 @@ function buildRow(entry: MultiAgentPerformanceEntry, index: number): MultiAgentP
       "must describe the same experiment window as equity"
     );
   }
-  assertValidMicros(
+  const vsCashStrategyEndingEquityMicros = assertValidMicros(
     vsCash.strategyEndingEquityMicros,
     `${path}.benchmark.vsCash.strategyEndingEquityMicros`
   );
-  assertValidMicros(
+  if (vsCashStrategyEndingEquityMicros !== endingEquityMicros) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.benchmark.vsCash.strategyEndingEquityMicros`,
+      "must equal equity.endingEquityMicros"
+    );
+  }
+  const vsCashBenchmarkEndingEquityMicros = assertValidMicros(
     vsCash.benchmarkEndingEquityMicros,
     `${path}.benchmark.vsCash.benchmarkEndingEquityMicros`
   );
-  assertValidMicros(
+  const vsCashDifferenceMagnitudeMicros = assertValidMicros(
     vsCash.differenceMagnitudeMicros,
     `${path}.benchmark.vsCash.differenceMagnitudeMicros`
   );
-  assertBenchmarkComparisonResult(vsCash.result, `${path}.benchmark.vsCash.result`);
+  const vsCashResult = assertBenchmarkComparisonResult(vsCash.result, `${path}.benchmark.vsCash.result`);
+
+  let expectedVsCashResult: BenchmarkComparisonResult;
+  let expectedVsCashDifferenceMagnitudeMicros: Micros;
+  if (vsCashStrategyEndingEquityMicros > vsCashBenchmarkEndingEquityMicros) {
+    expectedVsCashResult = "OUTPERFORMED";
+    expectedVsCashDifferenceMagnitudeMicros = subtractChecked(
+      vsCashStrategyEndingEquityMicros,
+      vsCashBenchmarkEndingEquityMicros,
+      `${path}.benchmark.vsCash.differenceMagnitudeMicros`
+    );
+  } else if (vsCashStrategyEndingEquityMicros < vsCashBenchmarkEndingEquityMicros) {
+    expectedVsCashResult = "UNDERPERFORMED";
+    expectedVsCashDifferenceMagnitudeMicros = subtractChecked(
+      vsCashBenchmarkEndingEquityMicros,
+      vsCashStrategyEndingEquityMicros,
+      `${path}.benchmark.vsCash.differenceMagnitudeMicros`
+    );
+  } else {
+    expectedVsCashResult = "TIED";
+    expectedVsCashDifferenceMagnitudeMicros = 0n;
+  }
+  if (vsCashResult !== expectedVsCashResult) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.benchmark.vsCash.result`,
+      "must match the sign of strategyEndingEquityMicros - benchmarkEndingEquityMicros"
+    );
+  }
+  if (vsCashDifferenceMagnitudeMicros !== expectedVsCashDifferenceMagnitudeMicros) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.benchmark.vsCash.differenceMagnitudeMicros`,
+      "must equal the exact difference between strategyEndingEquityMicros and benchmarkEndingEquityMicros"
+    );
+  }
 
   const vsBuyAndHold = benchmark.vsBuyAndHold;
   if (vsBuyAndHold.comparisonKind !== "STRATEGY_VS_BUY_AND_HOLD") {
@@ -289,19 +390,64 @@ function buildRow(entry: MultiAgentPerformanceEntry, index: number): MultiAgentP
       "must describe the same experiment window as equity"
     );
   }
-  assertValidMicros(
+  const vsBuyAndHoldStrategyEndingEquityMicros = assertValidMicros(
     vsBuyAndHold.strategyEndingEquityMicros,
     `${path}.benchmark.vsBuyAndHold.strategyEndingEquityMicros`
   );
-  assertValidMicros(
+  if (vsBuyAndHoldStrategyEndingEquityMicros !== endingEquityMicros) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.benchmark.vsBuyAndHold.strategyEndingEquityMicros`,
+      "must equal equity.endingEquityMicros"
+    );
+  }
+  const vsBuyAndHoldBuyAndHoldEndingEquityMicros = assertValidMicros(
     vsBuyAndHold.buyAndHoldEndingEquityMicros,
     `${path}.benchmark.vsBuyAndHold.buyAndHoldEndingEquityMicros`
   );
-  assertValidMicros(
+  const vsBuyAndHoldDifferenceMagnitudeMicros = assertValidMicros(
     vsBuyAndHold.differenceMagnitudeMicros,
     `${path}.benchmark.vsBuyAndHold.differenceMagnitudeMicros`
   );
-  assertStrategyVsBuyAndHoldResult(vsBuyAndHold.result, `${path}.benchmark.vsBuyAndHold.result`);
+  const vsBuyAndHoldResult = assertStrategyVsBuyAndHoldResult(
+    vsBuyAndHold.result,
+    `${path}.benchmark.vsBuyAndHold.result`
+  );
+
+  let expectedVsBuyAndHoldResult: StrategyVsBuyAndHoldResult;
+  let expectedVsBuyAndHoldDifferenceMagnitudeMicros: Micros;
+  if (vsBuyAndHoldStrategyEndingEquityMicros > vsBuyAndHoldBuyAndHoldEndingEquityMicros) {
+    expectedVsBuyAndHoldResult = "OUTPERFORMED";
+    expectedVsBuyAndHoldDifferenceMagnitudeMicros = subtractChecked(
+      vsBuyAndHoldStrategyEndingEquityMicros,
+      vsBuyAndHoldBuyAndHoldEndingEquityMicros,
+      `${path}.benchmark.vsBuyAndHold.differenceMagnitudeMicros`
+    );
+  } else if (vsBuyAndHoldStrategyEndingEquityMicros < vsBuyAndHoldBuyAndHoldEndingEquityMicros) {
+    expectedVsBuyAndHoldResult = "UNDERPERFORMED";
+    expectedVsBuyAndHoldDifferenceMagnitudeMicros = subtractChecked(
+      vsBuyAndHoldBuyAndHoldEndingEquityMicros,
+      vsBuyAndHoldStrategyEndingEquityMicros,
+      `${path}.benchmark.vsBuyAndHold.differenceMagnitudeMicros`
+    );
+  } else {
+    expectedVsBuyAndHoldResult = "TIED";
+    expectedVsBuyAndHoldDifferenceMagnitudeMicros = 0n;
+  }
+  if (vsBuyAndHoldResult !== expectedVsBuyAndHoldResult) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.benchmark.vsBuyAndHold.result`,
+      "must match the sign of strategyEndingEquityMicros - buyAndHoldEndingEquityMicros"
+    );
+  }
+  if (vsBuyAndHoldDifferenceMagnitudeMicros !== expectedVsBuyAndHoldDifferenceMagnitudeMicros) {
+    rejectContract(
+      MULTI_AGENT_PERFORMANCE_REPORT,
+      `${path}.benchmark.vsBuyAndHold.differenceMagnitudeMicros`,
+      "must equal the exact difference between strategyEndingEquityMicros and buyAndHoldEndingEquityMicros"
+    );
+  }
 
   return Object.freeze({
     agentId,
@@ -333,7 +479,13 @@ function buildRow(entry: MultiAgentPerformanceEntry, index: number): MultiAgentP
  * `entries`; a duplicate `agentId`; an entry whose four summaries disagree on
  * `agentId`; an experiment window (`startedAt`/`endedAt`/`pointCount`) that
  * disagrees between an entry's own summaries or across different agents; an
- * incoherent win-rate fraction or count; and any consumed monetary field that
+ * incoherent win-rate fraction or count (including `winCount`/`lossCount`/
+ * `breakEvenCount` disagreeing with `winRateNumerator` or
+ * `closedTradeCount`); a `pnlDirection`/`pnlMagnitudeMicros` that disagrees
+ * with the starting/ending equity; a benchmark comparison whose
+ * `strategyEndingEquityMicros` disagrees with `equity.endingEquityMicros` or
+ * whose `result`/`differenceMagnitudeMicros` disagrees with the two equities
+ * it compares; a non-safe-integer count; and any consumed monetary field that
  * is not a `bigint` in `[0, MAX_MICROS]`. No P&L, drawdown, cost, win rate or
  * benchmark comparison is recomputed — every value is carried verbatim from
  * the summary that already computed it.
