@@ -4,7 +4,7 @@
  *
  * ```text
  * AgentRequest → StubAgentAdapter (or any AgentAdapter) → auditable capture
- * → validated AgentProposal
+ * → ACCEPTED(AgentProposal) | REJECTED(safe code)
  * ```
  *
  * `runSingleAgentAttempt` validates every piece of metadata it was given,
@@ -12,14 +12,15 @@
  * touching the adapter, calls `adapter.call` exactly once inside a guard that
  * converts any exception the adapter throws into a sanitized
  * `ContractValidationError` (never the thrown value's message, cause or
- * stack), requires the raw response to be a string, preserves it byte for byte via
- * `captureAgentResponse` (`./capture-agent-response.js`), then interprets
- * that string as JSON and validates it with `parseAgentProposal`
- * (`../domain/contracts.js`) — the only place in this module that judges the
- * agent's content. It never parses, normalises or corrects the raw response
- * itself, and never accepts a proposal whose `agentId`/`cycleId`/
- * `promptVersion`/`model` disagree with what this attempt asked for and was
- * told it used.
+ * stack), then hands the raw result to `evaluateAgentResponseCapture`
+ * (`./evaluate-agent-response-capture.js`) — the only place that captures the
+ * response byte for byte, interprets it as JSON, validates it with
+ * `parseAgentProposal` and checks `agentId`/`cycleId`/`promptVersion`/`model`
+ * alignment. This module never parses, normalises or corrects the raw
+ * response itself, and turns a `REJECTED` evaluation into the same sanitized
+ * `ContractValidationError` this function has always thrown, so its public
+ * contract — a rejected proposal throws, an accepted one returns
+ * `{ capture, proposal }` — is unchanged.
  *
  * This module has no retry, delay, timeout, fallback, clock, randomness,
  * network or I/O. It calls the adapter exactly once and returns; deciding
@@ -40,15 +41,18 @@
  */
 
 import { rejectContract } from "../domain/errors.js";
-import { parseAgentProposal, type AgentProposal } from "../domain/contracts.js";
 import { type AgentAdapter, type AgentRequest, parseAgentRequest } from "./agent-adapter.js";
 import {
-  captureAgentResponse,
-  type AgentResponseCapture,
   MAX_MODEL_LENGTH,
   MAX_PROMPT_VERSION_LENGTH,
-  MAX_RESPONSE_ID_LENGTH
+  MAX_RESPONSE_ID_LENGTH,
+  type AgentResponseCapture
 } from "./capture-agent-response.js";
+import {
+  evaluateAgentResponseCapture,
+  type AgentResponseRejectionCode
+} from "./evaluate-agent-response-capture.js";
+import { type AgentProposal } from "../domain/contracts.js";
 
 export { ContractValidationError } from "../domain/errors.js";
 
@@ -56,6 +60,39 @@ const RUN_SINGLE_AGENT_ATTEMPT = "RunSingleAgentAttempt";
 const AGENT_ADAPTER_CALL = "AgentAdapterCall";
 const RAW_AGENT_RESPONSE = "RawAgentResponse";
 const AGENT_PROPOSAL_ALIGNMENT = "AgentProposalAlignment";
+
+/**
+ * Converts a `REJECTED` {@link AgentResponseRejectionCode} into the same
+ * sanitized `ContractValidationError` this function has always thrown for
+ * that failure, so the public contract of `runSingleAgentAttempt` is
+ * unchanged by delegating evaluation to `evaluateAgentResponseCapture`.
+ */
+function rejectForCode(code: AgentResponseRejectionCode): never {
+  switch (code) {
+    case "INVALID_JSON":
+      rejectContract(RAW_AGENT_RESPONSE, "rawResponse", "must be valid JSON");
+      break;
+    case "INVALID_PROPOSAL":
+      rejectContract(RAW_AGENT_RESPONSE, "rawResponse", "must decode to a valid AgentProposal");
+      break;
+    case "AGENT_ID_MISMATCH":
+      rejectContract(AGENT_PROPOSAL_ALIGNMENT, "agentId", "must match the request agentId exactly");
+      break;
+    case "CYCLE_ID_MISMATCH":
+      rejectContract(AGENT_PROPOSAL_ALIGNMENT, "cycleId", "must match the request cycleId exactly");
+      break;
+    case "PROMPT_VERSION_MISMATCH":
+      rejectContract(
+        AGENT_PROPOSAL_ALIGNMENT,
+        "promptVersion",
+        "must match the attempt's promptVersion exactly"
+      );
+      break;
+    case "MODEL_MISMATCH":
+      rejectContract(AGENT_PROPOSAL_ALIGNMENT, "model", "must match the attempt's model exactly");
+      break;
+  }
+}
 
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 
@@ -133,14 +170,14 @@ export interface SingleAgentAttemptResult {
  *    thrown value's `message`, `cause`, stack or any other of its content —
  *    and does not retry;
  * 3. requires the raw result to be a `string`;
- * 4. captures it verbatim with `captureAgentResponse`;
- * 5. parses that string as JSON and validates the result with
- *    `parseAgentProposal`;
- * 6. requires the proposal's `agentId` and `cycleId` to equal the request's,
- *    exactly;
- * 7. requires the proposal's `promptVersion` and `model` to equal the
- *    metadata this attempt was given, exactly;
- * 8. returns `{ capture, proposal }`, frozen.
+ * 4. hands `{ request, responseId, rawResponse, promptVersion, model }` to
+ *    `evaluateAgentResponseCapture`, which captures the response verbatim,
+ *    parses it as JSON, validates it with `parseAgentProposal` and checks
+ *    `agentId`/`cycleId`/`promptVersion`/`model` alignment;
+ * 5. a `REJECTED` evaluation is thrown here as the same sanitized
+ *    `ContractValidationError` this function has always thrown for that
+ *    failure;
+ * 6. an `ACCEPTED` evaluation returns `{ capture, proposal }`, frozen.
  *
  * Does not generate an id, timestamp or any other implicit value, and does
  * not retry, delay, time out or fall back — a rejection at any step ends the
@@ -173,29 +210,17 @@ export async function runSingleAgentAttempt(
     rejectContract(RAW_AGENT_RESPONSE, "rawResponse", "must be a string");
   }
 
-  const capture = captureAgentResponse({ request, responseId, rawResponse, promptVersion, model });
+  const evaluation = evaluateAgentResponseCapture({
+    request,
+    responseId,
+    rawResponse,
+    promptVersion,
+    model
+  });
 
-  let parsedResponse: unknown;
-  try {
-    parsedResponse = JSON.parse(rawResponse) as unknown;
-  } catch {
-    rejectContract(RAW_AGENT_RESPONSE, "rawResponse", "must be valid JSON");
-  }
-
-  const proposal = parseAgentProposal(parsedResponse);
-
-  if (proposal.agentId !== request.agentId) {
-    rejectContract(AGENT_PROPOSAL_ALIGNMENT, "agentId", "must match the request agentId exactly");
-  }
-  if (proposal.cycleId !== request.cycleId) {
-    rejectContract(AGENT_PROPOSAL_ALIGNMENT, "cycleId", "must match the request cycleId exactly");
-  }
-  if (proposal.promptVersion !== promptVersion) {
-    rejectContract(AGENT_PROPOSAL_ALIGNMENT, "promptVersion", "must match the attempt's promptVersion exactly");
-  }
-  if (proposal.model !== model) {
-    rejectContract(AGENT_PROPOSAL_ALIGNMENT, "model", "must match the attempt's model exactly");
+  if (evaluation.status === "REJECTED") {
+    rejectForCode(evaluation.code);
   }
 
-  return Object.freeze({ capture, proposal });
+  return Object.freeze({ capture: evaluation.capture, proposal: evaluation.proposal });
 }

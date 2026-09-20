@@ -784,6 +784,40 @@ não usa aleatoriedade, não faz I/O e não persiste nada. Toda inconsistência 
 `ContractValidationError`, e o registro devolvido — incluindo a cópia de `AgentRequest` — é
 congelado.
 
+## Avaliação auditável de captura de agente
+
+`src/agent/evaluate-agent-response-capture.ts` define `evaluateAgentResponseCapture`, a menor
+avaliação pura e determinística que transforma uma captura bruta já validada num resultado
+auditável de aceitação ou rejeição, preservando a captura mesmo quando o conteúdo do agente é
+inválido:
+
+```text
+AgentResponseCapture → ACCEPTED(AgentProposal) | REJECTED(código seguro)
+```
+
+Recebe `value` como valor não confiável (`unknown`), nunca um `AgentResponseCapture` já validado
+por presunção. Sequência sem desvio possível:
+
+1. revalida `value` fail-closed como uma `AgentResponseCapture` completa via
+   `captureAgentResponse`, sem alterar `rawResponse` — uma captura forjada ou estruturalmente
+   inválida lança `ContractValidationError` aqui, antes de qualquer avaliação de conteúdo;
+2. interpreta `rawResponse` como JSON — JSON inválido é `REJECTED` com `INVALID_JSON`;
+3. valida o objeto com `parseAgentProposal` (`src/domain/contracts.ts`) — forma inválida é
+   `REJECTED` com `INVALID_PROPOSAL`;
+4. exige que `agentId`, `cycleId`, `promptVersion` e `model` da proposta coincidam exatamente com
+   os da própria captura (`request.agentId`, `request.cycleId`, `promptVersion`, `model`) — a
+   primeira divergência encontrada é `REJECTED` com o código `*_MISMATCH` correspondente
+   (`AGENT_ID_MISMATCH`, `CYCLE_ID_MISMATCH`, `PROMPT_VERSION_MISMATCH`, `MODEL_MISMATCH`);
+5. caso contrário, devolve `ACCEPTED` com a captura e a proposta validadas.
+
+Os seis códigos de `REJECTED` são fechados (`AGENT_RESPONSE_REJECTION_CODES`) e nunca carregam
+mensagem, stack, `cause`, valor recebido ou qualquer conteúdo arbitrário do agente — um código é
+sempre seguro para logar ou exibir. Em todo caso — `ACCEPTED` ou `REJECTED` — a captura devolvida
+é a cópia revalidada e congelada do passo 1, idêntica byte a byte à `rawResponse` recebida, o que
+mantém a tentativa rejeitada auditável em vez de desaparecer da trilha.
+
+Função síncrona, pura e determinística: sem relógio, aleatoriedade, I/O ou persistência.
+
 ## Política de retry controlado
 
 `src/agent/retry-policy.ts` define o menor contrato puro e determinístico para decidir se
@@ -823,13 +857,13 @@ Recebe explicitamente um `AgentAdapter`, um `AgentRequest`, `responseId`, `promp
    descartando por completo a mensagem, `cause`, stack ou qualquer outro conteúdo do erro
    original — sem retry;
 3. exige que a resposta bruta seja uma `string`;
-4. captura essa string verbatim com `captureAgentResponse`, sem alterá-la nem normalizá-la;
-5. interpreta a string como JSON e valida o objeto com `parseAgentProposal`
-   (`src/domain/contracts.ts`);
-6. exige que `agentId` e `cycleId` da proposta sejam exatamente iguais aos da solicitação;
-7. exige que `promptVersion` e `model` da proposta sejam exatamente iguais aos recebidos por esta
-   tentativa;
-8. devolve `{ capture, proposal }`, congelado — nada além disso.
+4. entrega `{ request, responseId, rawResponse, promptVersion, model }` a
+   `evaluateAgentResponseCapture` (`./evaluate-agent-response-capture.ts`), que captura a resposta
+   verbatim, interpreta como JSON, valida com `parseAgentProposal` e checa o alinhamento de
+   `agentId`/`cycleId`/`promptVersion`/`model`;
+5. um resultado `REJECTED` é convertido aqui na mesma `ContractValidationError` sanitizada que
+   esta função sempre lançou para cada falha — o contrato público não muda;
+6. um resultado `ACCEPTED` devolve `{ capture, proposal }`, congelado — nada além disso.
 
 Toda rejeição usa `ContractValidationError` e nomeia somente o contrato, o campo e o requisito
 violado — nunca a resposta bruta, o JSON interpretado, um token, um segredo ou qualquer outro
