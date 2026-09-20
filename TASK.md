@@ -1,62 +1,61 @@
 # Tarefa atual
 
-- **ID:** TASK-026
-- **Milestone:** M4 — tentativa única de agente stub
+- **ID:** TASK-027
+- **Milestone:** M4 — resultado auditável de tentativa
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_025.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_026.md`
 
 ## Objetivo
 
-Criar a menor composição determinística e fail-closed para executar exatamente uma tentativa de um agente stub, preservar sua resposta bruta e validar a proposta tipada.
+Criar a menor avaliação pura que transforme uma captura bruta já validada em um resultado auditável de aceitação ou rejeição, preservando a captura mesmo quando o conteúdo do agente for inválido.
 
-`AgentRequest → StubAgentAdapter → captura auditável → AgentProposal validada`
+`AgentResponseCapture → ACCEPTED(AgentProposal) | REJECTED(código seguro)`
 
-A implementação permanece inteiramente em memória e offline. Ela não deve executar retry, ciclo de trading, ordem, fill ou qualquer operação financeira.
+Isso prepara o retry controlado sem executar retry nesta tarefa e impede que respostas inválidas desapareçam da trilha de auditoria.
 
 ## Leitura obrigatória
 
-Leia integralmente `CLAUDE.md`, os documentos de arquitetura, decisões e roadmap, `docs/coordination/CHATGPT_REVIEW_TASK_025.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/agent-adapter.ts`, `src/agent/stub-agent-adapter.ts`, `src/agent/capture-agent-response.ts`, `src/agent/retry-policy.ts`, `src/domain/contracts.ts` e esta tarefa.
+Leia integralmente `CLAUDE.md`, os documentos de arquitetura, decisões e roadmap, `docs/coordination/CHATGPT_REVIEW_TASK_026.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/capture-agent-response.ts`, `src/agent/run-single-agent-attempt.ts`, `src/agent/retry-policy.ts`, `src/domain/contracts.ts` e esta tarefa.
 
 ## Escopo exato
 
-Crie `src/agent/run-single-agent-attempt.ts`.
+Crie `src/agent/evaluate-agent-response-capture.ts`.
 
-Implemente uma função assíncrona que receba explicitamente:
+Defina `evaluateAgentResponseCapture(capture)` como função síncrona, pura e determinística que:
 
-- um `AgentAdapter`;
-- um `AgentRequest`;
-- `responseId`;
-- `promptVersion`;
-- `model`.
+1. revalida fail-closed a estrutura completa de `AgentResponseCapture`, sem alterar `rawResponse`;
+2. interpreta `rawResponse` como JSON;
+3. valida o objeto por `parseAgentProposal`;
+4. exige alinhamento exato de `agentId`, `cycleId`, `promptVersion` e `model` entre captura e proposta;
+5. devolve uma união discriminada imutável:
+   - `ACCEPTED`: captura original validada e proposta validada;
+   - `REJECTED`: captura original validada e exatamente um código seguro de motivo.
 
-A função deve:
+Códigos fechados permitidos:
 
-1. validar fail-closed todos os metadados antes da chamada;
-2. chamar o adapter exatamente uma vez;
-3. exigir resposta bruta do tipo string;
-4. capturar a resposta com a primitiva existente, sem alterar nem normalizar seu conteúdo;
-5. interpretar a string como JSON e validar o objeto com `parseAgentProposal`;
-6. exigir alinhamento exato de `agentId` e `cycleId` entre request e proposta;
-7. exigir alinhamento exato de `promptVersion` e `model` entre metadados e proposta;
-8. devolver um resultado imutável contendo somente a captura e a proposta validada.
+- `INVALID_JSON`;
+- `INVALID_PROPOSAL`;
+- `AGENT_ID_MISMATCH`;
+- `CYCLE_ID_MISMATCH`;
+- `PROMPT_VERSION_MISMATCH`;
+- `MODEL_MISMATCH`.
 
-Erros devem ser fail-closed, determinísticos e não podem incluir a resposta bruta, tokens, segredos ou dados arbitrários do agente em suas mensagens.
+A rejeição não deve incluir mensagem, stack, cause, valor recebido ou conteúdo arbitrário do agente. A captura bruta permanece disponível no objeto de resultado apenas para futura auditoria controlada; não deve ser interpolada em erro ou código.
 
-Não gerar ID, timestamp ou valor implícito. Não implementar retry, delay, timeout, fallback ou recuperação nesta tarefa.
+Refatore `runSingleAgentAttempt` apenas no necessário para reutilizar essa avaliação, mantendo seu contrato público atual: uma proposta rejeitada continua gerando `ContractValidationError` sanitizado, sem retry, e uma proposta aceita continua devolvendo `{ capture, proposal }`.
 
 ## Testes obrigatórios
 
-- caminho feliz usando `StubAgentAdapter`;
-- prova de que o adapter é chamado exatamente uma vez;
-- preservação byte a byte da resposta bruta na captura;
-- rejeição de resposta não string;
-- rejeição de JSON inválido e proposta inválida;
-- rejeição de divergência em `agentId`, `cycleId`, `promptVersion` e `model`;
-- mensagens de erro não expõem o conteúdo bruto;
-- imutabilidade do resultado e ausência de mutação das entradas;
-- determinismo;
+- resultado `ACCEPTED` para proposta válida;
+- cada um dos seis códigos `REJECTED`;
+- preservação byte a byte da captura em sucesso e rejeição;
+- nenhum código ou erro expõe resposta bruta, token, segredo ou valor arbitrário;
+- `runSingleAgentAttempt` mantém chamada única, comportamento atual e erros sanitizados;
+- captura forjada ou estruturalmente inválida falha fechado antes de avaliar conteúdo;
+- resultado, captura validada e proposta congelados;
+- ausência de mutação e determinismo;
 - prova offline de ausência de relógio, timer, aleatoriedade, rede e I/O.
 
 ## Documentação
@@ -65,20 +64,20 @@ Atualize o README apenas no necessário e registre a entrega em `docs/coordinati
 
 ## Fora do escopo
 
-Não criar loop de retry, coordenador multiagente, consenso, estratégia, ciclo de replay, provider de mercado, ordem, fill, Risk Manager, PaperBroker, ledger, persistência, CSV, JSONL, banco, dashboard ou integração Astra real.
+Não implementar loop de retry, backoff, timeout, coordenador multiagente, HOLD final, persistência, logs externos, provider de mercado, ordem, fill, Risk Manager, PaperBroker, ledger, banco, dashboard ou integração Astra real.
 
 Não usar HTTP, SDK externo, fila, concorrência, timer, delay, relógio, aleatoriedade, ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora, dinheiro real ou cloud.
 
 ## Critérios de aceite
 
-- uma tentativa stub completa, imutável, determinística e fail-closed;
-- resposta bruta preservada e proposta validada com alinhamento de identidade e proveniência;
-- adapter chamado exatamente uma vez;
-- nenhuma repetição automática ou efeito externo;
+- captura preservada tanto para aceitação quanto para rejeição de conteúdo;
+- códigos de rejeição fechados, seguros e determinísticos;
+- nenhuma informação arbitrária aparece em erros ou códigos;
+- `runSingleAgentAttempt` mantém compatibilidade e chamada única;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
 - nenhuma rede, credencial ou rota financeira real.
 
 ## Entrega
 
-Faça um único commit com a mensagem `feat: executa tentativa unica de agente stub`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
+Faça um único commit com a mensagem `feat: avalia captura de agente com resultado auditavel`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
