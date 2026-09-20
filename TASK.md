@@ -1,65 +1,62 @@
 # Tarefa atual
 
-- **ID:** TASK-025
-- **Milestone:** M3/M6 — relatório multiagente offline
+- **ID:** TASK-026
+- **Milestone:** M4 — tentativa única de agente stub
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_024.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_025.md`
 
 ## Objetivo
 
-Criar a menor composição pura, determinística e fail-closed que reúna, para vários agentes, os resultados paper já calculados pelas primitivas existentes em um relatório comparável e legível por máquina.
+Criar a menor composição determinística e fail-closed para executar exatamente uma tentativa de um agente stub, preservar sua resposta bruta e validar a proposta tipada.
 
-`resumos validados por agente → relatório multiagente offline`
+`AgentRequest → StubAgentAdapter → captura auditável → AgentProposal validada`
 
-Esta tarefa deve tornar visíveis os primeiros números inteiramente fictícios do projeto em um teste demonstrativo, sem chamar agente, mercado, broker, rede ou qualquer serviço externo.
+A implementação permanece inteiramente em memória e offline. Ela não deve executar retry, ciclo de trading, ordem, fill ou qualquer operação financeira.
 
 ## Leitura obrigatória
 
-Leia integralmente `CLAUDE.md`, os documentos de arquitetura, decisões e roadmap, `docs/coordination/CHATGPT_REVIEW_TASK_024.md`, `docs/coordination/CLAUDE_REPORT.md`, `config/agents.json`, `src/config/load-agents.ts`, `src/metrics/summarize-equity-series.ts`, `src/metrics/summarize-realized-performance.ts`, `src/metrics/summarize-execution-costs.ts`, `src/benchmark/build-strategy-benchmark-report.ts` e esta tarefa.
+Leia integralmente `CLAUDE.md`, os documentos de arquitetura, decisões e roadmap, `docs/coordination/CHATGPT_REVIEW_TASK_025.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/agent-adapter.ts`, `src/agent/stub-agent-adapter.ts`, `src/agent/capture-agent-response.ts`, `src/agent/retry-policy.ts`, `src/domain/contracts.ts` e esta tarefa.
 
 ## Escopo exato
 
-Crie `src/metrics/build-multi-agent-performance-report.ts`.
+Crie `src/agent/run-single-agent-attempt.ts`.
 
-Defina uma entrada por agente que reúna, sem recalcular:
+Implemente uma função assíncrona que receba explicitamente:
 
-- `EquitySeriesSummary`;
-- `RealizedPerformanceSummary`;
-- `ExecutionCostSummary`;
-- `StrategyBenchmarkReport`.
+- um `AgentAdapter`;
+- um `AgentRequest`;
+- `responseId`;
+- `promptVersion`;
+- `model`.
 
-Implemente `buildMultiAgentPerformanceReport(entries)`, devolvendo um relatório imutável com uma linha por agente contendo somente:
+A função deve:
 
-- identificação do agente e janela do experimento;
-- patrimônio inicial e final;
-- direção e magnitude exatas do P&L;
-- drawdown máximo;
-- contagem de trades fechados;
-- fração exata de win rate;
-- fees e impacto de execução;
-- comparação da estratégia contra cash e buy-and-hold.
+1. validar fail-closed todos os metadados antes da chamada;
+2. chamar o adapter exatamente uma vez;
+3. exigir resposta bruta do tipo string;
+4. capturar a resposta com a primitiva existente, sem alterar nem normalizar seu conteúdo;
+5. interpretar a string como JSON e validar o objeto com `parseAgentProposal`;
+6. exigir alinhamento exato de `agentId` e `cycleId` entre request e proposta;
+7. exigir alinhamento exato de `promptVersion` e `model` entre metadados e proposta;
+8. devolver um resultado imutável contendo somente a captura e a proposta validada.
 
-Regras:
+Erros devem ser fail-closed, determinísticos e não podem incluir a resposta bruta, tokens, segredos ou dados arbitrários do agente em suas mensagens.
 
-- aceitar N agentes; não codificar o número seis;
-- exigir lista não vazia, `agentId` único e alinhado em todos os quatro resumos de cada entrada;
-- exigir a mesma janela `startedAt`/`endedAt` e o mesmo `pointCount` para todos os agentes;
-- revalidar fail-closed os campos consumidos, inclusive contagens, fração de win rate e valores monetários;
-- preservar a ordem de entrada; não criar ranking, vencedor ou recomendação;
-- não recalcular P&L, drawdown, custos, win rate ou benchmarks;
-- congelar linhas e coleção externa;
-- não mutar entradas.
+Não gerar ID, timestamp ou valor implícito. Não implementar retry, delay, timeout, fallback ou recuperação nesta tarefa.
 
 ## Testes obrigatórios
 
-- composição correta para uma lista configurável de agentes;
-- teste demonstrativo com os seis IDs de `config/agents.json`, capital inicial fictício de US$100 por agente e números distintos e explícitos para patrimônio final, P&L, drawdown, custos, trades, win rate e comparações;
-- o teste demonstrativo deve imprimir ou serializar uma tabela determinística segura para `bigint`, de modo que os primeiros números fictícios fiquem visíveis no log da CI;
-- preservação da ordem sem ranking;
-- rejeição de lista vazia, agente duplicado, IDs desalinhados, janelas incompatíveis, contagens incoerentes e valores monetários inválidos;
-- imutabilidade, ausência de mutação e determinismo;
+- caminho feliz usando `StubAgentAdapter`;
+- prova de que o adapter é chamado exatamente uma vez;
+- preservação byte a byte da resposta bruta na captura;
+- rejeição de resposta não string;
+- rejeição de JSON inválido e proposta inválida;
+- rejeição de divergência em `agentId`, `cycleId`, `promptVersion` e `model`;
+- mensagens de erro não expõem o conteúdo bruto;
+- imutabilidade do resultado e ausência de mutação das entradas;
+- determinismo;
 - prova offline de ausência de relógio, timer, aleatoriedade, rede e I/O.
 
 ## Documentação
@@ -68,20 +65,20 @@ Atualize o README apenas no necessário e registre a entrega em `docs/coordinati
 
 ## Fora do escopo
 
-Não criar ciclo de replay completo, estratégia, decisão BUY/SELL/HOLD, chamada de agente, prompt, integração Astra real, provider de mercado, ordem, fill, Risk Manager, broker, ledger, persistência, CSV, JSONL, banco, ranking, seleção automática de agente ou otimização.
+Não criar loop de retry, coordenador multiagente, consenso, estratégia, ciclo de replay, provider de mercado, ordem, fill, Risk Manager, PaperBroker, ledger, persistência, CSV, JSONL, banco, dashboard ou integração Astra real.
 
-Não usar HTTP, SDK, fila, concorrência, timer, delay, relógio, aleatoriedade, ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora, dinheiro real, cloud ou dashboard.
+Não usar HTTP, SDK externo, fila, concorrência, timer, delay, relógio, aleatoriedade, ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora, dinheiro real ou cloud.
 
 ## Critérios de aceite
 
-- relatório multiagente mínimo, imutável e determinístico;
-- números fictícios dos seis agentes visíveis na CI, claramente identificados como demonstração offline;
-- nenhuma fórmula financeira duplicada nem resultado recalculado;
-- validação fail-closed de consistência;
+- uma tentativa stub completa, imutável, determinística e fail-closed;
+- resposta bruta preservada e proposta validada com alinhamento de identidade e proveniência;
+- adapter chamado exatamente uma vez;
+- nenhuma repetição automática ou efeito externo;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
 - nenhuma rede, credencial ou rota financeira real.
 
 ## Entrega
 
-Faça um único commit com a mensagem `feat: consolida relatório multiagente offline`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
+Faça um único commit com a mensagem `feat: executa tentativa unica de agente stub`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
