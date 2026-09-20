@@ -750,6 +750,28 @@ duplicada na configuração e segunda chamada da mesma chave.
 Esta tarefa não integra Astra, LLM ou qualquer serviço externo — é a fronteira que uma
 integração real preencherá depois, sem alterar `AgentAdapter`.
 
+## Registro imutável de resposta bruta de agente
+
+`src/agent/capture-agent-response.ts` define o menor registro em memória, determinístico e
+auditável entre uma solicitação e a resposta bruta que ela recebeu:
+
+```text
+AgentRequest + rawResponse + promptVersion + model → AgentResponseCapture
+```
+
+`captureAgentResponse` revalida `request` com `parseAgentRequest`, exige `responseId`,
+`promptVersion` e `model` não vazios, dentro de um limite explícito de tamanho e livres de
+caracteres de controle, e exige `rawResponse` como string não vazia dentro de um limite
+explícito — preservada exatamente, sem `trim`, sem checagem de caracteres de controle e sem
+qualquer parse, normalização, correção ou interpretação de conteúdo. Um `rawResponse` que não
+seja JSON válido é preservado do mesmo jeito; o julgamento de conteúdo continua inteiramente a
+cargo de `parseAgentProposal`, que este módulo nunca chama.
+
+`responseId` é fornecido pelo chamador: a função não gera identificadores, não lê o relógio,
+não usa aleatoriedade, não faz I/O e não persiste nada. Toda inconsistência falha fechada com
+`ContractValidationError`, e o registro devolvido — incluindo a cópia de `AgentRequest` — é
+congelado.
+
 ## Documentação
 
 `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`,
