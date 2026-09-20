@@ -80,11 +80,11 @@ export function parseAgentRetryPolicy(value: unknown): AgentRetryPolicy {
 /**
  * Decides, purely and deterministically, whether one more attempt is still
  * allowed under `policy` after `completedAttempts` attempts have already
- * happened. `policy` is assumed already validated, per the convention
- * `src/risk/risk-manager.ts` follows for an already-parsed policy passed in
- * by the caller; `completedAttempts` is revalidated here because it is an
- * explicit, per-call count a caller may supply directly, not a value that
- * necessarily passed through a parser first.
+ * happened. `policy` is revalidated here via {@link parseAgentRetryPolicy}
+ * rather than trusted as already parsed: the parameter type does not stop a
+ * caller from passing a forged or stale object at runtime, and this
+ * function must stay fail-closed against that case, not just against a
+ * bad `completedAttempts`.
  *
  * Returns `true` only when `completedAttempts` is strictly less than
  * `policy.maxAttempts` — i.e. at least one attempt remains within the
@@ -95,6 +95,7 @@ export function shouldRetryAgentAttempt(
   policy: AgentRetryPolicy,
   completedAttempts: number
 ): boolean {
+  const validPolicy = parseAgentRetryPolicy(policy);
   const attempts = requireCompletedAttempts(completedAttempts);
-  return attempts < policy.maxAttempts;
+  return attempts < validPolicy.maxAttempts;
 }

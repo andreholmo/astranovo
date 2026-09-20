@@ -172,6 +172,42 @@ describe("shouldRetryAgentAttempt", () => {
     const policy = parseAgentRetryPolicy({ maxAttempts: 2 });
     assert.equal(shouldRetryAgentAttempt(policy, 1), shouldRetryAgentAttempt(policy, 1));
   });
+
+  it("rejects a forged policy above the upper bound instead of allowing extra retries", () => {
+    const forged = { maxAttempts: 100 } as AgentRetryPolicy;
+    assert.throws(() => shouldRetryAgentAttempt(forged, 3), ContractValidationError);
+  });
+
+  it("rejects a forged policy with zero maxAttempts", () => {
+    const forged = { maxAttempts: 0 } as AgentRetryPolicy;
+    assert.throws(() => shouldRetryAgentAttempt(forged, 0), ContractValidationError);
+  });
+
+  it("rejects a forged policy with a fractional maxAttempts", () => {
+    const forged = { maxAttempts: 1.5 } as AgentRetryPolicy;
+    assert.throws(() => shouldRetryAgentAttempt(forged, 0), ContractValidationError);
+  });
+
+  it("rejects a forged policy with a non-numeric maxAttempts", () => {
+    const forged = { maxAttempts: "3" } as unknown as AgentRetryPolicy;
+    assert.throws(() => shouldRetryAgentAttempt(forged, 0), ContractValidationError);
+  });
+
+  it("rejects a forged policy with an infinite maxAttempts", () => {
+    const forged = { maxAttempts: Number.POSITIVE_INFINITY } as AgentRetryPolicy;
+    assert.throws(() => shouldRetryAgentAttempt(forged, 0), ContractValidationError);
+  });
+
+  it("rejects a non-object policy passed directly", () => {
+    assert.throws(
+      () => shouldRetryAgentAttempt(null as unknown as AgentRetryPolicy, 0),
+      ContractValidationError
+    );
+    assert.throws(
+      () => shouldRetryAgentAttempt("policy" as unknown as AgentRetryPolicy, 0),
+      ContractValidationError
+    );
+  });
 });
 
 describe("no clock, timer, randomness, network or I/O", () => {

@@ -3375,11 +3375,14 @@ de `random`, nenhuma escrita em disco além dos artefatos de build padrão.
 1. **`AgentRetryPolicy` não inclui `schemaVersion`.** A tarefa pede um contrato "com somente
    `maxAttempts`"; adicionar qualquer outro campo, mesmo um já convencional no repositório,
    ampliaria o escopo exato definido.
-2. **`shouldRetryAgentAttempt` não revalida `policy.maxAttempts`.** Segue a convenção já
-   estabelecida por `evaluateRisk` (`src/risk/risk-manager.ts`), que também recebe uma política
-   já validada e não a reconfirma campo a campo; os testes obrigatórios da tarefa listam
-   explicitamente "rejeição de `completedAttempts` inválido", não de uma política inválida
-   passada diretamente a essa função.
+2. **`shouldRetryAgentAttempt` revalida `policy` via `parseAgentRetryPolicy` antes de comparar.**
+   Decisão original desta entrega deixava de revalidar `policy.maxAttempts`, seguindo por
+   analogia a convenção de `evaluateRisk` (`src/risk/risk-manager.ts`). O revisor (André, em
+   `#45`) apontou que essa convenção não se aplica aqui: o tipo `AgentRetryPolicy` não impede um
+   chamador de passar em runtime um objeto forjado (`{ maxAttempts: 100 } as AgentRetryPolicy`,
+   `Infinity` etc.), o que permitiria mais de três tentativas e contrariaria diretamente a regra
+   obrigatória "entradas inválidas devem gerar `ContractValidationError`". Corrigido em
+   2026-09-20: ver "Correção pós-revisão" abaixo.
 3. **`completedAttempts` é revalidado a cada chamada de `shouldRetryAgentAttempt`**, mesmo
    sendo tipado como `number`, porque é um contador por chamada que um orquestrador futuro
    pode calcular e passar diretamente, sem que exista (nem seja pedido) um parser dedicado
@@ -3400,10 +3403,9 @@ de `random`, nenhuma escrita em disco além dos artefatos de build padrão.
   permitida pela política, exatamente como o escopo exato exige.
 - Não há relação com tempo: nenhum atraso, backoff ou janela de tempo entre tentativas é
   modelado; a política conta tentativas, não tempo decorrido.
-- `shouldRetryAgentAttempt` não valida `policy` — um chamador que construa manualmente um
-  `AgentRetryPolicy` fora de `parseAgentRetryPolicy` (ex.: um `maxAttempts` fora de [1, 3]
-  atribuído via cast) obtém uma decisão calculada sobre esse valor não validado, na mesma
-  convenção que `evaluateRisk` já aceita para `RiskPolicy`.
+- (Corrigido em 2026-09-20 — ver abaixo.) `shouldRetryAgentAttempt` não validava `policy`; um
+  chamador que construísse manualmente um `AgentRetryPolicy` fora de `parseAgentRetryPolicy`
+  obtinha uma decisão calculada sobre esse valor não validado.
 
 ### Decisões pendentes para André / revisor
 
@@ -3420,3 +3422,76 @@ Nenhum bloqueio.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-024 — Correção pós-revisão: fail-closed em `shouldRetryAgentAttempt`
+
+- **Contexto:** revisão de `andreholmo` na PR `#45` (2026-09-20T02:14:38Z), solicitação de
+  André em `#45` via `@claude`.
+- **Data:** 2026-09-20
+
+### Falha reportada
+
+`shouldRetryAgentAttempt` validava apenas `completedAttempts` e confiava que `policy` já havia
+sido parseada por `parseAgentRetryPolicy`. Em runtime, nada impede um chamador de passar
+`{ maxAttempts: 100 } as AgentRetryPolicy` (ou `Infinity`) diretamente à função — o tipo
+estático não é verificado em tempo de execução — e a função retornava `true` além do limite de
+três tentativas, contrariando a regra obrigatória de fail-closed.
+
+### Correção aplicada
+
+`shouldRetryAgentAttempt` agora chama `parseAgentRetryPolicy(policy)` internamente antes de
+comparar `completedAttempts` contra `maxAttempts`, revalidando a política a cada chamada, não
+apenas confiando no tipo estático do parâmetro. Uma política forjada ou inválida passada
+diretamente a essa função agora falha com `ContractValidationError`, no mesmo padrão já
+aplicado a `completedAttempts`. Nenhuma outra função, arquivo ou escopo foi alterado.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/retry-policy.ts` | `shouldRetryAgentAttempt` revalida `policy` via `parseAgentRetryPolicy` |
+| `tests/retry-policy.test.ts` | 6 novos testes de política forjada/inválida |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+### Testes adicionados
+
+Política forjada com `maxAttempts` acima do limite (100), permitindo verificar que não passa a
+liberar tentativas extras; `maxAttempts` zero; `maxAttempts` fracionário (1.5); `maxAttempts`
+não numérico (string); `maxAttempts` infinito; e `policy` não-objeto (`null`, string) passada
+diretamente — todos rejeitados com `ContractValidationError`.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (inclui `npm run build`) | **597 testes, 597 passaram, 0 falharam** (591 anteriores + 6 novos) |
+
+### Decisões técnicas tomadas
+
+1. **Revalidação via `parseAgentRetryPolicy`, não uma checagem ad-hoc.** Reutiliza o mesmo
+   parser já testado e fail-closed, em vez de duplicar a lógica de limites em
+   `shouldRetryAgentAttempt`, evitando duas fontes de verdade para o que é uma política válida.
+2. **Decisão nº 2 do relato original de TASK-024 revertida.** A analogia com `evaluateRisk`
+   (`src/risk/risk-manager.ts`) não se sustentava aqui: lá a política chega por um único ponto
+   de entrada controlado; `shouldRetryAgentAttempt` é uma função pública exportada que qualquer
+   chamador pode invocar diretamente com um valor construído à mão.
+3. **Escopo mantido em `src/agent/retry-policy.ts` e seus testes.** Nenhuma alteração em
+   `AgentAdapter`, Risk Manager, broker, ledger ou qualquer arquivo fora do listado no escopo
+   exato de TASK-024.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: revalida política em shouldRetryAgentAttempt`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta correção cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
