@@ -3495,3 +3495,193 @@ Nenhum bloqueio.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta correção cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-025 — Consolidação determinística do relatório multiagente offline (M3/M6)
+
+- **ID da tarefa:** TASK-025
+- **Milestone:** M3/M6 — relatório multiagente offline
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-20
+
+### Resumo da entrega
+
+Menor composição pura, determinística e fail-closed que reúne, para N agentes, os resultados
+paper já calculados pelas primitivas existentes num relatório multiagente comparável e legível
+por máquina, sem chamar agente, modelo, mercado, broker, rede, wallet, blockchain, testnet,
+corretora ou dinheiro real.
+
+```text
+(EquitySeriesSummary + RealizedPerformanceSummary + ExecutionCostSummary + StrategyBenchmarkReport)
+por agente → MultiAgentPerformanceReport
+```
+
+`src/metrics/build-multi-agent-performance-report.ts` define `buildMultiAgentPerformanceReport`,
+que reutiliza integralmente os quatro resumos já produzidos por
+`summarizeEquitySeries`/`summarizeRealizedPerformance`/`summarizeExecutionCosts`/
+`buildStrategyBenchmarkReport` — nenhuma fórmula de P&L, drawdown, custo, win rate ou benchmark é
+reimplementada ou recalculada aqui.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_024.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `config/agents.json`, `src/config/load-agents.ts`,
+`src/metrics/summarize-equity-series.ts`, `src/metrics/summarize-realized-performance.ts`,
+`src/metrics/summarize-execution-costs.ts`, `src/benchmark/build-strategy-benchmark-report.ts` e
+`TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/metrics/build-multi-agent-performance-report.ts` | criado — `buildMultiAgentPerformanceReport`, `MultiAgentPerformanceEntry`, `MultiAgentPerformanceRow`, `MultiAgentPerformanceReport` |
+| `tests/build-multi-agent-performance-report.test.ts` | criado |
+| `README.md` | atualizado (seção "Relatório multiagente offline") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `buildMultiAgentPerformanceReport`
+
+A quantidade de agentes é configuração, nunca código (D-006): a função aceita qualquer lista não
+vazia de `MultiAgentPerformanceEntry` — nada no módulo conhece ou assume seis agentes. Como os
+quatro resumos de cada entrada, e as comparações aninhadas dentro de `StrategyBenchmarkReport`
+(`vsCash`, `vsBuyAndHold`), são apenas tipos estruturais em tempo de compilação, nada impede um
+chamador de construir um com um campo forjado — a mesma situação já documentada em todo módulo de
+`src/metrics/` e `src/benchmark/`. A função revalida fail-closed, antes de devolver qualquer
+relatório:
+
+- lista de entradas não vazia;
+- `agentId` não vazio e idêntico nos quatro resumos de cada entrada (`equity`, `realized`,
+  `costs`, `benchmark`), incluindo os campos `agentId` das comparações `vsCash`/`vsBuyAndHold`
+  aninhadas dentro de `benchmark`;
+- a mesma janela de experimento (`startedAt`, `endedAt`, `pointCount`) entre os quatro resumos de
+  uma entrada, entre as comparações aninhadas e o resumo de patrimônio, e entre todos os agentes
+  da lista inteira;
+- `agentId` sem duplicata entre entradas;
+- a fração de win rate coerente — `winRateDenominator` deve ser igual a
+  `realized.closedTradeCount`, e `winRateNumerator` não pode exceder `winRateDenominator`;
+- todo valor monetário consumido (patrimônio inicial/final, magnitude de P&L, drawdown máximo,
+  fees, impacto de execução e os valores monetários das duas comparações) como `bigint` dentro de
+  `[0, MAX_MICROS]`.
+
+Cada linha devolvida contém somente o que a tarefa pede: identificação do agente e janela do
+experimento, patrimônio inicial e final, direção e magnitude exatas do P&L, drawdown máximo,
+contagem de trades fechados, fração exata de win rate, fees e impacto de execução, e a comparação
+da estratégia contra o benchmark cash e contra o benchmark buy-and-hold (`vsCash`/`vsBuyAndHold`,
+carregados verbatim de `StrategyBenchmarkReport`). O terceiro membro do relatório triangular,
+`buyAndHoldVsCash` — uma comparação entre os dois benchmarks, não uma comparação da estratégia —
+foi deliberadamente deixado fora da linha, porque a tarefa lista o conteúdo da linha como
+"contendo somente" os itens acima.
+
+A ordem de `entries` é sempre preservada em `rows`; a função nunca ordena, pontua ou recomenda um
+agente. O relatório devolvido, a coleção `rows` e cada linha são congelados; nenhuma entrada nem
+seus resumos aninhados são mutados.
+
+### Testes cobertos em `tests/build-multi-agent-performance-report.test.ts`
+
+Composição correta para uma lista configurável de três agentes, com verificação campo a campo de
+que cada linha carrega verbatim os valores dos quatro resumos da entrada correspondente;
+preservação de ordem sem ranking, mesmo quando um agente posterior claramente supera um agente
+anterior, e ausência de qualquer campo de rank/vencedor no relatório ou nas linhas; rejeição de
+lista vazia, `agentId` duplicado, `agentId` desalinhado em `realized`/`costs`/`benchmark`, janela
+divergente entre o resumo de patrimônio e o `benchmark` da própria entrada (`endedAt` e
+`pointCount`), janelas incompatíveis entre dois agentes distintos, fração de win rate incoerente
+(`winRateDenominator` divergente de `closedTradeCount`, `winRateNumerator` acima do denominador),
+valor monetário não-`bigint` e valor monetário negativo; imutabilidade do relatório, da coleção de
+linhas e de cada linha; ausência de mutação de qualquer entrada recebida; determinismo para o
+mesmo input canônico; ausência de relógio, timer, aleatoriedade, rede e I/O, com um teste que
+substitui `Date.now`, `Math.random`, `setTimeout` e `fetch` por funções que lançam erro se
+chamadas.
+
+### Teste demonstrativo com os seis agentes de `config/agents.json`
+
+Um teste dedicado carrega `config/agents.json` via `loadAgentsConfig`/`enabledAgents`, confirma os
+seis `agentId` e os US$100 fictícios de orçamento inicial de cada perfil, e constrói, para cada
+agente, um `EquitySeriesSummary`/`RealizedPerformanceSummary`/`ExecutionCostSummary` literais e um
+`StrategyBenchmarkReport` real (via `buildCashBenchmark`/`buildBuyAndHoldBenchmark`/
+`buildStrategyBenchmarkReport`, reaproveitados sem alteração) com números inteiramente fictícios e
+distintos entre agentes: patrimônio final, direção e magnitude de P&L, drawdown máximo, contagem
+de trades, win rate, fees, impacto de execução e o resultado de cada comparação variam por agente.
+O teste serializa o relatório resultante como uma tabela determinística — cada `Micros` convertido
+para uma string decimal de seis casas antes de `JSON.stringify`, o que evita o `TypeError` que
+`JSON.stringify` lançaria sobre um `bigint` — e imprime essa tabela com `console.log`, tornando os
+primeiros números fictícios do projeto visíveis no log da CI. Um conjunto de asserções fixa os
+valores exatos de linhas selecionadas (incluindo um agente `TIED` contra cash, um `LOSS` contra
+ambos os benchmarks, e um `OUTPERFORMED` contra os dois), para que qualquer regressão futura nesses
+números fictícios quebre o teste, não apenas o log.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **616 testes, 616 passaram, 0 falharam** (597 preexistentes + 19 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum uso de
+`random`. O teste demonstrativo lê `config/agents.json` do disco local via `loadAgentsConfig`
+(I/O de arquivo local já usado por `tests/load-agents.test.ts`), nunca rede.
+
+### Decisões técnicas tomadas
+
+1. **`buyAndHoldVsCash` não entra na linha do relatório.** `TASK.md` define o conteúdo da linha
+   como "contendo somente" uma lista fechada de itens, e "comparação da estratégia contra cash e
+   buy-and-hold" descreve duas comparações da estratégia (`vsCash`, `vsBuyAndHold`), não a
+   comparação entre os dois benchmarks entre si. Incluir `buyAndHoldVsCash` teria ampliado o
+   conteúdo da linha além do que a tarefa fecha explicitamente.
+2. **`pointCount` tratado como parte da "janela do experimento".** A tarefa pede "identificação do
+   agente e janela do experimento" na linha e, separadamente, "mesma janela `startedAt`/`endedAt`
+   e mesmo `pointCount` para todos os agentes" nas regras — tratei os três campos como uma unidade
+   só, pelo mesmo motivo que `StrategyBenchmarkReport` e todo comparador em `src/benchmark/` já
+   tratam `pointCount` como parte da identificação do experimento, ao lado de `startedAt`/`endedAt`.
+3. **Revalidação fail-closed de `vsCash`/`vsBuyAndHold` (campos aninhados dentro de `benchmark`),
+   não apenas dos quatro resumos de topo.** A regra obrigatória "revalidar fail-closed os campos
+   consumidos, inclusive... valores monetários" se aplica a todo valor que a linha carrega,
+   incluindo os valores monetários e a identificação de experimento dentro das duas comparações —
+   deixá-los sem revalidação teria sido uma lacuna, já que `StrategyBenchmarkReport` é só um tipo
+   estrutural, exatamente como os testes forjados de `build-strategy-benchmark-report.test.ts` já
+   demonstram para o módulo anterior.
+4. **`EquitySeriesSummary`/`RealizedPerformanceSummary`/`ExecutionCostSummary` do teste
+   demonstrativo são objetos literais, não derivados de um replay real de fills.** O escopo exato
+   desta tarefa é a composição do relatório, não a geração de um replay completo — que
+   `TASK.md` explicitamente lista como fora de escopo ("não criar ciclo de replay completo"). O
+   mesmo padrão de resumo literal já é usado por `strategySummary()` em
+   `tests/build-strategy-benchmark-report.test.ts`. O `StrategyBenchmarkReport` de cada agente, em
+   contraste, é construído com as funções reais (`buildCashBenchmark`, `buildBuyAndHoldBenchmark`,
+   `buildStrategyBenchmarkReport`), para que as comparações exibidas na tabela demonstrativa sejam
+   genuinamente calculadas, não inventadas à mão.
+5. **Nenhuma classe de erro nova.** Toda rejeição usa `rejectContract`/`ContractValidationError`,
+   reexportado do mesmo `src/domain/errors.ts` já usado por todo módulo de `src/metrics/` e
+   `src/benchmark/`.
+6. **`isCanonicalTimestamp` duplicado localmente**, no mesmo padrão já registrado em
+   `src/metrics/value-wallet-at.ts`, `src/metrics/summarize-equity-series.ts` e
+   `src/metrics/summarize-closed-round-trip.ts` — o escopo exato desta tarefa é criar um único
+   arquivo novo em `src/metrics/`, não alterar as exportações de `src/domain/contracts.ts`.
+
+### Limitações conhecidas
+
+- Não existe ciclo de replay, estratégia, decisão BUY/SELL/HOLD, chamada de agente, ranking ou
+  seleção automática de agente — exatamente como a tarefa exclui.
+- O relatório não persiste nada em arquivo, CSV, JSONL ou banco; vive apenas em memória, como toda
+  primitiva de M3 anterior.
+- A tabela impressa pelo teste demonstrativo é uma serialização de conveniência para tornar os
+  números visíveis no log da CI, não um formato de exportação suportado pelo módulo — o módulo
+  devolve apenas a estrutura tipada `MultiAgentPerformanceReport`.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as seis decisões acima têm alternativa única e
+mais simples descartada por motivo explícito, especialmente a decisão nº 1 (exclusão de
+`buyAndHoldVsCash` da linha), que fica registrada para confirmação explícita do arquiteto.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: consolida relatório multiagente offline`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
