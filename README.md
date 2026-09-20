@@ -772,6 +772,26 @@ não usa aleatoriedade, não faz I/O e não persiste nada. Toda inconsistência 
 `ContractValidationError`, e o registro devolvido — incluindo a cópia de `AgentRequest` — é
 congelado.
 
+## Política de retry controlado
+
+`src/agent/retry-policy.ts` define o menor contrato puro e determinístico para decidir se
+resta uma nova tentativa de chamada de agente, sem jamais executar uma:
+
+```text
+AgentRetryPolicy + tentativa explícita → decisão determinística
+```
+
+`AgentRetryPolicy` carrega somente `maxAttempts`, um inteiro seguro entre 1 e 3, inclusive.
+`parseAgentRetryPolicy` valida e devolve uma cópia congelada; entrada inválida — zero, valor
+acima de 3, negativo, fração, `NaN`, infinito, string ou objeto — falha fechado com
+`ContractValidationError`. `shouldRetryAgentAttempt(policy, completedAttempts)` devolve `true`
+somente quando `completedAttempts` (também um inteiro seguro não negativo, revalidado a cada
+chamada) ainda for estritamente menor que `policy.maxAttempts`.
+
+Nenhuma das duas funções cria uma tentativa, chama `AgentAdapter`, executa retry, lê o
+relógio, aguarda, calcula backoff, usa aleatoriedade ou faz I/O — apenas responde, de forma
+pura, se mais uma tentativa está dentro do limite explícito da política.
+
 ## Documentação
 
 `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`,

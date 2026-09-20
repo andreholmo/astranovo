@@ -3279,3 +3279,144 @@ Nenhum bloqueio.
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-024 — Política de retry controlado (M4)
+
+- **ID da tarefa:** TASK-024
+- **Milestone:** M4 — política de retry controlado
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-20
+
+### Resumo da entrega
+
+Menor contrato puro, determinístico e fail-closed do pipeline de agentes: uma política
+imutável de no máximo três tentativas e uma decisão pura sobre se resta mais uma.
+
+```text
+RetryPolicy + tentativa explícita → decisão determinística
+```
+
+`src/agent/retry-policy.ts` define `AgentRetryPolicy` (somente `maxAttempts`),
+`parseAgentRetryPolicy(value)` e `shouldRetryAgentAttempt(policy, completedAttempts)`. Nenhuma
+das duas funções cria uma tentativa, chama `AgentAdapter`, executa retry, lê o relógio,
+aguarda, calcula backoff, usa aleatoriedade ou faz I/O — a decisão de que uma tentativa é
+permitida permanece inteiramente separada de jamais fazer uma, a mesma separação que
+`src/agent/agent-adapter.ts` e `src/agent/capture-agent-response.ts` já traçam entre chamar um
+agente e validar o que ele devolveu.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_023.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/agent/agent-adapter.ts`,
+`src/agent/capture-agent-response.ts`, `src/domain/contracts.ts` e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/retry-policy.ts` | criado — `AgentRetryPolicy`, `parseAgentRetryPolicy`, `shouldRetryAgentAttempt` |
+| `tests/retry-policy.test.ts` | criado |
+| `README.md` | atualizado (seção "Política de retry controlado") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `retry-policy.ts`
+
+`AgentRetryPolicy` carrega exatamente o campo pedido pela tarefa — "somente `maxAttempts`" —
+sem `schemaVersion` nem qualquer outro campo. `parseAgentRetryPolicy` exige um objeto JSON com
+`maxAttempts` inteiro seguro (`Number.isSafeInteger`) entre `MIN_AGENT_RETRY_ATTEMPTS` (1) e
+`MAX_AGENT_RETRY_ATTEMPTS` (3), inclusive; qualquer outro valor — zero, acima de 3, negativo,
+fração, `NaN`, infinito, string ou objeto — falha fechado com `ContractValidationError`. O
+resultado é uma cópia congelada contendo somente `maxAttempts`; campos desconhecidos no valor
+de entrada são descartados, não confiados, no mesmo padrão de todo parser do repositório.
+
+`shouldRetryAgentAttempt(policy, completedAttempts)` trata `policy` como já validada — a mesma
+convenção que `evaluateRisk` já segue para `RiskRequest.policy` em
+`src/risk/risk-manager.ts` — e revalida apenas `completedAttempts`, por ser um valor explícito
+por chamada que um chamador pode fornecer diretamente, sem necessariamente ter passado por um
+parser antes. `completedAttempts` deve ser um inteiro seguro não negativo; qualquer outro valor
+falha fechado com `ContractValidationError`. A decisão é `completedAttempts < policy.maxAttempts`
+— `true` somente quando resta pelo menos uma tentativa dentro do limite explícito.
+
+### Testes cobertos em `tests/retry-policy.test.ts`
+
+`parseAgentRetryPolicy`: aceitação e congelamento nos limites 1 e 3 e no valor intermediário 2;
+rejeição de valor não-objeto (string, `null`, `undefined`, array); rejeição de zero, valor acima
+de 3, negativo, fração, `NaN`, infinito, string, objeto e campo ausente; descarte de campos
+desconhecidos, mantendo somente `maxAttempts`; ausência de mutação do objeto de entrada;
+determinismo para o mesmo input canônico.
+
+`shouldRetryAgentAttempt`: decisão exata em cada fronteira, para as três políticas válidas
+(`maxAttempts` 1, 2 e 3) — permite toda tentativa abaixo do limite e nega exatamente na
+igualdade e acima dela; permite a primeira tentativa quando nenhuma foi completada; rejeição de
+`completedAttempts` negativo, fracionário, `NaN`, infinito, string e objeto; ausência de mutação
+da política recebida; determinismo para o mesmo input canônico.
+
+Suíte offline dedicada: um teste substitui `Date.now`, `Math.random`, `setTimeout` e `fetch` por
+funções que lançam erro se chamadas, e prova que `parseAgentRetryPolicy`/`shouldRetryAgentAttempt`
+continuam funcionando normalmente sob essa restrição — evidência direta de ausência de relógio,
+timer, aleatoriedade, rede e I/O, não apenas ausência de asserção sobre eles.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **591 testes, 591 passaram, 0 falharam** (564 preexistentes + 27 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum uso
+de `random`, nenhuma escrita em disco além dos artefatos de build padrão.
+
+### Decisões técnicas tomadas
+
+1. **`AgentRetryPolicy` não inclui `schemaVersion`.** A tarefa pede um contrato "com somente
+   `maxAttempts`"; adicionar qualquer outro campo, mesmo um já convencional no repositório,
+   ampliaria o escopo exato definido.
+2. **`shouldRetryAgentAttempt` não revalida `policy.maxAttempts`.** Segue a convenção já
+   estabelecida por `evaluateRisk` (`src/risk/risk-manager.ts`), que também recebe uma política
+   já validada e não a reconfirma campo a campo; os testes obrigatórios da tarefa listam
+   explicitamente "rejeição de `completedAttempts` inválido", não de uma política inválida
+   passada diretamente a essa função.
+3. **`completedAttempts` é revalidado a cada chamada de `shouldRetryAgentAttempt`**, mesmo
+   sendo tipado como `number`, porque é um contador por chamada que um orquestrador futuro
+   pode calcular e passar diretamente, sem que exista (nem seja pedido) um parser dedicado
+   para ele — a única forma de cumprir "entradas inválidas devem falhar com
+   `ContractValidationError`" para esse valor é validá-lo no próprio ponto de uso.
+4. **Nenhuma classe de erro nova.** Toda rejeição usa `ContractValidationError`/
+   `rejectContract`, reexportado do mesmo `src/domain/errors.ts` já usado por
+   `src/agent/agent-adapter.ts` e `src/agent/capture-agent-response.ts`.
+5. **`requireObject` duplicado localmente em miniatura**, no mesmo padrão já documentado em
+   `src/agent/agent-adapter.ts` e `src/agent/capture-agent-response.ts`: o helper equivalente em
+   `src/domain/contracts.ts` é privado ao módulo, e a tarefa não autoriza alterar suas
+   exportações.
+
+### Limitações conhecidas
+
+- Não existe execução de retry: nenhuma função deste módulo chama `AgentAdapter`, cria uma
+  nova tentativa ou decide o que fazer com uma resposta — apenas se mais uma tentativa é
+  permitida pela política, exatamente como o escopo exato exige.
+- Não há relação com tempo: nenhum atraso, backoff ou janela de tempo entre tentativas é
+  modelado; a política conta tentativas, não tempo decorrido.
+- `shouldRetryAgentAttempt` não valida `policy` — um chamador que construa manualmente um
+  `AgentRetryPolicy` fora de `parseAgentRetryPolicy` (ex.: um `maxAttempts` fora de [1, 3]
+  atribuído via cast) obtém uma decisão calculada sobre esse valor não validado, na mesma
+  convenção que `evaluateRisk` já aceita para `RiskPolicy`.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa única e
+mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: define política de retry controlado`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
