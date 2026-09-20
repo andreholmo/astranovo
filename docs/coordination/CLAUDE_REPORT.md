@@ -3141,3 +3141,141 @@ mais literal do texto da tarefa e não afeta o comportamento fail-closed observ�
 - **Hash:** informado a André na resposta após o push.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
+
+## TASK-023 — Registro imutável de resposta bruta de agente (M4)
+
+- **ID da tarefa:** TASK-023
+- **Milestone:** M4 — registro imutável de resposta bruta
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-20
+
+### Resumo da entrega
+
+Menor registro em memória, determinístico e auditável do pipeline: `captureAgentResponse`
+constrói e congela um `AgentResponseCapture` associando um `AgentRequest` já revalidado à sua
+resposta bruta e às versões explícitas de prompt e modelo que a produziram.
+
+```text
+AgentRequest + rawResponse + promptVersion + model → AgentResponseCapture
+```
+
+Não persiste dados, não chama modelo, não integra Astra e não chama `parseAgentProposal`.
+Reutiliza `parseAgentRequest` de `src/agent/agent-adapter.ts` para validar e congelar a cópia
+de `AgentRequest`; nenhuma regra de validação de `AgentRequest` foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_022.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/agent/agent-adapter.ts`, `src/domain/contracts.ts`
+e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/capture-agent-response.ts` | criado — `captureAgentResponse`, `AgentResponseCapture` |
+| `tests/capture-agent-response.test.ts` | criado |
+| `README.md` | atualizado (seção "Registro imutável de resposta bruta de agente") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `captureAgentResponse`
+
+Recebe um único `value: unknown` com os campos `request`, `responseId`, `rawResponse`,
+`promptVersion` e `model`, e devolve um `AgentResponseCapture` congelado contendo somente:
+
+1. `request` — `parseAgentRequest(source.request)`, que valida e congela uma cópia
+   independente, aceitando tanto um `AgentRequest` já parseado quanto um objeto bruto
+   equivalente;
+2. `responseId` — string não vazia/não em branco, até `MAX_RESPONSE_ID_LENGTH` (64) caracteres,
+   livre de caracteres de controle; fornecida pelo chamador, nunca gerada aqui;
+3. `rawResponse` — string não vazia, até `MAX_RAW_RESPONSE_LENGTH` (65.536) caracteres,
+   devolvida exatamente como recebida: sem `trim`, sem checagem de caracteres de controle e sem
+   qualquer parse, normalização, correção ou interpretação de conteúdo. Texto que não é JSON
+   válido é preservado do mesmo jeito, porque esta camada trata o conteúdo como opaco;
+4. `promptVersion` e `model` — mesma validação de `responseId` (não vazios/em branco, limitados,
+   livres de caracteres de controle), com limites próprios: `MAX_PROMPT_VERSION_LENGTH` (64) e
+   `MAX_MODEL_LENGTH` (128), espelhando os limites já usados para os mesmos campos em
+   `AgentProposal` (`src/domain/contracts.ts`).
+
+`requireObject` e o validador de texto limitado são duplicados localmente em miniatura, no
+mesmo padrão documentado em `src/agent/agent-adapter.ts`: os helpers equivalentes em
+`src/domain/contracts.ts` são privados ao módulo, e a tarefa não autoriza alterar suas
+exportações.
+
+### Testes cobertos em `tests/capture-agent-response.test.ts`
+
+Captura válida com cópia de `AgentRequest` congelada e distinta por referência da instância
+recebida; aceitação de um `request` bruto/não parseado, revalidado; preservação byte a byte de
+texto malformado, de texto com quebras de linha/tabulação/unicode e de um `rawResponse` composto
+só de espaços; `responseId`/`promptVersion`/`model` ausentes, vazios, em branco, não string,
+acima do limite e contendo caractere de controle, com o caso de fronteira exatamente no limite
+aceito; `rawResponse` ausente, vazio, não string e acima do limite, com o caso de fronteira
+exatamente no limite aceito; `request` ausente, com `agentId` vazio e com `schemaVersion`
+incorreto; valor de entrada não-objeto (string, `null`, `undefined`, array); congelamento do
+resultado e do `request` aninhado, com tentativa de mutação lançando `TypeError`; ausência de
+mutação do objeto de entrada e da instância de `AgentRequest` recebida; determinismo campo a
+campo para o mesmo input canônico; ausência de leitura de relógio (resultado idêntico
+independentemente do instante da chamada) e confirmação de que `responseId` nunca é fabricado —
+é exatamente o valor fornecido pelo chamador.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **564 testes, 564 passaram, 0 falharam** (531 preexistentes + 33 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum uso
+de `random`, nenhuma escrita em disco além dos artefatos de build padrão.
+
+### Decisões técnicas tomadas
+
+1. **`responseId`/`promptVersion`/`model` não impõem um formato de slug/identificador**, apenas
+   "não vazio/em branco, limitado, livre de caracteres de controle" — exatamente o que a tarefa
+   pede. Um padrão adicional (como o usado para `orderId`/`proposalId`) restringiria formatos de
+   versão de prompt ou de identificador de modelo legítimos (ex.: `gpt-4.1@2026-01`) sem que a
+   tarefa tenha pedido essa restrição.
+2. **`rawResponse` não é validado contra caracteres de controle nem sofre `trim`.** A tarefa
+   exige essa checagem explicitamente para `responseId`/`promptVersion`/`model`, mas não para
+   `rawResponse`, e afirma que seu conteúdo é opaco. Texto real de um agente pode conter quebras
+   de linha e tabulações (caracteres de controle) legitimamente; rejeitá-las seria interpretar
+   conteúdo, o que a tarefa proíbe.
+3. **`MAX_RAW_RESPONSE_LENGTH = 65.536` é um limite de sanidade documentado, não um valor
+   calibrado.** A tarefa exige "limite explícito" sem especificar o número; escolhi um valor
+   generoso o bastante para uma resposta longa de agente, exportado como constante nomeada para
+   que o arquiteto possa ajustá-lo sem tocar na lógica de validação.
+4. **Nenhuma interface de "input" nomeada foi exportada** para os parâmetros de
+   `captureAgentResponse`; a função aceita `value: unknown`, no mesmo padrão de toda função
+   `parseX` do repositório (`parseAgentRequest`, `parseMarketSnapshot`, `parseAgentProposal`).
+5. **`AgentResponseCapture` não inclui `schemaVersion`.** A tarefa lista explicitamente os cinco
+   campos que o registro deve conter "somente" (`request`, `responseId`, `rawResponse`,
+   `promptVersion`, `model`); adicionar um campo não listado ampliaria o escopo exato definido.
+
+### Limitações conhecidas
+
+- Não há persistência: o `AgentResponseCapture` vive apenas em memória, como toda fundação
+  anterior a uma tarefa de persistência dedicada.
+- Não há geração de `responseId`: um chamador real precisa decidir sua própria estratégia de
+  identificador estável (fora do escopo desta tarefa).
+- `rawResponse` não é comprimido nem truncado silenciosamente: uma resposta acima do limite é
+  rejeitada por inteiro, não cortada.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as cinco decisões acima têm alternativa única e
+mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: registra resposta bruta de agente`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit.
