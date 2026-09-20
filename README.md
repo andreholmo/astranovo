@@ -18,7 +18,8 @@ execução, o resultado realizado determinístico de um round trip paper fechado
 determinística de desempenho realizado e win rate exato, os benchmarks cash e buy-and-hold, a
 comparação determinística de cada um deles com o cash, a comparação determinística de uma
 estratégia com o buy-and-hold, o relatório determinístico consolidado dessas duas
-comparações, e a seleção/série de snapshots sem look-ahead para replay**, e **M4 — o
+comparações, a seleção/série de snapshots sem look-ahead para replay, e o relatório
+multiagente offline que consolida esses resumos para N agentes**, e **M4 — o
 adaptador de agente stub determinístico**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
@@ -64,6 +65,9 @@ adaptador de agente stub determinístico**.
 - `src/benchmark/build-strategy-benchmark-report.ts` — `buildStrategyBenchmarkReport`, que
   consolida as três comparações acima num único relatório triangular imutável, sem
   recalcular nada;
+- `src/metrics/build-multi-agent-performance-report.ts` — `buildMultiAgentPerformanceReport`,
+  que consolida os resumos já calculados de N agentes num único relatório multiagente
+  imutável, sem ranking e sem recalcular nada;
 - `src/agent/agent-adapter.ts` — `AgentAdapter`, `AgentRequest` e `parseAgentRequest`, a
   menor fronteira auditável para obter uma resposta bruta de agente;
 - `src/agent/stub-agent-adapter.ts` — `StubAgentAdapter`, o adaptador local e determinístico
@@ -791,6 +795,44 @@ chamada) ainda for estritamente menor que `policy.maxAttempts`.
 Nenhuma das duas funções cria uma tentativa, chama `AgentAdapter`, executa retry, lê o
 relógio, aguarda, calcula backoff, usa aleatoriedade ou faz I/O — apenas responde, de forma
 pura, se mais uma tentativa está dentro do limite explícito da política.
+
+## Relatório multiagente offline
+
+`src/metrics/build-multi-agent-performance-report.ts` define `buildMultiAgentPerformanceReport`:
+a composição pura e determinística que reúne, para N agentes, os quatro resumos já calculados
+por primitivas existentes num único relatório comparável e legível por máquina, sem chamar
+agente, mercado, broker, rede ou qualquer serviço externo.
+
+```text
+(EquitySeriesSummary + RealizedPerformanceSummary + ExecutionCostSummary + StrategyBenchmarkReport)
+por agente → MultiAgentPerformanceReport
+```
+
+A quantidade de agentes é configuração, nunca código (D-006): a função aceita qualquer lista não
+vazia de entradas. Como os quatro resumos de cada entrada — e as comparações aninhadas dentro de
+`StrategyBenchmarkReport` — são apenas tipos estruturais em tempo de compilação, nada impede um
+chamador de construir um com um campo forjado; por isso a função revalida fail-closed, antes de
+devolver qualquer relatório:
+
+- `agentId` não vazio e idêntico nos quatro resumos de cada entrada;
+- a mesma janela de experimento (`startedAt`, `endedAt`, `pointCount`) entre os quatro resumos de
+  uma entrada e entre todos os agentes da lista;
+- `agentId` sem duplicata entre entradas;
+- a fração de win rate coerente (`winRateDenominator === closedTradeCount`,
+  `winRateNumerator <= winRateDenominator`);
+- todo valor monetário consumido como `bigint` dentro do intervalo válido.
+
+Cada linha devolvida contém somente identificação do agente e janela, patrimônio inicial e final,
+direção e magnitude exatas do P&L, drawdown máximo, contagem de trades fechados, fração exata de
+win rate, fees, impacto de execução e a comparação da estratégia contra o benchmark cash e contra
+o benchmark buy-and-hold — nenhum valor é recalculado, nenhuma fórmula é duplicada. A ordem das
+entradas é sempre preservada; o relatório não cria ranking, vencedor ou recomendação. O relatório,
+a coleção de linhas e cada linha são congelados; nenhuma entrada é mutada.
+
+O teste demonstrativo (`tests/build-multi-agent-performance-report.test.ts`) consolida os seis
+agentes de `config/agents.json`, cada um com US$100 fictícios, em números inteiramente fictícios e
+distintos de patrimônio, P&L, drawdown, custos, trades, win rate e comparações — impressos como
+uma tabela determinística e segura para `bigint` no log da CI.
 
 ## Documentação
 
