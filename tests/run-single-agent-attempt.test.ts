@@ -52,6 +52,20 @@ class CountingAdapter implements AgentAdapter {
   }
 }
 
+class ThrowingAdapter implements AgentAdapter {
+  public callCount = 0;
+  readonly #error: unknown;
+
+  public constructor(error: unknown) {
+    this.#error = error;
+  }
+
+  public call(_request: AgentRequest): unknown {
+    this.callCount += 1;
+    throw this.#error;
+  }
+}
+
 function stubAdapterWithResponse(response: unknown): StubAgentAdapter {
   return new StubAgentAdapter({
     routes: [{ agentId: "trend-following", cycleId: "cycle-1", snapshotId: "snapshot-1", response }]
@@ -291,6 +305,69 @@ describe("runSingleAgentAttempt offline: no clock, timer, randomness, network or
     const result = await runSingleAgentAttempt({ adapter, ...BASE_INPUT });
 
     assert.equal(result.proposal.action, "HOLD");
+  });
+});
+
+describe("runSingleAgentAttempt validates the adapter fail-closed before calling it", () => {
+  it("rejects a null adapter", async () => {
+    await expectRejection(
+      runSingleAgentAttempt({ ...BASE_INPUT, adapter: null as unknown as AgentAdapter })
+    );
+  });
+
+  it("rejects an adapter object with no call function", async () => {
+    await expectRejection(
+      runSingleAgentAttempt({ ...BASE_INPUT, adapter: {} as unknown as AgentAdapter })
+    );
+  });
+
+  it("rejects an adapter whose call property is not a function", async () => {
+    await expectRejection(
+      runSingleAgentAttempt({
+        ...BASE_INPUT,
+        adapter: { call: "not-a-function" } as unknown as AgentAdapter
+      })
+    );
+  });
+
+  it("rejects a non-object adapter without exposing its value in the error message", async () => {
+    const secret = "SECRET_TOKEN_NOT_AN_ADAPTER";
+
+    const error = await expectRejection(
+      runSingleAgentAttempt({ ...BASE_INPUT, adapter: secret as unknown as AgentAdapter })
+    );
+
+    assert.ok(!error.message.includes(secret));
+  });
+});
+
+describe("runSingleAgentAttempt sanitizes exceptions thrown by adapter.call", () => {
+  it("converts a thrown Error carrying a secret into a sanitized ContractValidationError, with exactly one call", async () => {
+    const secret = "SECRET_TOKEN_ABC123";
+    const adapter = new ThrowingAdapter(new Error(secret));
+
+    const error = await expectRejection(runSingleAgentAttempt({ adapter, ...BASE_INPUT }));
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(adapter.callCount, 1);
+  });
+
+  it("converts a thrown non-Error value into a sanitized ContractValidationError, with exactly one call", async () => {
+    const secret = "another-arbitrary-secret-value";
+    const adapter = new ThrowingAdapter(secret);
+
+    const error = await expectRejection(runSingleAgentAttempt({ adapter, ...BASE_INPUT }));
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(adapter.callCount, 1);
+  });
+
+  it("does not retry after adapter.call throws", async () => {
+    const adapter = new ThrowingAdapter(new Error("boom"));
+
+    await expectRejection(runSingleAgentAttempt({ adapter, ...BASE_INPUT }));
+
+    assert.equal(adapter.callCount, 1);
   });
 });
 

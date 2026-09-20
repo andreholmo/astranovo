@@ -7,9 +7,12 @@
  * → validated AgentProposal
  * ```
  *
- * `runSingleAgentAttempt` validates every piece of metadata it was given
- * *before* touching the adapter, calls `adapter.call` exactly once, requires
- * the raw response to be a string, preserves it byte for byte via
+ * `runSingleAgentAttempt` validates every piece of metadata it was given,
+ * including that the adapter itself is a usable `AgentAdapter`, *before*
+ * touching the adapter, calls `adapter.call` exactly once inside a guard that
+ * converts any exception the adapter throws into a sanitized
+ * `ContractValidationError` (never the thrown value's message, cause or
+ * stack), requires the raw response to be a string, preserves it byte for byte via
  * `captureAgentResponse` (`./capture-agent-response.js`), then interprets
  * that string as JSON and validates it with `parseAgentProposal`
  * (`../domain/contracts.js`) — the only place in this module that judges the
@@ -50,6 +53,7 @@ import {
 export { ContractValidationError } from "../domain/errors.js";
 
 const RUN_SINGLE_AGENT_ATTEMPT = "RunSingleAgentAttempt";
+const AGENT_ADAPTER_CALL = "AgentAdapterCall";
 const RAW_AGENT_RESPONSE = "RawAgentResponse";
 const AGENT_PROPOSAL_ALIGNMENT = "AgentProposalAlignment";
 
@@ -73,6 +77,22 @@ function requireBoundedText(value: unknown, field: string, maxLength: number): s
     rejectContract(RUN_SINGLE_AGENT_ATTEMPT, field, "must not contain control characters");
   }
   return value;
+}
+
+/**
+ * Validates fail-closed, before any call is attempted, that `value` is a
+ * usable `AgentAdapter` — an object exposing a `call` function. Never invokes
+ * it and never inspects its result.
+ */
+function requireAdapter(value: unknown): AgentAdapter {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    typeof (value as { call?: unknown }).call !== "function"
+  ) {
+    rejectContract(RUN_SINGLE_AGENT_ATTEMPT, "adapter", "must be an object exposing a call(request) function");
+  }
+  return value as AgentAdapter;
 }
 
 /** Everything one single, non-retried agent attempt depends on. */
@@ -105,9 +125,13 @@ export interface SingleAgentAttemptResult {
  *
  * Sequence, with no deviation possible:
  *
- * 1. validates `request`, `responseId`, `promptVersion` and `model` — before
- *    the adapter is touched;
- * 2. calls `adapter.call(request)` exactly once;
+ * 1. validates `adapter`, `request`, `responseId`, `promptVersion` and
+ *    `model` — before the adapter is ever touched;
+ * 2. calls `adapter.call(request)` exactly once, inside a guard that turns
+ *    any exception the adapter throws into a sanitized
+ *    `ContractValidationError` carrying a fixed, stable message — never the
+ *    thrown value's `message`, `cause`, stack or any other of its content —
+ *    and does not retry;
  * 3. requires the raw result to be a `string`;
  * 4. captures it verbatim with `captureAgentResponse`;
  * 5. parses that string as JSON and validates the result with
@@ -125,15 +149,26 @@ export interface SingleAgentAttemptResult {
 export async function runSingleAgentAttempt(
   value: RunSingleAgentAttemptRequest
 ): Promise<SingleAgentAttemptResult> {
-  const { adapter, request: rawRequest, responseId: rawResponseId, promptVersion: rawPromptVersion, model: rawModel } =
-    value;
+  const {
+    adapter: rawAdapter,
+    request: rawRequest,
+    responseId: rawResponseId,
+    promptVersion: rawPromptVersion,
+    model: rawModel
+  } = value;
 
+  const adapter = requireAdapter(rawAdapter);
   const request = parseAgentRequest(rawRequest);
   const responseId = requireBoundedText(rawResponseId, "responseId", MAX_RESPONSE_ID_LENGTH);
   const promptVersion = requireBoundedText(rawPromptVersion, "promptVersion", MAX_PROMPT_VERSION_LENGTH);
   const model = requireBoundedText(rawModel, "model", MAX_MODEL_LENGTH);
 
-  const rawResponse = adapter.call(request);
+  let rawResponse: unknown;
+  try {
+    rawResponse = adapter.call(request);
+  } catch {
+    rejectContract(AGENT_ADAPTER_CALL, "rawResponse", "adapter.call must not throw");
+  }
   if (typeof rawResponse !== "string") {
     rejectContract(RAW_AGENT_RESPONSE, "rawResponse", "must be a string");
   }

@@ -3851,11 +3851,13 @@ esperar por I/O), nenhum uso de `random`.
    A tarefa exige que nenhuma mensagem de erro exponha a resposta bruta; alguns motores JS incluem
    um fragmento do texto de entrada na mensagem de `SyntaxError` do `JSON.parse`, então propagar
    essa mensagem seria um vazamento indireto do conteúdo do agente.
-4. **Nenhuma validação estrutural do próprio `adapter`.** Segue o mesmo precedente de
-   `executePaperOrderWithRisk`, que também recebe um `broker: Broker` confiado como implementação
-   fornecida pelo chamador (não como dado a validar) e só confere sua propriedade `kind`; aqui o
-   `adapter` é chamado diretamente, sem checagem de forma além do que o próprio TypeScript já
-   garante em tempo de compilação.
+4. ~~Nenhuma validação estrutural do próprio `adapter`.~~ **Revisto na correção pós-revisão
+   abaixo**: o ChatGPT/GPT-5.6 Sol apontou que uma exceção lançada por `adapter.call` não estava
+   protegida e podia propagar conteúdo arbitrário (potencialmente segredo) intacto. A decisão
+   original — nenhuma checagem além do tipo estático — foi substituída por validação fail-closed
+   mínima de forma (`adapter` deve ser um objeto com função `call`) mais uma guarda em torno da
+   única chamada que sanitiza qualquer exceção. Ver seção "Correção pós-revisão" no fim desta
+   entrada.
 5. **`request`, `responseId`, `promptVersion` e `model` são revalidados aqui mesmo já tipados no
    parâmetro**, seguindo o precedente explícito de `captureAgentResponse`, que documenta
    revalidar `request` "regardless of whether it was already parsed" — um chamador pode montar
@@ -3891,5 +3893,51 @@ Nenhum bloqueio.
 - **Mensagem:** `feat: executa tentativa unica de agente stub`
 - **Hash:** informado a André na resposta após o push.
 
-A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit. Não aprovo nem
-mesclo o próprio trabalho.
+### Correção pós-revisão (bloqueio no SHA `e48cccfb63531b682de323ee3c52425dd4f9749e`)
+
+- **Data:** 2026-09-20
+- **Solicitado por:** André (revisão de código no PR #49), repassando o achado do ChatGPT/GPT-5.6
+  Sol.
+
+O achado: `adapter.call(request)` era executado sem proteção. Se um adapter lançasse uma exceção
+cuja mensagem contivesse resposta bruta, token, segredo ou outro conteúdo arbitrário, essa exceção
+se propagava intacta para fora de `runSingleAgentAttempt` — violando a exigência da tarefa de que
+nenhum erro exponha dados arbitrários do agente ou segredos, e deixando a função dependente do
+formato de erro de implementações futuras do adapter.
+
+Correção em `src/agent/run-single-agent-attempt.ts`:
+
+1. **`requireAdapter`** valida fail-closed, antes de qualquer chamada, que `adapter` é um objeto
+   que expõe uma função `call` — sem invocá-lo e sem inspecionar seu retorno. Um `adapter` que não
+   satisfaça essa forma mínima (`null`, não-objeto, objeto sem `call`, `call` não-função) é
+   rejeitado com `ContractValidationError` no contrato `RunSingleAgentAttempt`, campo `adapter`,
+   antes de `parseAgentRequest` sequer ser chamado.
+2. A única chamada `adapter.call(request)` passou a ficar dentro de um `try/catch` que envolve
+   **somente** essa chamada. Qualquer exceção lançada — `Error` ou não — é descartada por
+   completo (mensagem, `cause`, stack e qualquer outra propriedade) e substituída por
+   `rejectContract("AgentAdapterCall", "rawResponse", "adapter.call must not throw")`, uma
+   mensagem estática que não depende em nada do valor lançado.
+3. Nenhum retry foi introduzido: o `catch` só relança fechado e retorna; não há segunda tentativa,
+   laço, delay ou fallback. A garantia "chama o adapter exatamente uma vez" continua valendo tanto
+   no caminho de sucesso quanto no de exceção.
+
+Testes adicionados em `tests/run-single-agent-attempt.test.ts`:
+
+- `runSingleAgentAttempt validates the adapter fail-closed before calling it` — `adapter` nulo,
+  objeto sem `call`, `call` que não é função, e um `adapter` que é uma string simulando um
+  segredo (`"SECRET_TOKEN_NOT_AN_ADAPTER"`), provando que essa string nunca aparece na mensagem
+  de erro.
+- `runSingleAgentAttempt sanitizes exceptions thrown by adapter.call` — um adapter cujo `call`
+  lança `new Error("SECRET_TOKEN_ABC123")` e outro que lança um valor não-`Error` (`throw
+  "another-arbitrary-secret-value"`); em ambos os casos o teste prova que o segredo não aparece em
+  `error.message` **e** que `adapter.call` foi executado exatamente uma vez (`callCount === 1`,
+  via um novo `ThrowingAdapter` de teste que conta chamadas). Um terceiro teste confirma
+  explicitamente a ausência de retry após a exceção.
+
+Comandos executados após a correção: `npm run typecheck` (sem erros) e `npm test`, que reconstrói
+(`npm run build`) e roda toda a suíte — **664 testes, 664 passaram, 0 falharam** (657 anteriores +
+7 novos). Nenhuma rede, relógio, aleatoriedade ou I/O foi introduzida; escopo não foi ampliado além
+do achado apontado na revisão.
+
+Nenhum bloqueio remanescente é conhecido para este achado. A aprovação desta tarefa cabe ao
+ChatGPT/GPT-5.6 Sol, após revisão do novo diff. Não aprovo nem mesclo o próprio trabalho.

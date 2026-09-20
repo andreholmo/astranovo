@@ -816,9 +816,12 @@ AgentRequest → AgentAdapter.call (uma vez) → captura auditável → AgentPro
 Recebe explicitamente um `AgentAdapter`, um `AgentRequest`, `responseId`, `promptVersion` e
 `model`. Sequência sem desvio possível:
 
-1. valida `request`, `responseId`, `promptVersion` e `model` fail-closed **antes** de tocar o
-   adapter;
-2. chama `adapter.call(request)` exatamente uma vez;
+1. valida `adapter`, `request`, `responseId`, `promptVersion` e `model` fail-closed **antes** de
+   tocar o adapter — `adapter` precisa ser um objeto que exponha uma função `call`;
+2. chama `adapter.call(request)` exatamente uma vez, dentro de uma guarda que converte qualquer
+   exceção lançada pelo adapter numa `ContractValidationError` com mensagem fixa e sanitizada,
+   descartando por completo a mensagem, `cause`, stack ou qualquer outro conteúdo do erro
+   original — sem retry;
 3. exige que a resposta bruta seja uma `string`;
 4. captura essa string verbatim com `captureAgentResponse`, sem alterá-la nem normalizá-la;
 5. interpreta a string como JSON e valida o objeto com `parseAgentProposal`
@@ -830,10 +833,10 @@ Recebe explicitamente um `AgentAdapter`, um `AgentRequest`, `responseId`, `promp
 
 Toda rejeição usa `ContractValidationError` e nomeia somente o contrato, o campo e o requisito
 violado — nunca a resposta bruta, o JSON interpretado, um token, um segredo ou qualquer outro
-conteúdo arbitrário do agente. Não gera id, timestamp ou qualquer valor implícito, e não
-implementa retry, delay, timeout ou fallback: uma rejeição em qualquer passo encerra a tentativa,
-cabendo a `src/agent/retry-policy.ts` e ao chamador decidir e executar uma nova tentativa, se
-houver.
+conteúdo arbitrário do agente ou do adapter. Não gera id, timestamp ou qualquer valor implícito, e
+não implementa retry, delay, timeout ou fallback: uma rejeição em qualquer passo — incluindo uma
+exceção lançada pelo próprio adapter — encerra a tentativa, cabendo a `src/agent/retry-policy.ts`
+e ao chamador decidir e executar uma nova tentativa, se houver.
 
 ## Relatório multiagente offline
 
