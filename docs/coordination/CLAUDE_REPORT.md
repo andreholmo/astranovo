@@ -6016,7 +6016,7 @@ Nenhum bloqueio.
 ### Commit
 
 - **Mensagem:** `fix: valida estruturalmente evaluations, result e rejectionCodes no resumo de ciclos finalizados`
-- **Hash:** (ver commit seguinte, que registra o hash)
+- **Hash:** `06596680c8c6e6ecb8a954117e1b94320f01ae6f`
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
