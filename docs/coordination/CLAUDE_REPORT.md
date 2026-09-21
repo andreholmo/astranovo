@@ -4300,3 +4300,90 @@ Nenhum bloqueio.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit. Não aprovo nem
 mesclo o próprio trabalho.
+
+## TASK-028 — Correção do ciclo 1 de revisão (mudanças solicitadas por André)
+
+- **ID da tarefa:** TASK-028
+- **Motivo:** revisão de André no PR #53 sobre o SHA `500017df03e200edc5e7eb0492574f7d9c713f1f`
+  pediu `CHANGES_REQUESTED` (ciclo 1 de no máximo 3).
+- **Status reportado:** correção executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e nova
+  revisão de André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Bloqueio apontado
+
+`reevaluateResult` recomputava a avaliação de cada entrada a partir de sua `capture` aninhada,
+mas descartava silenciosamente o `status`, `code` e `proposal` que a entrada original
+declarava, confiando só no resultado recomputado. Uma entrada forjada/inconsistente — por
+exemplo, declarada `REJECTED` cuja captura na verdade produz uma proposta válida — era então
+"corrigida" silenciosamente para `ACCEPTED`, em vez de falhar fechado. Os dois testes
+existentes ("recomputes a forged ACCEPTED/REJECTED status...") comprovavam esse comportamento
+como intencional, o que violava o critério de aceite "entrada forjada, inconsistente ...
+falha fechada" e enfraquecia a trilha auditável.
+
+### Correção aplicada
+
+`src/agent/decide-agent-attempt-progress.ts`:
+
+- `reevaluateResult` continua recomputando a avaliação verdadeira a partir da `capture`
+  aninhada via `evaluateAgentResponseCapture`, mas agora chama a nova função
+  `requireDeclaredResultMatchesRecomputed(source, recomputed)` antes de devolver o resultado;
+- essa função exige, fail-closed, que `source.status` seja idêntico ao `recomputed.status`;
+  para `REJECTED`, exige o mesmo `code` e ausência de campo `proposal`; para `ACCEPTED`, exige
+  ausência de campo `code` e que `source.proposal` seja estruturalmente igual, campo a campo
+  (`proposalMatchesRecomputed`), ao `proposal` recomputado — incluindo `evidenceIds` em ordem;
+- qualquer divergência de discriminante, código, proposta ou forma lança
+  `ContractValidationError` via `rejectContract`, que nomeia só contrato/campo/requisito,
+  nunca o valor declarado nem o recomputado — nenhum vazamento;
+- nenhuma classe de erro nova, nenhuma mudança de assinatura pública, nenhuma dependência
+  nova.
+
+`tests/decide-agent-attempt-progress.test.ts`:
+
+- os dois testes que antes comprovavam a aceitação de discriminantes forjados foram
+  **substituídos** por testes que comprovam falha fechada nos mesmos dois cenários (entrada
+  `ACCEPTED` cuja captura rejeita; entrada `REJECTED` cuja captura aceita);
+- adicionados: código de rejeição adulterado; payload `proposal` incompatível presente numa
+  entrada `REJECTED`; campo `proposal` adulterado numa entrada `ACCEPTED`; payload `code`
+  incompatível presente numa entrada `ACCEPTED`; e um teste específico de ausência de
+  vazamento, confirmando que um valor adulterado inserido em `proposal.reason` não aparece na
+  mensagem do `ContractValidationError` lançado.
+
+Nenhum outro arquivo de produção foi alterado. Escopo estritamente offline preservado: nenhuma
+dependência, rede, timer, relógio ou aleatoriedade foi introduzida.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **734 testes, 734 passaram, 0 falharam** (729 preexistentes − 2 substituídos + 7 novos) |
+
+Confirmação específica: os 7 testes novos/substituídos de
+`decideAgentAttemptProgress: forged or structurally invalid results fail closed` passam
+(`fails closed on an entry declared ACCEPTED...`, `...declared REJECTED...`, `...tampered
+rejection code`, `...incompatible proposal payload`, `...tampered proposal field`,
+`...incompatible rejection code payload`, `does not leak the tampered proposal's content...`).
+
+### Limitações conhecidas
+
+As mesmas já registradas na entrega original da TASK-028 permanecem válidas; nenhuma nova
+limitação foi introduzida por esta correção.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova. A pendência sobre `snapshotId` fora da proveniência exigida, registrada na
+entrega original, continua em aberto para confirmação.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: falha fechada em avaliacao forjada de tentativa de agente`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.

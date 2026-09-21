@@ -16,13 +16,17 @@
  * `policy` is revalidated fail-closed via {@link parseAgentRetryPolicy}
  * (`./retry-policy.js`), the same way {@link shouldRetryAgentAttempt} does,
  * rather than trusted as already parsed. Every entry of `results` is
- * similarly never trusted as an already-computed
- * `AgentResponseEvaluation`: only its nested `capture` is read, and the full
- * evaluation is recomputed via {@link evaluateAgentResponseCapture}
- * (`./evaluate-agent-response-capture.js`), which itself revalidates the
- * capture fail-closed via `captureAgentResponse`. A caller-forged `status`,
- * `proposal` or `code` on an entry is therefore never trusted — it is always
- * replaced by the recomputed, trustworthy evaluation.
+ * similarly never trusted as an already-computed `AgentResponseEvaluation`:
+ * its nested `capture` is recomputed from scratch via
+ * {@link evaluateAgentResponseCapture} (`./evaluate-agent-response-capture.js`),
+ * which itself revalidates the capture fail-closed via `captureAgentResponse`.
+ * The entry's own declared `status`, `code` and `proposal` are never trusted
+ * either — they are required to match the recomputed evaluation exactly, field
+ * for field. Any divergence (a forged `status`, a rewritten `code`, an altered
+ * `proposal`, or a payload shape that does not belong to the recomputed
+ * outcome) throws a sanitized `ContractValidationError` rather than silently
+ * substituting the recomputed value: a corrupted or forged entry must fail
+ * closed, not be quietly "corrected".
  *
  * `ATTEMPT_AVAILABLE` and `ATTEMPTS_EXHAUSTED` never carry a capture, a raw
  * response or a proposal — only counts and closed, safe rejection codes.
@@ -32,6 +36,7 @@
  * This module has no clock, no randomness, no I/O and no persistence.
  */
 
+import type { AgentProposal } from "../domain/contracts.js";
 import { rejectContract } from "../domain/errors.js";
 import {
   evaluateAgentResponseCapture,
@@ -55,13 +60,80 @@ function requireObject(value: unknown, contract: string): Record<string, unknown
 }
 
 /**
+ * Structurally compares a caller-declared proposal against the recomputed,
+ * trustworthy one, field for field. Never trusts the declared value's shape:
+ * a non-object, a wrong-length `evidenceIds` or any differing field fails.
+ */
+function proposalMatchesRecomputed(declared: unknown, recomputed: AgentProposal): boolean {
+  if (typeof declared !== "object" || declared === null || Array.isArray(declared)) return false;
+  const candidate = declared as Record<string, unknown>;
+  if (
+    candidate.schemaVersion !== recomputed.schemaVersion ||
+    candidate.proposalId !== recomputed.proposalId ||
+    candidate.cycleId !== recomputed.cycleId ||
+    candidate.agentId !== recomputed.agentId ||
+    candidate.action !== recomputed.action ||
+    candidate.asset !== recomputed.asset ||
+    candidate.confidence !== recomputed.confidence ||
+    candidate.positionPct !== recomputed.positionPct ||
+    candidate.reason !== recomputed.reason ||
+    candidate.veto !== recomputed.veto ||
+    candidate.promptVersion !== recomputed.promptVersion ||
+    candidate.model !== recomputed.model
+  ) {
+    return false;
+  }
+  if (!Array.isArray(candidate.evidenceIds) || candidate.evidenceIds.length !== recomputed.evidenceIds.length) {
+    return false;
+  }
+  return candidate.evidenceIds.every((id, index) => id === recomputed.evidenceIds[index]);
+}
+
+/**
+ * Fails closed unless the entry's own declared `status`, `code` and
+ * `proposal` are exactly consistent with the recomputed, trustworthy
+ * evaluation: same discriminant, same safe code (for `REJECTED`), same
+ * proposal (for `ACCEPTED`), and no payload that belongs to the other
+ * outcome. Never includes the declared or recomputed values in the thrown
+ * error.
+ */
+function requireDeclaredResultMatchesRecomputed(
+  source: Record<string, unknown>,
+  recomputed: AgentResponseEvaluation
+): void {
+  if (source.status !== recomputed.status) {
+    rejectContract(AGENT_ATTEMPT_RESULTS, "status", "must match the recomputed evaluation");
+  }
+  if (recomputed.status === "REJECTED") {
+    if (source.code !== recomputed.code) {
+      rejectContract(AGENT_ATTEMPT_RESULTS, "code", "must match the recomputed rejection code");
+    }
+    if (source.proposal !== undefined) {
+      rejectContract(AGENT_ATTEMPT_RESULTS, "proposal", "must not be present on a REJECTED result");
+    }
+    return;
+  }
+  if (source.code !== undefined) {
+    rejectContract(AGENT_ATTEMPT_RESULTS, "code", "must not be present on an ACCEPTED result");
+  }
+  if (!proposalMatchesRecomputed(source.proposal, recomputed.proposal)) {
+    rejectContract(AGENT_ATTEMPT_RESULTS, "proposal", "must match the recomputed proposal");
+  }
+}
+
+/**
  * Recomputes one entry's evaluation from scratch, using only its nested
- * `capture` — never the caller-supplied `status`, `proposal` or `code`, which
- * a forged entry could set to anything.
+ * `capture`, then requires the entry's own declared `status`, `code` and
+ * `proposal` to be exactly consistent with that recomputed evaluation. A
+ * forged or corrupted entry — one whose declared discriminant, code or
+ * proposal disagrees with what its own capture actually evaluates to —
+ * throws here rather than being silently replaced by the recomputed value.
  */
 function reevaluateResult(value: unknown): AgentResponseEvaluation {
   const source = requireObject(value, AGENT_ATTEMPT_RESULTS);
-  return evaluateAgentResponseCapture(source.capture);
+  const recomputed = evaluateAgentResponseCapture(source.capture);
+  requireDeclaredResultMatchesRecomputed(source, recomputed);
+  return recomputed;
 }
 
 /**
@@ -149,7 +221,9 @@ export type AgentAttemptProgress =
  * 1. revalidates `policy` fail-closed via `parseAgentRetryPolicy`;
  * 2. requires `results` to be an array, then recomputes every entry's
  *    evaluation from its nested `capture` via `evaluateAgentResponseCapture`
- *    — a forged or structurally invalid capture throws here;
+ *    — a forged or structurally invalid capture throws here — and requires
+ *    the entry's own declared `status`, `code` and `proposal` to match that
+ *    recomputed evaluation exactly, throwing on any divergence;
  * 3. fails closed when `results` holds more entries than `policy.maxAttempts`;
  * 4. fails closed when any entry other than the last one is `ACCEPTED`;
  * 5. fails closed unless every capture shares the same `agentId`, `cycleId`,

@@ -892,8 +892,12 @@ desvio possível:
    tipada, exatamente como `shouldRetryAgentAttempt` já faz;
 2. exige que `results` seja um array e **recomputa** cada entrada a partir apenas de sua
    `capture` aninhada, via `evaluateAgentResponseCapture` (`./evaluate-agent-response-capture.ts`)
-   — o `status`, `proposal` ou `code` que a entrada alegava nunca são confiados; uma captura
-   forjada ou estruturalmente inválida lança `ContractValidationError` aqui;
+   — uma captura forjada ou estruturalmente inválida lança `ContractValidationError` aqui — e
+   então exige que o `status`, `code` e `proposal` que a entrada alegava sejam exatamente
+   consistentes com essa avaliação recomputada; qualquer divergência (discriminante, código,
+   proposta ou payload incompatível com o outro desfecho) também lança
+   `ContractValidationError`, fail-closed, em vez de ser silenciosamente substituída pelo valor
+   recomputado;
 3. rejeita fail-closed uma lista com mais entradas que `policy.maxAttempts`;
 4. rejeita fail-closed qualquer entrada diferente da última que seja `ACCEPTED`;
 5. rejeita fail-closed quando as capturas recomputadas não compartilham exatamente o mesmo

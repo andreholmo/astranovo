@@ -275,7 +275,7 @@ describe("decideAgentAttemptProgress: forged or structurally invalid results fai
     );
   });
 
-  it("recomputes a forged ACCEPTED status instead of trusting it: an entry whose real capture fails validation is treated as REJECTED", () => {
+  it("fails closed on an entry declared ACCEPTED whose own capture actually rejects, instead of silently downgrading it", () => {
     const real = rejected("r1", "INVALID_JSON");
     const forged = {
       status: "ACCEPTED",
@@ -283,14 +283,10 @@ describe("decideAgentAttemptProgress: forged or structurally invalid results fai
       proposal: { ...VALID_PROPOSAL }
     } as unknown as AgentResponseEvaluation;
 
-    const progress = decideAgentAttemptProgress(policy(1), [forged]);
-
-    assert.equal(progress.status, "ATTEMPTS_EXHAUSTED");
-    if (progress.status !== "ATTEMPTS_EXHAUSTED") return;
-    assert.deepEqual([...progress.rejectionCodes], ["INVALID_JSON"]);
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
   });
 
-  it("recomputes a forged REJECTED status instead of trusting it: an entry whose real capture actually accepts is treated as ACCEPTED", () => {
+  it("fails closed on an entry declared REJECTED whose own capture actually accepts, instead of silently upgrading it", () => {
     const real = accepted("r1");
     const forged = {
       status: "REJECTED",
@@ -298,9 +294,71 @@ describe("decideAgentAttemptProgress: forged or structurally invalid results fai
       code: "INVALID_JSON"
     } as unknown as AgentResponseEvaluation;
 
-    const progress = decideAgentAttemptProgress(policy(1), [forged]);
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
 
-    assert.equal(progress.status, "ACCEPTED");
+  it("fails closed on a REJECTED entry with a tampered rejection code", () => {
+    const real = rejected("r1", "INVALID_JSON");
+    const forged = {
+      status: "REJECTED",
+      capture: real.capture,
+      code: "INVALID_PROPOSAL"
+    } as unknown as AgentResponseEvaluation;
+
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
+
+  it("fails closed on a REJECTED entry carrying an incompatible proposal payload", () => {
+    const real = rejected("r1", "INVALID_JSON");
+    const forged = {
+      status: "REJECTED",
+      capture: real.capture,
+      code: real.code,
+      proposal: { ...VALID_PROPOSAL }
+    } as unknown as AgentResponseEvaluation;
+
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
+
+  it("fails closed on an ACCEPTED entry with a tampered proposal field", () => {
+    const real = accepted("r1");
+    const forged = {
+      status: "ACCEPTED",
+      capture: real.capture,
+      proposal: { ...real.proposal, positionPct: 0.99, action: "BUY", reason: "tampered" }
+    } as unknown as AgentResponseEvaluation;
+
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
+
+  it("fails closed on an ACCEPTED entry carrying an incompatible rejection code payload", () => {
+    const real = accepted("r1");
+    const forged = {
+      status: "ACCEPTED",
+      capture: real.capture,
+      proposal: real.proposal,
+      code: "INVALID_JSON"
+    } as unknown as AgentResponseEvaluation;
+
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
+
+  it("does not leak the tampered proposal's content in the thrown error", () => {
+    const real = accepted("r1");
+    const secret = "TAMPERED_PROPOSAL_SECRET";
+    const forged = {
+      status: "ACCEPTED",
+      capture: real.capture,
+      proposal: { ...real.proposal, reason: secret }
+    } as unknown as AgentResponseEvaluation;
+
+    try {
+      decideAgentAttemptProgress(policy(1), [forged]);
+      assert.fail("expected decideAgentAttemptProgress to throw");
+    } catch (error) {
+      assert.ok(error instanceof ContractValidationError);
+      assert.ok(!error.message.includes(secret));
+    }
   });
 });
 
