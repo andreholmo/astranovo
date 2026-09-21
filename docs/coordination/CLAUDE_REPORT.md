@@ -4776,6 +4776,133 @@ Nenhum bloqueio.
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
 
+## TASK-031 — finaliza tentativas com hold seguro
+
+- **Status reportado:** entrega executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Criado `src/agent/finalize-bounded-agent-attempts.ts`, definindo `finalizeBoundedAgentAttempts`: a
+menor transformação pura e offline que converte o `BoundedAgentAttemptsResult` já produzido por
+`runBoundedAgentAttempts` (`./run-bounded-agent-attempts.ts`) no resultado final seguro de um
+agente para um ciclo:
+
+```text
+ACCEPTED           → ACCEPTED (proposta aceita preservada, sem alteração)
+ATTEMPTS_EXHAUSTED → HOLD (razão fechada: ATTEMPTS_EXHAUSTED)
+```
+
+Esta função apenas representa uma decisão já tomada pelo laço de retry; não chama
+`AgentAdapter`, `RiskManager` ou `Broker`, não executa retry, não toca carteira/ledger e não tem
+relógio, aleatoriedade, rede, SDK, variável de ambiente ou persistência de qualquer tipo. `HOLD` é
+o substituto seguro e auditável explícito para "nenhuma proposta pôde ser confiada" — nunca
+fabrica `AgentProposal`, preço, posição, confiança ou evidência.
+
+`value` nunca é confiado apenas por seu tipo declarado: todo campo lido é revalidado fail-closed
+em runtime, inclusive uma união inteiramente forjada. Cada avaliação é recomputada do zero a
+partir da sua própria `capture`, via `evaluateAgentResponseCapture`
+(`./evaluate-agent-response-capture.ts`), e o `status`/`code`/`proposal` declarados — e, em
+`ACCEPTED`, o `result` de nível superior — precisam bater exatamente com essa recomputação, sem
+propriedade extra ou faltante (inclusive uma presente apenas com valor `undefined`). Uma união
+`ATTEMPTS_EXHAUSTED` declarada não pode conter uma avaliação `ACCEPTED`; uma união `ACCEPTED`
+declarada não pode conter uma avaliação `ACCEPTED` em posição diferente da última, e seu `result`
+precisa bater exatamente com essa última avaliação. `evaluations` precisa ter entre uma e
+`MAX_AGENT_RETRY_ATTEMPTS` entradas — nunca vazia, nunca acima do que a política jamais
+permitiria.
+
+Toda a revalidação roda dentro de uma única fronteira fail-closed: qualquer exceção lançada ao
+ler ou recomputar um valor forjado — inclusive uma lançada por uma trap de `Proxy` ou getter
+lançador aninhado em qualquer profundidade, já sendo um `ContractValidationError` ou não — é
+convertida, na borda deste módulo, num `ContractValidationError` sanitizado, sem payload,
+mensagem, stack ou causa da exceção original. Isso fecha inclusive o vetor em que
+`captureAgentResponse` (`./capture-agent-response.ts`) lê `request`/`responseId`/`rawResponse`/
+`promptVersion`/`model` por acesso direto de propriedade (sem `readProperty`): um `capture`
+forjado, agora aceito de uma fonte externa e potencialmente adversária, poderia antes lançar um
+segredo bruto por essa via.
+
+Reutiliza `evaluateAgentResponseCapture` para a recomputação e `MIN_AGENT_RETRY_ATTEMPTS`/
+`MAX_AGENT_RETRY_ATTEMPTS` (`./retry-policy.ts`) para o limite de entradas, em vez de duplicar a
+lógica de nenhum dos dois módulos. Nenhum contrato público de `runBoundedAgentAttempts`,
+`evaluateAgentResponseCapture` ou `AgentRetryPolicy` foi alterado. `StubAgentAdapter` não foi
+tocado.
+
+### Arquivos alterados
+
+- `src/agent/finalize-bounded-agent-attempts.ts` (novo — `finalizeBoundedAgentAttempts` e seus
+  tipos)
+- `tests/finalize-bounded-agent-attempts.test.ts` (novo — suíte completa)
+- `README.md` (nova entrada na lista de arquivos e atualização da frase de M4)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- converte `ACCEPTED` preservando proposta, captura, histórico e ordem, na primeira tentativa e
+  após rejeições;
+- converte `ATTEMPTS_EXHAUSTED` em `HOLD` com razão fechada `ATTEMPTS_EXHAUSTED` e códigos
+  alinhados, para 1, 2 e 3 rejeições;
+- nunca fabrica `AgentProposal`, preço, posição, confiança ou evidência no ramo `HOLD` (o tipo
+  `FinalizedHoldAgentAttempts` não tem `result`, e suas avaliações nunca têm `proposal`);
+- resultado e listas retornadas são congelados (`Object.isFrozen`) em ambos os ramos;
+- entrada não é mutada em nenhum dos dois ramos;
+- rejeita união adulterada: status inválido, entrada `null`/array, resultado aceito divergente
+  (capture diferente ou proposta alterada), avaliação `ACCEPTED` dentro do ramo
+  `ATTEMPTS_EXHAUSTED`, código divergente (no `rejectionCodes` de nível superior ou numa entrada
+  individual), lista de avaliações vazia ou acima do limite de três (em ambos os ramos), avaliação
+  `ACCEPTED` fora da última posição, e `result` que não corresponde à última avaliação
+  efetivamente aceita;
+- rejeita propriedade extra e faltante no objeto de nível superior e em cada entrada de
+  avaliação, inclusive quando presente com valor `undefined`, e propriedade extra numa proposta;
+- getters e `Proxy` forjados no `status`, em `evaluations` (incluindo um `Proxy` sobre um array
+  real), em `result`, na `capture` de uma entrada e num campo interno de uma `capture` (`responseId`)
+  falham com `ContractValidationError` sanitizado, sem vazar o segredo lançado;
+- mesma entrada válida produz resultado campo a campo idêntico, em `ACCEPTED` e em `HOLD`;
+- nenhuma chamada a adapter, retry, timer, relógio, aleatoriedade, HTTP, SDK, ambiente,
+  persistência ou I/O — verificado inclusive substituindo `Date.now`, `Math.random`,
+  `setTimeout` e `fetch` por versões que lançam;
+- toda a suíte anterior continua verde.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **864 testes, 864 passaram, 0 falharam** (823 anteriores + 41 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas nas entregas anteriores de `src/agent`. Esta tarefa não executa
+tentativa, não cria coordenador multiagente, Risk Manager, `PaperBroker`, fill, carteira, ledger,
+persistência, logs externos, provider de mercado, integração Astra real, timeout, backoff ou
+agendamento — nada disso estava no escopo de TASK-031. A conversão de qualquer exceção
+não-`ContractValidationError` (por exemplo, uma vinda de um getter/`Proxy` forjado em qualquer
+profundidade dentro de `value`) num `ContractValidationError` genérico, na borda de
+`finalizeBoundedAgentAttempts`, é intencional e documentada no cabeçalho do módulo: garante que
+nenhum segredo escape, ao custo de uma mensagem de erro menos específica nesses casos forjados —
+nunca nos casos de estrutura genuinamente inválida, que continuam recebendo mensagens específicas
+por campo.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: finaliza tentativas com hold seguro`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
+
 ## TASK-030 — correção 1/3 da revisão `REQUEST_CHANGES` (PR #57, SHA `55b55bd`)
 
 - **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
@@ -4958,6 +5085,200 @@ Nenhum bloqueio.
 ### Commit
 
 - **Mensagem:** conforme instrução do comentário `@claude` no PR #57.
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
+
+## TASK-031 — correção 1/3 da revisão `REQUEST_CHANGES` (PR #59, SHA `08072b9`)
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Corrigidos os três bloqueios apontados na revisão `REQUEST_CHANGES` de André no PR #59 sobre o
+SHA `08072b946b72078b89ef2d0679f083134fb991e3`, em `src/agent/finalize-bounded-agent-attempts.ts`,
+sem ampliar o escopo de TASK-031 e sem alterar nenhuma mensagem pública já existente:
+
+1. **`ContractValidationError` lançado por um `Proxy`/getter hostil não é mais confiado cegamente.**
+   `requireExactOwnKeys` chamava `Object.keys(value)` diretamente e `proposalMatches` chamava
+   `Object.keys(declared)`/`evidenceIds.every(...)` diretamente — nenhuma dessas três leituras
+   passava por `readProperty`/`readSafe`. Um `Proxy` cuja trap `ownKeys` (ou cujo trap `get`
+   acessado durante o `.every`) lançasse deliberadamente `new ContractValidationError(...)` com um
+   segredo escapava sem sanitização: a fronteira externa reconhece `instanceof
+   ContractValidationError` e relança a mensagem original, confiando na classe da exceção mesmo
+   quando ela se origina de dado hostil. As três leituras agora passam por operações protegidas
+   (`safeOwnKeys`/`hasExactOwnKeys`, que nunca relançam o que a trap lançar, convertendo qualquer
+   exceção — inclusive um `ContractValidationError` forjado — no mesmo `ContractValidationError`
+   fixo e seguro que a estrutura genuinamente incompatível já produzia) e `evidenceIdsMatch`, que lê
+   cada índice via `readSafe`.
+2. **`requireExactOwnKeys` agora usa `Reflect.ownKeys` em vez de `Object.keys`.** `Object.keys`
+   ignora propriedades próprias não enumeráveis e símbolos, então uma entrada podia carregar uma
+   propriedade extra oculta dessa forma e ainda ser aceita como união exatamente fechada.
+   `safeOwnKeys`/`hasExactOwnKeys` (compartilhado agora por `requireExactOwnKeys` e por
+   `proposalMatches`) usam `Reflect.ownKeys`, que enumera toda chave própria — enumerável ou não,
+   string ou `Symbol` — e rejeitam qualquer extra desse tipo tanto no objeto de nível superior/
+   entrada de avaliação quanto na proposta declarada.
+3. **`proposalMatches` não usa mais `evidenceIds.every` para comparar `evidenceIds`.** Um array
+   esparso com o mesmo `length` do esperado passava porque `.every` pula posições vazias
+   silenciosamente, tratando a ausência de um id exigido como aprovação vácua. A nova função
+   `evidenceIdsMatch` compara por índice via `readSafe`, onde um buraco (ou uma leitura que lança)
+   é tratado exatamente como `undefined`, que nunca é igual a um id de evidência real.
+
+Como efeito colateral direto dessas três correções, `proposalMatches` também passou a ler todos os
+demais campos do `proposal` declarado (`schemaVersion`, `proposalId`, `action`, etc.) via
+`readSafe` em vez de acesso direto de propriedade, fechando o último ponto deste módulo em que um
+getter/`Proxy` hostil dentro do `proposal` declarado poderia lançar sem sanitização.
+
+### Arquivos alterados
+
+- `src/agent/finalize-bounded-agent-attempts.ts` (`safeOwnKeys`, `hasExactOwnKeys`,
+  `evidenceIdsMatch` novos; `requireExactOwnKeys` e `proposalMatches` reescritos sobre eles)
+- `tests/finalize-bounded-agent-attempts.test.ts` (sete novos testes de regressão)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- `Proxy` hostil cuja trap `ownKeys` no objeto de nível superior lança um `ContractValidationError`
+  contendo um segredo: a chamada falha com um `ContractValidationError` sanitizado (mensagem sem o
+  segredo);
+- o mesmo ataque, agora na trap `ownKeys` de um `proposal` declarado dentro do resultado aceito;
+- `Proxy` hostil sobre `evidenceIds` cuja trap `get` lança um `ContractValidationError` contendo um
+  segredo para qualquer índice: mesma sanitização;
+- união de nível superior com propriedade extra não enumerável: rejeitada;
+- união de nível superior com propriedade extra por `Symbol`: rejeitada;
+- `proposal` declarado com propriedade extra não enumerável: rejeitado;
+- `evidenceIds` esparso (mesmo `length` do esperado, mas com buraco no lugar de um id exigido):
+  rejeitado.
+
+Os três primeiros reproduzem exatamente o cenário do bloqueio 1 (incluindo a variante em que o
+próprio `ContractValidationError` é a arma); os dois seguintes reproduzem o bloqueio 2; o último
+reproduz o bloqueio 3. Cada um falha na versão anterior do código e passa após a correção.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **871 testes, 871 passaram, 0 falharam** (864 anteriores + 7 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas na entrega original de TASK-031. Esta correção não altera o
+contrato público de `finalizeBoundedAgentAttempts`, `runBoundedAgentAttempts` ou
+`evaluateAgentResponseCapture`, não amplia `StubAgentAdapter` e não introduz rede, persistência,
+credencial ou rota financeira. Nenhuma mensagem de erro pública mudou para estruturas
+genuinamente inválidas (não forjadas via `Proxy`/getter): elas continuam recebendo as mesmas
+mensagens específicas por campo de antes desta correção.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** conforme instrução do comentário `@claude` no PR #59.
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
+
+## TASK-031 — correção 2/3 da revisão `REQUEST_CHANGES` (PR #59, SHA `5f917e6`)
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Corrigido o bloqueio 2/3 apontado por André na revisão `REQUEST_CHANGES` do PR #59 sobre o SHA
+`5f917e6175791e8aa6f577e523c765ad4e5a54f9`, em `src/agent/finalize-bounded-agent-attempts.ts`,
+sem ampliar o escopo de TASK-031, sem alterar `captureAgentResponse` e sem alterar nenhuma
+mensagem pública já existente para estruturas genuinamente inválidas (não forjadas).
+
+**A rota profunda de vazamento:** `recomputeDeclaredEvaluation` entregava a `capture` declarada
+diretamente a `evaluateAgentResponseCapture`, que a repassa a `captureAgentResponse`
+(`src/agent/capture-agent-response.ts`). Esse módulo lê `source.request`, `source.responseId`,
+`source.rawResponse`, `source.promptVersion` e `source.model` por acesso direto de propriedade —
+por design, já que sua própria fronteira confia no chamador imediato. Como o chamador de
+`finalizeBoundedAgentAttempts` não é confiável, uma `capture` declarada com um getter/`Proxy`
+lançando deliberadamente `new ContractValidationError(...)` com um segredo em qualquer um desses
+cinco campos chegava ao `catch` externo de `finalizeBoundedAgentAttempts`, era reconhecida por
+`instanceof ContractValidationError` e era relançada sem sanitização — vazando o segredo pela
+borda pública da função.
+
+**Correção:** nova função `sanitizeCaptureCandidate`, chamada em `recomputeDeclaredEvaluation`
+antes de `evaluateAgentResponseCapture`. Para um `value` que seja objeto (não array, não nulo),
+ela lê cada um dos cinco campos de nível superior (`request`, `responseId`, `rawResponse`,
+`promptVersion`, `model`) através de `readSafe` — que já existia neste módulo e nunca relança o
+que uma leitura lançar — e monta um objeto simples novo, totalmente controlado por este módulo,
+com esses cinco valores. Uma leitura que lance qualquer coisa (incluindo um
+`ContractValidationError` forjado com segredo) vira `undefined` nesse objeto simples, que
+`captureAgentResponse` já rejeita do mesmo jeito que rejeitaria o campo genuinamente ausente — com
+a mesma mensagem específica de sempre, sem nada do valor original lançado. Um `value` que não seja
+objeto (ou que seja array) passa inalterado, preservando exatamente a checagem "deve ser um objeto
+JSON" que `captureAgentResponse` já fazia. Os campos próprios de `request` não precisam de proteção
+adicional aqui: `parseAgentRequest` já lê cada um deles via `readProperty`
+(`src/agent/agent-adapter.ts`), que tem a mesma garantia de não relançar.
+
+### Arquivos alterados
+
+- `src/agent/finalize-bounded-agent-attempts.ts` (`sanitizeCaptureCandidate` novo;
+  `recomputeDeclaredEvaluation` passa a sanitizar a `capture` declarada antes de recomputar)
+- `tests/finalize-bounded-agent-attempts.test.ts` (dois novos testes de regressão)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- getter profundo em `capture.responseId` lançando `ContractValidationError` contendo um segredo:
+  sanitizado (mensagem final sem o segredo);
+- getter profundo em `capture.request` lançando `ContractValidationError` contendo um segredo:
+  sanitizado.
+
+Ambos falham na versão anterior do código (SHA `5f917e6`) — verifiquei revertendo localmente só a
+lógica de `sanitizeCaptureCandidate` para um passthrough antes de rodar a suíte, confirmando que os
+dois novos testes falham exatamente como o bloqueio 2/3 descreve, e voltam a passar com a correção
+restaurada — e passam após a correção.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **873 testes, 873 passaram, 0 falharam** (871 anteriores + 2 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas nas entregas anteriores de TASK-031. Esta correção não altera o
+contrato público de `finalizeBoundedAgentAttempts`, `evaluateAgentResponseCapture` ou
+`captureAgentResponse` (não modificado, conforme pedido pela própria revisão), não amplia
+`StubAgentAdapter` e não introduz rede, persistência, credencial ou rota financeira.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** conforme instrução do comentário `@claude` no PR #59.
 - **Hash:** informado a André na resposta após o push.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
