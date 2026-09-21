@@ -26,29 +26,42 @@
  * single closed value `AGENT_CYCLE_FAILED`. A `COMPLETED` entry's nested
  * `result` is read only far enough to discriminate `ACCEPTED` from `HOLD`,
  * confirm it carries exactly the closed set of properties that outcome
- * allows, and confirm each required property has the basic shape/value its
- * own closed union demands — `HOLD`'s `reason` equal to the single closed
- * value `ATTEMPTS_EXHAUSTED`; `evaluations` (both outcomes) a dense array,
- * with no extra property anywhere on it, holding between one and
+ * allows, and confirm each required property has the closed shape/value its
+ * own union demands — `HOLD`'s `reason` equal to the single closed value
+ * `ATTEMPTS_EXHAUSTED`; `evaluations` (both outcomes) a dense array, with no
+ * extra property anywhere on it, holding between one and
  * `MAX_AGENT_RETRY_ATTEMPTS` entries, each entry itself a JSON object with
  * exactly the closed set of properties its own `status` allows (`REJECTED`:
  * `status`/`capture`/`code` with `code` one of the closed
  * `AgentResponseRejectionCode` values; `ACCEPTED`: `status`/`capture`/`proposal`),
- * with `capture`/`proposal` required only to be JSON objects; `ACCEPTED`'s
- * `result` the same closed `ACCEPTED`-evaluation shape; `HOLD`'s
- * `evaluations` entries every one `REJECTED`-shaped, and its `rejectionCodes`
- * a dense array, with no extra property anywhere on it, matching those
- * entries' own declared `code`s exactly, in count and order. None of this
- * recomputes an attempt or a result: a `capture`'s or `proposal`'s own nested
- * fields are never read, `evaluateAgentResponseCapture` is never called
- * again, and nothing here confirms a `capture` genuinely produced the
- * `proposal`/`code` sitting beside it — only that the shapes are internally
- * consistent and closed. This module never duplicates
+ * with `capture`/`proposal` each required to carry their own closed public
+ * shape — `capture` exactly `AgentResponseCapture`'s own keys, `request`
+ * itself closed-shaped; `proposal` exactly `AgentProposal`'s own keys, with
+ * `action` one of the closed proposal actions and `evidenceIds` a dense array
+ * of strings with no extra property anywhere on it. For `ACCEPTED`: only the
+ * last `evaluations` entry may itself be `ACCEPTED` — every earlier one must
+ * be `REJECTED` — and `result` must carry the same closed `ACCEPTED`-shape
+ * and match that last evaluation's `capture`/`proposal` field for field,
+ * exactly; a `result` with the right shape but different content, or an
+ * `evaluations` list that never reaches (or reaches early, or more than once)
+ * an `ACCEPTED` entry, both fail closed. `HOLD`'s `evaluations` entries are
+ * every one `REJECTED`-shaped, and its `rejectionCodes` a dense array, with no
+ * extra property anywhere on it, matching those entries' own declared `code`s
+ * exactly, in count and order. None of this recomputes an attempt or a
+ * result: `evaluateAgentResponseCapture`, `captureAgentResponse` and
+ * `parseAgentProposal` are never called, and nothing here confirms a
+ * `capture` genuinely produced the `proposal`/`code` sitting beside it, or
+ * that a `rawResponse` decodes to anything at all — only that every shape is
+ * internally consistent, closed, and — for `ACCEPTED` — that `result` and the
+ * last evaluation structurally agree. This module never duplicates
  * `finalizeBoundedAgentAttempts`'s own recomputation-based revalidation;
  * exactly like `runFinalizedAgentCycles` intentionally leaves each item's
  * `request` unvalidated at its own boundary, this module intentionally
- * leaves every `capture`'s and `proposal`'s nested content unvalidated at
- * this boundary, because that content is never read, copied or exposed here.
+ * leaves every `capture`'s `rawResponse` content and `request`'s business
+ * rules (slug/identifier patterns, length bounds) unvalidated at this
+ * boundary, because that content is never interpreted, copied or exposed
+ * here — only compared, field for field, against another equally
+ * shape-validated value from the same untrusted input.
  *
  * Every read of the untrusted batch — its `length`, each index, each item's
  * and each nested `result`'s own keys and fields — goes through the same
@@ -69,6 +82,7 @@
  * wallet, blockchain, testnet, exchange or real money.
  */
 
+import { PROPOSAL_ACTIONS } from "../domain/contracts.js";
 import { ContractValidationError, rejectContract } from "../domain/errors.js";
 import { AGENT_RESPONSE_REJECTION_CODES, type AgentResponseRejectionCode } from "./evaluate-agent-response-capture.js";
 import { readProperty, requireBoundedText, requireInputObject } from "./internal/attempt-input-validation.js";
@@ -95,6 +109,29 @@ const HOLD_RESULT_REASON = "ATTEMPTS_EXHAUSTED";
 /** Exact own keys one `evaluations` entry may have for each discriminant. Mirrors `finalize-bounded-agent-attempts.ts`'s closed shapes without importing its private constants. */
 const REJECTED_EVALUATION_KEYS = ["status", "capture", "code"] as const;
 const ACCEPTED_EVALUATION_KEYS = ["status", "capture", "proposal"] as const;
+
+/** Exact own keys an `AgentRequest` may have. Mirrors `agent-adapter.ts`'s closed shape without importing its private validators. */
+const REQUEST_KEYS = ["schemaVersion", "agentId", "cycleId", "snapshotId"] as const;
+
+/** Exact own keys an `AgentResponseCapture` may have. Mirrors `capture-agent-response.ts`'s closed shape without importing its private validators. */
+const CAPTURE_KEYS = ["request", "responseId", "rawResponse", "promptVersion", "model"] as const;
+
+/** Exact own keys an `AgentProposal` may have. Mirrors `src/domain/contracts.ts`'s closed shape without importing its private validators. */
+const PROPOSAL_KEYS = [
+  "schemaVersion",
+  "proposalId",
+  "cycleId",
+  "agentId",
+  "action",
+  "asset",
+  "confidence",
+  "positionPct",
+  "reason",
+  "veto",
+  "evidenceIds",
+  "promptVersion",
+  "model"
+] as const;
 
 /** Immutable, closed, frozen summary of a finalized batch: counts plus ordered `itemId` lists per category. Observability/audit only. */
 export interface FinalizedAgentCyclesSummary {
@@ -196,6 +233,190 @@ function isKnownRejectionCode(value: unknown): value is AgentResponseRejectionCo
   return typeof value === "string" && (AGENT_RESPONSE_REJECTION_CODES as readonly string[]).includes(value);
 }
 
+/** The `agentId`/`cycleId`/`snapshotId` triple that identifies an `AgentRequest`, validated only shape-wise — never recomputed against a real request. */
+interface ValidatedRequestFields {
+  readonly agentId: string;
+  readonly cycleId: string;
+  readonly snapshotId: string;
+}
+
+/** A `capture`'s closed public fields, validated shape-wise only — never recomputed with `captureAgentResponse`. */
+interface ValidatedCaptureFields {
+  readonly request: ValidatedRequestFields;
+  readonly responseId: string;
+  readonly rawResponse: string;
+  readonly promptVersion: string;
+  readonly model: string;
+}
+
+/** A `proposal`'s closed public fields, validated shape-wise only — never recomputed with `parseAgentProposal`. */
+interface ValidatedProposalFields {
+  readonly proposalId: string;
+  readonly cycleId: string;
+  readonly agentId: string;
+  readonly action: string;
+  readonly asset: string;
+  readonly confidence: number;
+  readonly positionPct: number;
+  readonly reason: string;
+  readonly veto: boolean;
+  readonly evidenceIds: readonly string[];
+  readonly promptVersion: string;
+  readonly model: string;
+}
+
+/** Fails closed unless `value` is a non-empty string. Never bounds its length or inspects its content beyond that: length/pattern limits belong to the real parsers this module never calls. */
+function requireNonEmptyString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "must be a non-empty string");
+  }
+  return value;
+}
+
+/**
+ * Validates a declared `request`'s closed public shape — exactly `AgentRequest`'s
+ * own keys, a `schemaVersion` equal to the single closed value `1`, and
+ * `agentId`/`cycleId`/`snapshotId` each a non-empty string. Never calls
+ * `parseAgentRequest`: this confirms the value is shape-consistent, not that it
+ * was genuinely produced by a real request.
+ */
+function requireClosedRequestShape(value: unknown, field: string): ValidatedRequestFields {
+  if (!isJsonObject(value)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "request must be a JSON object");
+  }
+  if (!hasExactOwnKeys(value, REQUEST_KEYS)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "request must have exactly the expected properties");
+  }
+  if (readProperty(value, "schemaVersion") !== 1) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "request schemaVersion must be exactly 1");
+  }
+  return {
+    agentId: requireNonEmptyString(readProperty(value, "agentId"), field),
+    cycleId: requireNonEmptyString(readProperty(value, "cycleId"), field),
+    snapshotId: requireNonEmptyString(readProperty(value, "snapshotId"), field)
+  };
+}
+
+/**
+ * Validates a declared `capture`'s closed public shape — exactly
+ * `AgentResponseCapture`'s own keys, with `request` itself closed-shaped and
+ * `responseId`/`rawResponse`/`promptVersion`/`model` each a non-empty string.
+ * Never calls `captureAgentResponse` and never inspects `rawResponse`'s
+ * content: this confirms the value is shape-consistent, not that it was
+ * genuinely produced by a real capture.
+ */
+function requireClosedCaptureShape(value: unknown, field: string): ValidatedCaptureFields {
+  if (!isJsonObject(value)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "capture must be a JSON object");
+  }
+  if (!hasExactOwnKeys(value, CAPTURE_KEYS)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "capture must have exactly the expected properties");
+  }
+  return {
+    request: requireClosedRequestShape(readProperty(value, "request"), field),
+    responseId: requireNonEmptyString(readProperty(value, "responseId"), field),
+    rawResponse: requireNonEmptyString(readProperty(value, "rawResponse"), field),
+    promptVersion: requireNonEmptyString(readProperty(value, "promptVersion"), field),
+    model: requireNonEmptyString(readProperty(value, "model"), field)
+  };
+}
+
+/** {@link requireDenseArrayEntries} for a `proposal`'s `evidenceIds`, additionally requiring every entry to be a non-empty string. */
+function requireClosedEvidenceIds(value: unknown, field: string): readonly string[] {
+  return requireDenseArrayEntries(value, field).map((entry) => requireNonEmptyString(entry, field));
+}
+
+/**
+ * Validates a declared `proposal`'s closed public shape — exactly
+ * `AgentProposal`'s own keys, with `schemaVersion` equal to the single closed
+ * value `1`, `action` one of the closed {@link PROPOSAL_ACTIONS} values,
+ * `confidence`/`positionPct` finite numbers, `veto` a boolean, `evidenceIds` a
+ * dense array of non-empty strings with no extra property anywhere on it, and
+ * every remaining field a non-empty string. Never calls `parseAgentProposal`:
+ * this confirms the value is shape-consistent, not that it was genuinely
+ * produced by a real proposal.
+ */
+function requireClosedProposalShape(value: unknown, field: string): ValidatedProposalFields {
+  if (!isJsonObject(value)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "proposal must be a JSON object");
+  }
+  if (!hasExactOwnKeys(value, PROPOSAL_KEYS)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "proposal must have exactly the expected properties");
+  }
+  if (readProperty(value, "schemaVersion") !== 1) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "proposal schemaVersion must be exactly 1");
+  }
+  const action = readProperty(value, "action");
+  if (typeof action !== "string" || !(PROPOSAL_ACTIONS as readonly string[]).includes(action)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "proposal action must be a closed action value");
+  }
+  const confidence = readProperty(value, "confidence");
+  if (typeof confidence !== "number" || !Number.isFinite(confidence)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "proposal confidence must be a finite number");
+  }
+  const positionPct = readProperty(value, "positionPct");
+  if (typeof positionPct !== "number" || !Number.isFinite(positionPct)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "proposal positionPct must be a finite number");
+  }
+  const veto = readProperty(value, "veto");
+  if (typeof veto !== "boolean") {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "proposal veto must be a boolean");
+  }
+  return {
+    proposalId: requireNonEmptyString(readProperty(value, "proposalId"), field),
+    cycleId: requireNonEmptyString(readProperty(value, "cycleId"), field),
+    agentId: requireNonEmptyString(readProperty(value, "agentId"), field),
+    action,
+    asset: requireNonEmptyString(readProperty(value, "asset"), field),
+    confidence,
+    positionPct,
+    reason: requireNonEmptyString(readProperty(value, "reason"), field),
+    veto,
+    evidenceIds: requireClosedEvidenceIds(readProperty(value, "evidenceIds"), field),
+    promptVersion: requireNonEmptyString(readProperty(value, "promptVersion"), field),
+    model: requireNonEmptyString(readProperty(value, "model"), field)
+  };
+}
+
+/** Structural equality between two already shape-validated {@link ValidatedRequestFields}. */
+function requestFieldsEqual(a: ValidatedRequestFields, b: ValidatedRequestFields): boolean {
+  return a.agentId === b.agentId && a.cycleId === b.cycleId && a.snapshotId === b.snapshotId;
+}
+
+/** Structural equality between two already shape-validated {@link ValidatedCaptureFields}. */
+function captureFieldsEqual(a: ValidatedCaptureFields, b: ValidatedCaptureFields): boolean {
+  return (
+    a.responseId === b.responseId &&
+    a.rawResponse === b.rawResponse &&
+    a.promptVersion === b.promptVersion &&
+    a.model === b.model &&
+    requestFieldsEqual(a.request, b.request)
+  );
+}
+
+/** Element-wise equality between two already shape-validated `evidenceIds` lists, order-sensitive. */
+function evidenceIdsEqual(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
+/** Structural equality between two already shape-validated {@link ValidatedProposalFields}. */
+function proposalFieldsEqual(a: ValidatedProposalFields, b: ValidatedProposalFields): boolean {
+  return (
+    a.proposalId === b.proposalId &&
+    a.cycleId === b.cycleId &&
+    a.agentId === b.agentId &&
+    a.action === b.action &&
+    a.asset === b.asset &&
+    a.confidence === b.confidence &&
+    a.positionPct === b.positionPct &&
+    a.reason === b.reason &&
+    a.veto === b.veto &&
+    a.promptVersion === b.promptVersion &&
+    a.model === b.model &&
+    evidenceIdsEqual(a.evidenceIds, b.evidenceIds)
+  );
+}
+
 /**
  * Reads `value` as a dense array — exactly `"length"` plus each canonical
  * index, nothing more, checked the same fail-closed, declared-length-agnostic
@@ -236,18 +457,39 @@ function requireEvaluationEntries(value: unknown): readonly unknown[] {
   return entries;
 }
 
+/** One `evaluations` entry (or `ACCEPTED.result`), validated to its own closed shape, `REJECTED`-shaped. */
+interface RejectedEvaluationShape {
+  readonly status: "REJECTED";
+  readonly capture: ValidatedCaptureFields;
+  readonly code: AgentResponseRejectionCode;
+}
+
+/** One `evaluations` entry (or `ACCEPTED.result`), validated to its own closed shape, `ACCEPTED`-shaped. */
+interface AcceptedEvaluationShape {
+  readonly status: "ACCEPTED";
+  readonly capture: ValidatedCaptureFields;
+  readonly proposal: ValidatedProposalFields;
+}
+
+type ValidatedEvaluationShape = RejectedEvaluationShape | AcceptedEvaluationShape;
+
+/** Whether two already shape-validated `ACCEPTED` evaluation shapes are field-for-field equal. */
+function acceptedEvaluationShapesMatch(a: AcceptedEvaluationShape, b: AcceptedEvaluationShape): boolean {
+  return captureFieldsEqual(a.capture, b.capture) && proposalFieldsEqual(a.proposal, b.proposal);
+}
+
 /**
  * Validates one `evaluations` entry's own closed shape, purely structurally
  * and without recomputing anything: a JSON object with exactly the closed
  * set of properties its own declared `status` allows — `REJECTED` with
  * `code` one of the closed {@link AGENT_RESPONSE_REJECTION_CODES} values,
- * `ACCEPTED` with `proposal` at least a JSON object — and `capture` at least
- * a JSON object in both cases. Never reads a nested field of `capture` or
- * `proposal`, and never calls `evaluateAgentResponseCapture`: this confirms
- * the entry is internally shape-consistent, not that it was genuinely
- * produced by evaluating a real capture.
+ * `ACCEPTED` with `proposal` closed-shaped — and `capture` closed-shaped in
+ * both cases. Never calls `evaluateAgentResponseCapture`, `captureAgentResponse`
+ * or `parseAgentProposal`: this confirms the entry is internally
+ * shape-consistent, not that it was genuinely produced by evaluating a real
+ * capture.
  */
-function requireEvaluationEntryShape(value: unknown, field: string): "ACCEPTED" | "REJECTED" {
+function requireEvaluationEntryShape(value: unknown, field: string): ValidatedEvaluationShape {
   if (!isJsonObject(value)) {
     rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "each entry must be a JSON object");
   }
@@ -256,25 +498,20 @@ function requireEvaluationEntryShape(value: unknown, field: string): "ACCEPTED" 
     if (!hasExactOwnKeys(value, REJECTED_EVALUATION_KEYS)) {
       rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "must have exactly the expected REJECTED evaluation properties");
     }
-    if (!isJsonObject(readProperty(value, "capture"))) {
-      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "capture must be a JSON object");
-    }
-    if (!isKnownRejectionCode(readProperty(value, "code"))) {
+    const capture = requireClosedCaptureShape(readProperty(value, "capture"), field);
+    const code = readProperty(value, "code");
+    if (!isKnownRejectionCode(code)) {
       rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "code must be a closed rejection code");
     }
-    return "REJECTED";
+    return { status: "REJECTED", capture, code };
   }
   if (status === "ACCEPTED") {
     if (!hasExactOwnKeys(value, ACCEPTED_EVALUATION_KEYS)) {
       rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "must have exactly the expected ACCEPTED evaluation properties");
     }
-    if (!isJsonObject(readProperty(value, "capture"))) {
-      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "capture must be a JSON object");
-    }
-    if (!isJsonObject(readProperty(value, "proposal"))) {
-      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "proposal must be a JSON object");
-    }
-    return "ACCEPTED";
+    const capture = requireClosedCaptureShape(readProperty(value, "capture"), field);
+    const proposal = requireClosedProposalShape(readProperty(value, "proposal"), field);
+    return { status: "ACCEPTED", capture, proposal };
   }
   rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "status must be ACCEPTED or REJECTED");
 }
@@ -293,21 +530,27 @@ interface ValidatedSummaryItem {
  * far enough to discriminate `ACCEPTED` from `HOLD`, to confirm it carries
  * exactly the closed set of properties that discriminant allows, and to
  * confirm each required property has the closed shape/value its own union
- * demands — never a `capture`'s or `proposal`'s nested *content*, and never
- * copied into the summary.
+ * demands — never a `capture`'s `rawResponse` content, and never copied into
+ * the summary.
  *
  * A closed union member is not "revalidated" by checking only its top-level
  * key set: `HOLD`'s `reason` must be the single closed value
  * `ATTEMPTS_EXHAUSTED` — never arbitrary free text; `evaluations` (both
  * outcomes) must be a dense array of one to `MAX_AGENT_RETRY_ATTEMPTS`
- * entries, each itself closed-shaped and, for `HOLD`, `REJECTED`-shaped with
- * a closed rejection code; `ACCEPTED`'s `result` must carry the same closed
- * `ACCEPTED`-evaluation shape; `HOLD`'s `rejectionCodes` must be a dense
- * array matching the declared evaluations' own codes exactly, in count and
- * order. Checking this remains strictly shallower than
- * `finalize-bounded-agent-attempts.ts`'s own recomputation: it never reads
- * what is inside any `capture` or `proposal`, and never calls
- * `evaluateAgentResponseCapture`.
+ * entries, each itself closed-shaped, with `capture`/`proposal` each their
+ * own closed public shape, and, for `HOLD`, every entry `REJECTED`-shaped
+ * with a closed rejection code. For `ACCEPTED`: an `evaluations` entry may
+ * only be `ACCEPTED`-shaped in the last position — an earlier one, or more
+ * than one, fails closed — the last entry must exist and be `ACCEPTED`, and
+ * `result` must itself be `ACCEPTED`-shaped and structurally identical to
+ * that last entry's `capture` and `proposal`, field for field; a
+ * `result` carrying a different capture/proposal, an all-`REJECTED`
+ * `evaluations` list, or an `ACCEPTED` evaluation anywhere but last, all fail
+ * closed. `HOLD`'s `rejectionCodes` must be a dense array matching the
+ * declared evaluations' own codes exactly, in count and order. Checking this
+ * remains strictly shallower than `finalize-bounded-agent-attempts.ts`'s own
+ * recomputation: it never reads what is inside any `capture`'s
+ * `rawResponse`, and never calls `evaluateAgentResponseCapture`.
  */
 function classifyCompletedResult(value: unknown): "ACCEPTED" | "HOLD" {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -319,10 +562,23 @@ function classifyCompletedResult(value: unknown): "ACCEPTED" | "HOLD" {
       rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "must have exactly the expected ACCEPTED properties");
     }
     const evaluationEntries = requireEvaluationEntries(readProperty(value, "evaluations"));
-    evaluationEntries.forEach((entry) => requireEvaluationEntryShape(entry, "evaluations"));
-    const acceptedResult = readProperty(value, "result");
-    if (requireEvaluationEntryShape(acceptedResult, "result") !== "ACCEPTED") {
-      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "result must be an ACCEPTED evaluation");
+    const evaluationShapes = evaluationEntries.map((entry) => requireEvaluationEntryShape(entry, "evaluations"));
+    evaluationShapes.forEach((shape, index) => {
+      if (shape.status === "ACCEPTED" && index !== evaluationShapes.length - 1) {
+        rejectContract(
+          SUMMARIZE_FINALIZED_AGENT_CYCLES,
+          "evaluations",
+          "must not contain an ACCEPTED evaluation before the last entry"
+        );
+      }
+    });
+    const last = evaluationShapes[evaluationShapes.length - 1];
+    if (last === undefined || last.status !== "ACCEPTED") {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "evaluations", "must end with an ACCEPTED evaluation");
+    }
+    const resultShape = requireEvaluationEntryShape(readProperty(value, "result"), "result");
+    if (resultShape.status !== "ACCEPTED" || !acceptedEvaluationShapesMatch(resultShape, last)) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "must match the last accepted evaluation exactly");
     }
     return "ACCEPTED";
   }
@@ -334,12 +590,13 @@ function classifyCompletedResult(value: unknown): "ACCEPTED" | "HOLD" {
       rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "reason must be ATTEMPTS_EXHAUSTED");
     }
     const evaluationEntries = requireEvaluationEntries(readProperty(value, "evaluations"));
-    const declaredCodes: string[] = [];
+    const declaredCodes: AgentResponseRejectionCode[] = [];
     for (const entry of evaluationEntries) {
-      if (requireEvaluationEntryShape(entry, "evaluations") !== "REJECTED") {
+      const shape = requireEvaluationEntryShape(entry, "evaluations");
+      if (shape.status !== "REJECTED") {
         rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "evaluations", "must be entirely REJECTED for HOLD");
       }
-      declaredCodes.push(readProperty(entry as object, "code") as string);
+      declaredCodes.push(shape.code);
     }
     const rejectionCodeEntries = requireDenseArrayEntries(readProperty(value, "rejectionCodes"), "rejectionCodes");
     const codesMatch =

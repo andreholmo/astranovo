@@ -1110,13 +1110,20 @@ enumerável ou `Symbol` em si mesmo; cada item deve ter exatamente `itemId`/`sta
 (quando `COMPLETED`) ou `itemId`/`status`/`code` (quando `FAILED`, e `code` deve ser exatamente
 `AGENT_CYCLE_FAILED`); cada `itemId` deve ser não vazio, limitado e único no lote. O `result`
 de um item `COMPLETED` é lido só o suficiente para distinguir `ACCEPTED` de `HOLD`, confirmar
-seu próprio conjunto fechado de propriedades e confirmar o tipo/valor básico de cada uma delas
-(`reason` de `HOLD` deve ser o valor fechado `ATTEMPTS_EXHAUSTED`; `evaluations`/`rejectionCodes`
-devem ser arrays; `result` de `ACCEPTED` deve ser um objeto JSON) — nunca recalculado, nunca
-copiado para o resumo:
-exatamente como `runFinalizedAgentCycles` deixa `request` sem validação nesse limite, este
-módulo deixa `evaluations`/`rejectionCodes`/proposta dentro de `result` sem validação, porque
-esse conteúdo nunca é lido, copiado ou exposto aqui.
+seu próprio conjunto fechado de propriedades e confirmar o tipo/valor de cada uma delas: `reason`
+de `HOLD` deve ser o valor fechado `ATTEMPTS_EXHAUSTED`; `evaluations` (ambos os desfechos) deve
+ser um array denso, sem propriedade extra, com 1 a `MAX_AGENT_RETRY_ATTEMPTS` entradas, cada
+entrada com o conjunto fechado de chaves do seu próprio `status` e `capture`/`proposal` cada um
+com sua própria forma pública fechada (`capture` com as chaves exatas de `AgentResponseCapture`,
+`request` incluído; `proposal` com as chaves exatas de `AgentProposal`, `action` num valor fechado
+e `evidenceIds` um array denso de strings); em `HOLD`, toda entrada de `evaluations` deve ser
+`REJECTED`-shaped e `rejectionCodes` deve bater em quantidade/ordem com os códigos já declarados;
+em `ACCEPTED`, somente a última entrada de `evaluations` pode ser `ACCEPTED` — ela deve existir —
+e `result` deve ser `ACCEPTED`-shaped e idêntico, campo a campo, à `capture`/`proposal` dessa
+última entrada. Nada disso recalcula uma tentativa ou um resultado: `evaluateAgentResponseCapture`,
+`captureAgentResponse` e `parseAgentProposal` nunca são chamados, e o conteúdo de `rawResponse`
+nunca é lido — apenas comparado, campo a campo, contra outro valor igualmente validado por forma,
+dentro do mesmo lote não confiável.
 
 Toda leitura do lote não confiável passa pelas mesmas primitivas defensivas já usadas em
 `src/agent` — leitura protegida de propriedade e verificação de chaves exatas via

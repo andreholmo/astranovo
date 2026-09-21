@@ -175,20 +175,38 @@ interface SyntheticRejectedEvaluation {
   readonly code: string;
 }
 
-function syntheticCapture(): Record<string, unknown> {
-  return { note: "synthetic-capture-fixture" };
+/**
+ * A closed-shape `AgentRequest`, `AgentResponseCapture` and `AgentProposal` —
+ * genuinely possible values `finalizeBoundedAgentAttempts` could have
+ * produced — rather than an arbitrary stub object, per the review's
+ * requirement that synthetic fixtures use a real structure. `cycleId` lets
+ * two independently built captures/proposals be made to agree, or to differ,
+ * on purpose.
+ */
+function syntheticRequestValue(cycleId = "cycle-1"): Record<string, unknown> {
+  return { schemaVersion: 1, agentId: "trend-following", cycleId, snapshotId: "snapshot-1" };
 }
 
-function syntheticProposalValue(): Record<string, unknown> {
-  return { note: "synthetic-proposal-fixture" };
+function syntheticCapture(cycleId = "cycle-1"): Record<string, unknown> {
+  return {
+    request: syntheticRequestValue(cycleId),
+    responseId: `response-${cycleId}`,
+    rawResponse: acceptedResponse(cycleId),
+    promptVersion: PROMPT_VERSION,
+    model: MODEL
+  };
 }
 
-function acceptedEvaluationEntry(): SyntheticAcceptedEvaluation {
-  return { status: "ACCEPTED", capture: syntheticCapture(), proposal: syntheticProposalValue() };
+function syntheticProposalValue(cycleId = "cycle-1"): Record<string, unknown> {
+  return proposal(cycleId);
 }
 
-function rejectedEvaluationEntry(code = "INVALID_JSON"): SyntheticRejectedEvaluation {
-  return { status: "REJECTED", capture: syntheticCapture(), code };
+function acceptedEvaluationEntry(cycleId = "cycle-1"): SyntheticAcceptedEvaluation {
+  return { status: "ACCEPTED", capture: syntheticCapture(cycleId), proposal: syntheticProposalValue(cycleId) };
+}
+
+function rejectedEvaluationEntry(code = "INVALID_JSON", cycleId = "cycle-1"): SyntheticRejectedEvaluation {
+  return { status: "REJECTED", capture: syntheticCapture(cycleId), code };
 }
 
 function completedAccepted(itemId: string): FinalizedAgentCycleBatchResult {
@@ -668,6 +686,162 @@ describe("summarizeFinalizedAgentCycles: nested evaluations/result/rejectionCode
 
     assert.equal(summary.holdCount, 1);
     assert.deepEqual(summary.holdItemIds, ["a"]);
+  });
+});
+
+describe("summarizeFinalizedAgentCycles: ACCEPTED evaluations/result closed-union invariants (review cycle 3/3)", () => {
+  it("rejects a COMPLETED/ACCEPTED item whose evaluations are entirely REJECTED, with a separate ACCEPTED-shaped result (the reported bypass)", () => {
+    const evaluations = [rejectedEvaluationEntry(), rejectedEvaluationEntry()];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: acceptedEvaluationEntry() }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose only ACCEPTED evaluation sits before the last position", () => {
+    const evaluations = [acceptedEvaluationEntry(), rejectedEvaluationEntry()];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: acceptedEvaluationEntry() }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item declaring two ACCEPTED evaluations", () => {
+    const evaluations = [acceptedEvaluationEntry(), acceptedEvaluationEntry()];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: acceptedEvaluationEntry() }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose result diverges from the last accepted evaluation", () => {
+    const evaluations = [acceptedEvaluationEntry("cycle-1")];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: acceptedEvaluationEntry("cycle-2") }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("accepts a COMPLETED/ACCEPTED item whose result matches the last accepted evaluation field for field", () => {
+    const evaluations = [rejectedEvaluationEntry(), acceptedEvaluationEntry("cycle-1")];
+    const valid = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: acceptedEvaluationEntry("cycle-1") }
+    } as unknown as FinalizedAgentCycleBatchResult;
+
+    const summary = summarizeFinalizedAgentCycles([valid]);
+
+    assert.equal(summary.acceptedCount, 1);
+    assert.deepEqual(summary.acceptedItemIds, ["a"]);
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose capture carries an extra property", () => {
+    const tamperedCapture = { ...syntheticCapture(), extra: "nope" };
+    const evaluations = [{ status: "ACCEPTED", capture: tamperedCapture, proposal: syntheticProposalValue() }];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "ACCEPTED",
+        evaluations,
+        result: { status: "ACCEPTED", capture: tamperedCapture, proposal: syntheticProposalValue() }
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose capture's request is missing a required property", () => {
+    const tamperedRequest = { schemaVersion: 1, agentId: "trend-following", cycleId: "cycle-1" };
+    const tamperedCapture = { ...syntheticCapture(), request: tamperedRequest };
+    const evaluations = [{ status: "ACCEPTED", capture: tamperedCapture, proposal: syntheticProposalValue() }];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "ACCEPTED",
+        evaluations,
+        result: { status: "ACCEPTED", capture: tamperedCapture, proposal: syntheticProposalValue() }
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose proposal declares an action outside the closed set", () => {
+    const tamperedProposal = { ...syntheticProposalValue(), action: "SOMETHING_ELSE" };
+    const evaluations = [{ status: "ACCEPTED", capture: syntheticCapture(), proposal: tamperedProposal }];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "ACCEPTED",
+        evaluations,
+        result: { status: "ACCEPTED", capture: syntheticCapture(), proposal: tamperedProposal }
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose proposal evidenceIds array is sparse", () => {
+    const sparseEvidenceIds: unknown[] = ["evidence-1"];
+    sparseEvidenceIds.length = 2;
+    const tamperedProposal = { ...syntheticProposalValue(), evidenceIds: sparseEvidenceIds };
+    const evaluations = [{ status: "ACCEPTED", capture: syntheticCapture(), proposal: tamperedProposal }];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "ACCEPTED",
+        evaluations,
+        result: { status: "ACCEPTED", capture: syntheticCapture(), proposal: tamperedProposal }
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose proposal evidenceIds array carries an extra Symbol-keyed property", () => {
+    const evidenceIds: unknown[] = ["evidence-1"];
+    (evidenceIds as unknown as Record<symbol, unknown>)[Symbol("hidden")] = "secret-symbol-field";
+    const tamperedProposal = { ...syntheticProposalValue(), evidenceIds };
+    const evaluations = [{ status: "ACCEPTED", capture: syntheticCapture(), proposal: tamperedProposal }];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "ACCEPTED",
+        evaluations,
+        result: { status: "ACCEPTED", capture: syntheticCapture(), proposal: tamperedProposal }
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose capture is empty", () => {
+    const evaluations = [{ status: "ACCEPTED", capture: {}, proposal: syntheticProposalValue() }];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: { status: "ACCEPTED", capture: {}, proposal: syntheticProposalValue() } }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose proposal is empty", () => {
+    const evaluations = [{ status: "ACCEPTED", capture: syntheticCapture(), proposal: {} }];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: { status: "ACCEPTED", capture: syntheticCapture(), proposal: {} } }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
   });
 });
 
