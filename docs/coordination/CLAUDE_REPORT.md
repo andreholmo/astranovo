@@ -6147,3 +6147,119 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-035 — composição offline do lote finalizado com resumo (M4)
+
+- **ID da tarefa:** TASK-035
+- **Milestone:** M4 — composição offline do lote finalizado com resumo
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-21
+- **Base:** `main` em `329449f` (`chore: prepara TASK-035`), sem alterações remotas pendentes
+
+## Resumo da entrega
+
+Adiciona `runFinalizedAgentCyclesWithSummary`, a menor composição offline que encadeia os dois
+módulos já existentes e revisados — `runFinalizedAgentCycles` (TASK-033) e
+`summarizeFinalizedAgentCycles` (TASK-034) — em uma única chamada:
+
+```text
+FinalizedAgentCycleBatchItems
+→ runFinalizedAgentCycles (uma chamada)
+→ summarizeFinalizedAgentCycles (uma chamada)
+→ { results, summary }
+```
+
+O módulo não cria lógica própria: recebe exatamente o contrato público de entrada de
+`runFinalizedAgentCycles`, chama-o exatamente uma vez, entrega o `FinalizedAgentCycleBatchResults`
+retornado — sem remodelar, copiar ou reinterpretar — diretamente a `summarizeFinalizedAgentCycles`,
+também exatamente uma vez, e devolve `{ results, summary }` em um único objeto congelado. Nenhum
+adapter é chamado uma segunda vez pelo resumo. Uma rejeição de `runFinalizedAgentCycles` (falha na
+estrutura do lote, antes de qualquer item rodar) propaga-se imediatamente e
+`summarizeFinalizedAgentCycles` nunca é chamado; o mesmo vale para uma exceção de
+`summarizeFinalizedAgentCycles` — nenhuma das duas é capturada, inspecionada ou convertida em
+sucesso.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_034.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/agent/run-finalized-agent-cycles.ts`,
+`src/agent/summarize-finalized-agent-cycles.ts` e `TASK.md`.
+
+## Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/run-finalized-agent-cycles-with-summary.ts` | criado |
+| `tests/run-finalized-agent-cycles-with-summary.test.ts` | criado |
+| `README.md` | atualizado (nova entrada na lista de módulos e nova seção "Composição offline do lote finalizado com resumo") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado (este registro) |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+## Escopo e limites respeitados
+
+- sem ranking, votação, comparação de desempenho, seleção de proposta ou consenso;
+- sem retry, concorrência, timer, relógio ou aleatoriedade adicionais;
+- sem HTTP, SDK externo, persistência ou I/O;
+- sem Risk Manager, broker, wallet, blockchain, testnet, corretora, credenciais ou dinheiro real;
+- reaproveita integralmente os tipos e validações de `runFinalizedAgentCycles` e
+  `summarizeFinalizedAgentCycles`, sem duplicar nenhuma validação interna.
+
+## Testes adicionados
+
+`tests/run-finalized-agent-cycles-with-summary.test.ts` cobre:
+
+- lote misto (`ACCEPTED`/`HOLD`/`FAILED`) produz `results` idênticos aos de chamar
+  `runFinalizedAgentCycles` diretamente e `summary` idêntico ao de aplicar
+  `summarizeFinalizedAgentCycles` sobre esse mesmo `results`;
+- ordem e `itemId` preservados tanto em `results` quanto nas listas do `summary`;
+- cada adapter é chamado exatamente o número de vezes que seu próprio ciclo já determinaria,
+  sem nenhuma chamada extra causada pelo passo de resumo;
+- uma falha isolada (adapter lançando erro) permanece `FAILED/AGENT_CYCLE_FAILED` e os demais
+  itens do lote continuam normalmente;
+- entrada inválida (lote nulo, vazio ou com `itemId` duplicado) falha fechada sem chamar nenhum
+  adapter;
+- um `Proxy` hostil sobre o lote inteiro e sobre um item individual, lançando erro/segredo forjado,
+  nunca vaza mensagem, stack, payload ou segredo;
+- o objeto externo `{ results, summary }` fica congelado, preservando os congelamentos internos
+  já existentes (`results`, `summary`, e as listas de `itemId` do `summary`);
+- o array de entrada e seus itens não são mutados;
+- mesmos dados e adapters determinísticos produzem resultado campo a campo idêntico em duas
+  execuções;
+- resultado idêntico independente do tempo de parede decorrido entre chamadas (sem timer/relógio
+  influenciando o resultado).
+
+## Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **1005 testes, 1005 passaram, 0 falharam** (985 anteriores + 20 novos) |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+## Limitações conhecidas
+
+Este sandbox de execução não teve acesso de rede aprovado para `git fetch origin main` (o comando
+exigiu aprovação indisponível neste ambiente não interativo). A verificação alternativa —
+`git merge-base --is-ancestor main claude/issue-66-20260921-1524` — confirmou que a branch de
+trabalho já continha exatamente o mesmo commit de `main` (`329449f`) no checkout inicial, sem
+alterações remotas pendentes a incorporar.
+
+O hash completo do commit desta entrega não pode ser citado neste próprio registro por
+construção (o hash de um commit depende do conteúdo de todos os arquivos nele, incluindo este
+arquivo); ele é informado no comentário da automação no GitHub e no link do PR gerado por esta
+entrega.
+
+## Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+## Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
