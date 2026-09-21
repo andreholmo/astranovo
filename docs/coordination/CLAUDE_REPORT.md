@@ -4120,3 +4120,183 @@ Nenhum bloqueio.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit. Não aprovo nem
 mesclo o próprio trabalho.
+
+## TASK-028 — Decisão pura de progresso de tentativas auditáveis (M4)
+
+- **ID da tarefa:** TASK-028
+- **Milestone:** M4 — decisão pura de progresso de tentativas
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo da entrega
+
+Menor máquina de estados pura do M4: `decideAgentAttemptProgress` recebe uma
+`AgentRetryPolicy` e o histórico `readonly` de resultados de
+`evaluateAgentResponseCapture` de um agente/ciclo/prompt/modelo, e decide qual dos três
+estados fechados vale a seguir — `ATTEMPT_AVAILABLE`, `ACCEPTED` ou `ATTEMPTS_EXHAUSTED` —
+sem jamais chamar um `AgentAdapter`, executar uma tentativa, fazer retry, produzir `HOLD`,
+persistir ou acionar qualquer integração. Reutiliza integralmente `parseAgentRetryPolicy`
+(`src/agent/retry-policy.ts`) e `evaluateAgentResponseCapture`
+(`src/agent/evaluate-agent-response-capture.ts`); nenhuma regra de validação de política ou
+de captura foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_027.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/agent/evaluate-agent-response-capture.ts`,
+`src/agent/retry-policy.ts`, `src/agent/capture-agent-response.ts`, `src/domain/contracts.ts`
+e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/decide-agent-attempt-progress.ts` | criado — `decideAgentAttemptProgress`, `AgentAttemptProgress`, `AttemptAvailableProgress`, `AcceptedAttemptProgress`, `AttemptsExhaustedProgress` |
+| `tests/decide-agent-attempt-progress.test.ts` | criado |
+| `README.md` | atualizado (seção "Decisão pura de progresso de tentativas auditáveis") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `decideAgentAttemptProgress`
+
+Não confia em `results` como já validado, mesmo que o parâmetro seja tipado
+`readonly AgentResponseEvaluation[]` — o mesmo princípio que `shouldRetryAgentAttempt` já
+aplica a `policy` tipada. Sequência, sem desvio possível:
+
+1. `policy` é revalidada fail-closed via `parseAgentRetryPolicy`;
+2. `results` precisa ser um array; cada entrada é **recomputada do zero** — nunca confiada —
+   extraindo apenas sua `capture` aninhada e entregando-a de novo a
+   `evaluateAgentResponseCapture`. Isso descarta por completo qualquer `status`, `proposal`
+   ou `code` que a entrada alegasse: uma entrada forjada que afirma `ACCEPTED` sobre uma
+   captura que na verdade falha é recomputada como `REJECTED`, e vice-versa. Uma captura
+   estruturalmente inválida (campo ausente, tipo errado, objeto forjado) lança
+   `ContractValidationError` nesse ponto, antes de qualquer outra regra rodar;
+3. lista com mais entradas que `policy.maxAttempts` falha fechado;
+4. qualquer entrada recomputada como `ACCEPTED` que não seja a última falha fechado —
+   cobre tanto "mais uma tentativa depois de aceita" quanto "duas aceitações", já que a
+   segunda nunca pode ser a única na posição final se a primeira também é `ACCEPTED` e não é
+   a última;
+5. proveniência: todas as capturas recomputadas precisam compartilhar exatamente
+   `agentId`, `cycleId` (ambos de `capture.request`), `promptVersion` e `model` da primeira
+   — qualquer divergência falha fechado;
+6. resultado: se a última entrada é `ACCEPTED`, devolve `{ status: "ACCEPTED", result, completedAttempts }`
+   com `result` sendo a avaliação aceita completa (captura e proposta validadas, preservadas
+   apenas neste ramo); caso contrário, todas as entradas são `REJECTED` — se
+   `results.length === policy.maxAttempts`, devolve `ATTEMPTS_EXHAUSTED` com todos os códigos
+   na ordem em que ocorreram; senão devolve `ATTEMPT_AVAILABLE` com o código da rejeição mais
+   recente, quando houver alguma.
+
+Uma lista vazia é o caso base: nenhuma captura para recomputar, nenhuma proveniência para
+comparar, `completedAttempts: 0`, sempre `ATTEMPT_AVAILABLE`.
+
+### Por que nenhuma resposta bruta escapa de um estado não aceito
+
+`ATTEMPT_AVAILABLE` e `ATTEMPTS_EXHAUSTED` só carregam contagens e
+`AgentResponseRejectionCode` — a mesma união fechada de seis literais de string que
+`evaluateAgentResponseCapture` já garante nunca carregar mensagem, stack, `cause`, token ou
+qualquer conteúdo do agente. Nenhum dos dois estados referencia `capture` ou `proposal`.
+Somente `ACCEPTED.result` preserva a captura auditável — exatamente o que a tarefa autoriza
+("o resultado aceito pode preservar sua captura auditável apenas no payload `ACCEPTED`").
+Todo erro lançado usa `ContractValidationError`/`rejectContract`, que nomeia apenas
+contrato/campo/requisito, nunca o valor recebido.
+
+### Testes cobertos em `tests/decide-agent-attempt-progress.test.ts`
+
+Lista vazia devolvendo `ATTEMPT_AVAILABLE` com `completedAttempts: 0` para toda política
+válida (1 a 3); rejeições abaixo do limite com contagem e último código corretos; rejeições
+exatamente no limite devolvendo `ATTEMPTS_EXHAUSTED` com todos os códigos na ordem certa,
+para toda política válida; rejeições acima do limite falhando fechado; aceitação na primeira
+tentativa, após rejeições e no último slot permitido (não confundida com esgotamento);
+tentativa após `ACCEPTED` falhando fechado nos três arranjos (rejeição depois, segunda
+aceitação depois, aceitação entre duas rejeições); política inválida — forjada acima do
+limite, zero, fracionária, não-objeto — falhando fechado; `results` não-array, entrada que
+não é objeto, entrada sem `capture` e captura aninhada estruturalmente inválida (sem
+`rawResponse`) falhando fechado; um `status`/`code` forjado sendo ignorado e recomputado
+corretamente em ambas as direções (forjar `ACCEPTED` sobre captura que rejeita vira
+`ATTEMPTS_EXHAUSTED`; forjar `REJECTED` sobre captura que aceita vira `ACCEPTED`);
+proveniência divergente em `agentId`, `cycleId`, `promptVersion` e `model`, cada uma falhando
+fechado; ausência de segredo embutido numa resposta bruta rejeitada em `ATTEMPT_AVAILABLE` e
+em `ATTEMPTS_EXHAUSTED`, e na mensagem de erro de uma divergência de proveniência;
+preservação da captura/proposta somente em `ACCEPTED`; congelamento do resultado e do array
+`rejectionCodes`, com tentativa de reatribuição lançando `TypeError`; ausência de mutação da
+política e da lista de resultados recebidas; determinismo campo a campo para o mesmo input
+canônico em `ATTEMPT_AVAILABLE` e `ACCEPTED`; prova offline de ausência de relógio,
+`Math.random`, `setTimeout` e `fetch`, de que a função é síncrona, e de que nenhuma chamada a
+adaptador é sequer possível (a função não recebe um).
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **729 testes, 729 passaram, 0 falharam** (691 preexistentes + 38 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum uso
+de `random`, nenhum I/O.
+
+### Decisões técnicas tomadas
+
+1. **Cada entrada de `results` é recomputada do zero a partir de sua `capture` aninhada, em
+   vez de ter seu `status`/`proposal`/`code` validados e então aceitos.** A tarefa exige
+   "revalida... e reavalia/valida cada captura; não confia em objetos estruturalmente
+   forjados". Recomputar via `evaluateAgentResponseCapture(entry.capture)` é a leitura mais
+   literal de "reavalia": qualquer discriminante que a entrada alegasse é descartado e
+   substituído pelo resultado verdadeiro, o que neutraliza uma forgery em vez de apenas
+   detectá-la quando ela é estruturalmente válida mas semanticamente mentirosa (dois testes
+   cobrem essa neutralização nos dois sentidos).
+2. **Uma captura estruturalmente inválida ainda lança `ContractValidationError`, nunca vira
+   uma variante de dado.** Isso vem de graça de `evaluateAgentResponseCapture`, que já separa
+   "captura forjada" (lança) de "conteúdo do agente inválido" (devolve `REJECTED`) — este
+   módulo não precisou duplicar essa distinção.
+3. **A regra "nenhuma entrada após `ACCEPTED`" é verificada por posição (`index !==
+   results.length - 1`), não por contagem de quantos `ACCEPTED` existem.** Isso cobre o caso
+   de duas aceitações (a primeira nunca pode estar na posição final se a lista tem mais de
+   uma entrada) sem precisar de uma regra separada para "não mais que um `ACCEPTED`".
+4. **`lastRejectionCode` é um campo opcional, omitido (não `undefined`) quando não há
+   nenhuma rejeição ainda.** O `tsconfig.json` do projeto liga
+   `exactOptionalPropertyTypes`; a chave é adicionada só condicionalmente via spread, para que
+   `"lastRejectionCode" in progress` seja `false` na lista vazia, em vez de `true` com valor
+   `undefined`.
+5. **`ACCEPTED.result` é a `AcceptedAgentResponseEvaluation` inteira (capture + proposal)**,
+   não um subconjunto de campos escolhidos a dedo. A tarefa pede "o resultado aceito
+   validado"; reaproveitar o tipo que `evaluateAgentResponseCapture` já exporta evita
+   inventar uma quarta forma para o mesmo dado.
+6. **Nenhuma classe de erro nova.** Toda falha fechada usa `ContractValidationError`/
+   `rejectContract`, com dois nomes de contrato locais (`AgentAttemptResults`,
+   `AgentAttemptProvenance`) só para identificar qual regra disparou — nunca um código ou
+   union de erro novo, porque a tarefa define uma união discriminada de *dados* de sucesso,
+   não uma nova hierarquia de exceção.
+
+### Limitações conhecidas
+
+- Não implementa execução de tentativa, loop de retry, backoff, timeout, `HOLD` final,
+  coordenador multiagente, persistência ou logs externos — todos explicitamente fora do
+  escopo exato desta tarefa e adiados para fatias futuras de M4.
+- `decideAgentAttemptProgress` decide um único agente/ciclo/prompt/modelo por chamada; não há
+  agregação entre agentes ou entre ciclos — isso permanece trabalho de uma composição futura.
+- A proveniência exigida (`agentId`, `cycleId`, `promptVersion`, `model`) não inclui
+  `snapshotId`: a tarefa não pede essa dimensão, e `AgentRequest.snapshotId` pode
+  legitimamente mudar entre tentativas de retry do mesmo ciclo (uma nova tentativa pode ler
+  um snapshot mais recente). Se o arquiteto pretendia incluir `snapshotId` na proveniência
+  exigida, é uma adição contida a `requireSharedProvenance`.
+
+### Decisões pendentes para André / revisor
+
+1. **`snapshotId` fora da proveniência exigida** — decisão técnica implícita acima; a leitura
+   mais literal do escopo exato da tarefa ("mesmo `agentId`, `cycleId`, `promptVersion` e
+   `model`") não o inclui, mas fica registrado para confirmação.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: decide progresso de tentativas de agente`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit. Não aprovo nem
+mesclo o próprio trabalho.
