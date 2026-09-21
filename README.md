@@ -25,7 +25,8 @@ de retry controlado, a execução determinística de uma tentativa única de age
 limitada e auditável de até três tentativas sequenciais, a finalização pura e fail-closed
 do resultado final: proposta aceita preservada ou `HOLD` explícito após esgotamento, e a
 composição offline que fecha o ciclo de um agente encadeando essa execução limitada com
-essa finalização**.
+essa finalização, e o lote offline que executa em ordem N ciclos individuais já
+finalizados, isolando a falha de um item em um código fechado sem impedir os demais**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -101,6 +102,10 @@ essa finalização**.
   offline que chama `runBoundedAgentAttempts` exatamente uma vez e entrega o resultado
   diretamente a `finalizeBoundedAgentAttempts` exatamente uma vez, fechando o ciclo offline
   de um agente sem duplicar validação, retry ou finalização;
+- `src/agent/run-finalized-agent-cycles.ts` — `runFinalizedAgentCycles`, a menor composição
+  offline que executa em ordem um lote não vazio de ciclos individuais já finalizados,
+  chamando `runFinalizedAgentCycle` exatamente uma vez por item e isolando a falha de um
+  item em `FAILED/AGENT_CYCLE_FAILED` sem impedir os demais;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -1033,6 +1038,47 @@ lançar — uma falha anterior a qualquer captura válida —, o erro sanitizado
 imediatamente e `finalizeBoundedAgentAttempts` nunca é chamado; nenhuma nova tentativa é feita.
 Não gera id, timestamp, mensagem, proposta ou qualquer outro dado implícito. Sem relógio, timer,
 aleatoriedade, rede, SDK, variável de ambiente ou persistência.
+
+## Lote offline de ciclos finalizados
+
+`src/agent/run-finalized-agent-cycles.ts` define `runFinalizedAgentCycles`, a menor composição
+offline que executa, em ordem, um lote não vazio de ciclos individuais já finalizados,
+isolando a falha de um item para que os demais continuem:
+
+```text
+readonly FinalizedAgentCycleBatchItem[]
+→ runFinalizedAgentCycle (uma vez por item, em ordem)
+→ COMPLETED | FAILED por item
+→ readonly FinalizedAgentCycleBatchResult[]
+```
+
+Cada item do lote é `{ itemId, request }`: `itemId` é uma string explícita, não vazia e única
+dentro do lote — nunca gerada ou normalizada — e `request` é exatamente o contrato existente de
+`runFinalizedAgentCycle`. A estrutura inteira do lote é validada de forma fail-closed antes da
+primeira chamada a qualquer adapter: o lote deve ser um array real, não vazio e denso, sem
+propriedade extra, não enumerável ou `Symbol` em si mesmo; cada item deve ter exatamente
+`itemId` e `request`, sem propriedade extra, não enumerável ou `Symbol`; e cada `itemId` deve
+ser único. `request` não é revalidado nesse ponto — essa responsabilidade continua sendo
+exclusiva de `runFinalizedAgentCycle` e de tudo que ele chama, para não duplicar validação.
+
+Depois da validação estrutural, `runFinalizedAgentCycle` é chamado exatamente uma vez por item,
+sequencialmente, na ordem recebida — nunca em paralelo. Um item aceito ou em `HOLD` vira
+`{ itemId, status: "COMPLETED", result }`, preservando o resultado `ACCEPTED | HOLD` sem
+remodelá-lo. Uma rejeição de qualquer item — já sanitizada por `runFinalizedAgentCycle` e por
+tudo abaixo dele — nunca é inspecionada, interpolada ou propagada: vira exatamente
+`{ itemId, status: "FAILED", code: "AGENT_CYCLE_FAILED" }`, e o lote continua para o próximo
+item. Uma falha nunca vira `COMPLETED`, `ACCEPTED` ou `HOLD`.
+
+Toda leitura do lote não confiável (`length`, cada índice, as chaves de cada item e o próprio
+`itemId`) passa pelas mesmas primitivas defensivas já usadas em `src/agent` — leitura protegida
+de propriedade e verificação de chaves exatas via `Reflect.ownKeys` —, então um getter ou
+`Proxy` hostil, inclusive um que lança um `ContractValidationError` forjado carregando um
+segredo, nunca escapa sem ser tratado como valor ausente. Não cria agregação, votação,
+consenso, handoff, seleção de proposta, contexto compartilhado, concorrência/paralelismo, Risk
+Manager, `PaperBroker`, fill, carteira, ledger, persistência, provider de mercado, integração
+Astra real, timeout, backoff ou agendamento. Sem HTTP, SDK externo, fila, timer, relógio,
+aleatoriedade, variável de ambiente, token, segredo, credencial, wallet, blockchain, testnet,
+corretora ou dinheiro real.
 
 ## Relatório multiagente offline
 
