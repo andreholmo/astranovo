@@ -58,6 +58,20 @@ function accepted(responseId = "response-accepted"): AcceptedAgentResponseEvalua
   return evaluation as AcceptedAgentResponseEvaluation;
 }
 
+const PROPOSAL_WITH_EVIDENCE = { ...VALID_PROPOSAL, evidenceIds: ["evidence-1"] };
+
+function acceptedWithEvidence(responseId = "response-with-evidence"): AcceptedAgentResponseEvaluation {
+  const evaluation = evaluateAgentResponseCapture({
+    request: REQUEST,
+    responseId,
+    rawResponse: JSON.stringify(PROPOSAL_WITH_EVIDENCE),
+    promptVersion: PROMPT_VERSION,
+    model: MODEL
+  });
+  assert.equal(evaluation.status, "ACCEPTED");
+  return evaluation as AcceptedAgentResponseEvaluation;
+}
+
 function rejected(
   responseId: string,
   code: AgentResponseRejectionCode = "INVALID_JSON"
@@ -506,6 +520,109 @@ describe("finalizeBoundedAgentAttempts: forged getters and Proxy objects fail cl
 
     const error = expectRejection(() => finalizeBoundedAgentAttempts(forged as unknown as BoundedAgentAttemptsResult));
     assert.ok(!error.message.includes(secret));
+  });
+});
+
+describe("finalizeBoundedAgentAttempts: closed-union hardening against hostile Proxy input", () => {
+  it("does not leak a secret carried by a ContractValidationError thrown from a hostile top-level ownKeys trap", () => {
+    const secret = "SECRET_FROM_TOP_LEVEL_OWN_KEYS_TRAP";
+    const input = acceptedResult(0);
+    const forged = new Proxy(
+      { ...input },
+      {
+        ownKeys(): never {
+          throw new ContractValidationError("Forged", "value", secret);
+        }
+      }
+    );
+
+    const error = expectRejection(() => finalizeBoundedAgentAttempts(forged as unknown as BoundedAgentAttemptsResult));
+    assert.ok(!error.message.includes(secret));
+  });
+
+  it("does not leak a secret carried by a ContractValidationError thrown from a hostile proposal's ownKeys trap", () => {
+    const secret = "SECRET_FROM_PROPOSAL_OWN_KEYS_TRAP";
+    const acceptedEvaluation = accepted();
+    const forgedProposal = new Proxy(
+      { ...acceptedEvaluation.proposal },
+      {
+        ownKeys(): never {
+          throw new ContractValidationError("Forged", "proposal", secret);
+        }
+      }
+    );
+    const forgedResult = { ...acceptedEvaluation, proposal: forgedProposal };
+    const forged = {
+      status: "ACCEPTED",
+      evaluations: [forgedResult],
+      result: forgedResult
+    } as unknown as BoundedAgentAttemptsResult;
+
+    const error = expectRejection(() => finalizeBoundedAgentAttempts(forged));
+    assert.ok(!error.message.includes(secret));
+  });
+
+  it("does not leak a secret carried by a ContractValidationError thrown from a hostile evidenceIds Proxy", () => {
+    const secret = "SECRET_FROM_EVIDENCE_IDS_PROXY";
+    const acceptedEvaluation = acceptedWithEvidence();
+    const hostileEvidenceIds = new Proxy(acceptedEvaluation.proposal.evidenceIds, {
+      get(target, prop, receiver): unknown {
+        if (prop === "length") return Reflect.get(target, prop, receiver);
+        throw new ContractValidationError("Forged", "evidenceIds", secret);
+      }
+    });
+    const forgedProposal = { ...acceptedEvaluation.proposal, evidenceIds: hostileEvidenceIds };
+    const forgedResult = { ...acceptedEvaluation, proposal: forgedProposal };
+    const forged = {
+      status: "ACCEPTED",
+      evaluations: [forgedResult],
+      result: forgedResult
+    } as unknown as BoundedAgentAttemptsResult;
+
+    const error = expectRejection(() => finalizeBoundedAgentAttempts(forged));
+    assert.ok(!error.message.includes(secret));
+  });
+
+  it("rejects a top-level union carrying a non-enumerable extra property", () => {
+    const input = acceptedResult(0);
+    const forged: Record<string, unknown> = { ...input };
+    Object.defineProperty(forged, "hidden", { value: "unexpected", enumerable: false });
+    expectRejection(() => finalizeBoundedAgentAttempts(forged as unknown as BoundedAgentAttemptsResult));
+  });
+
+  it("rejects a top-level union carrying an extra symbol-keyed property", () => {
+    const input = acceptedResult(0);
+    const forged: Record<PropertyKey, unknown> = { ...input, [Symbol("extra")]: "unexpected" };
+    expectRejection(() => finalizeBoundedAgentAttempts(forged as unknown as BoundedAgentAttemptsResult));
+  });
+
+  it("rejects a declared proposal carrying a non-enumerable extra property", () => {
+    const acceptedEvaluation = accepted();
+    const forgedProposal: Record<string, unknown> = { ...acceptedEvaluation.proposal };
+    Object.defineProperty(forgedProposal, "hidden", { value: "unexpected", enumerable: false });
+    const forgedResult = { ...acceptedEvaluation, proposal: forgedProposal };
+    const forged = {
+      status: "ACCEPTED",
+      evaluations: [forgedResult],
+      result: forgedResult
+    } as unknown as BoundedAgentAttemptsResult;
+
+    expectRejection(() => finalizeBoundedAgentAttempts(forged));
+  });
+
+  it("rejects a sparse evidenceIds array that matches the expected ids only by length", () => {
+    const acceptedEvaluation = acceptedWithEvidence();
+    const sparseEvidenceIds: unknown[] = [];
+    sparseEvidenceIds.length = 1;
+    const forgedProposal = { ...acceptedEvaluation.proposal, evidenceIds: sparseEvidenceIds };
+    const forgedResult = { ...acceptedEvaluation, proposal: forgedProposal };
+    const forged = {
+      status: "ACCEPTED",
+      evaluations: [forgedResult],
+      result: forgedResult
+    } as unknown as BoundedAgentAttemptsResult;
+
+    expectRejection(() => finalizeBoundedAgentAttempts(forged));
   });
 });
 

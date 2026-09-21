@@ -121,13 +121,43 @@ export type FinalizedBoundedAgentAttemptsResult =
   | FinalizedHoldAgentAttempts;
 
 /**
- * Fails closed unless `value`'s own enumerable keys are exactly
- * `expectedKeys` — no missing key and no extra one, including a key present
- * only with an `undefined` value.
+ * Reads every own property key of `value` — enumerable or not, string or
+ * symbol — via `Reflect.ownKeys`, so a closed-key check below cannot be
+ * defeated by hiding an extra property behind non-enumerability or a symbol
+ * key the way `Object.keys` would. A `Proxy`'s `ownKeys` trap throwing
+ * anything at all — including a forged, already-`ContractValidationError`
+ * value carrying a secret — is treated exactly like an empty key list and
+ * never rethrown: the return value is a fresh array this module fully
+ * controls, so nothing the trap threw can reach a caller.
  */
-function requireExactOwnKeys(value: Record<string, unknown>, expectedKeys: readonly string[], field: string): void {
-  const actualKeys = Object.keys(value);
-  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key) => !expectedKeys.includes(key))) {
+function safeOwnKeys(value: object): readonly PropertyKey[] {
+  try {
+    return Reflect.ownKeys(value);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether `value`'s own keys — enumerable or not, string or symbol — are
+ * exactly `expectedKeys`, no more and no less. Never throws: a `value` whose
+ * keys cannot be safely read is simply not a match.
+ */
+function hasExactOwnKeys(value: object, expectedKeys: readonly string[]): boolean {
+  const actualKeys = safeOwnKeys(value);
+  return (
+    actualKeys.length === expectedKeys.length &&
+    actualKeys.every((key) => typeof key === "string" && expectedKeys.includes(key))
+  );
+}
+
+/**
+ * Fails closed unless `value`'s own keys are exactly `expectedKeys` — no
+ * missing key and no extra one, including a key present only with an
+ * `undefined` value, hidden as non-enumerable, or keyed by a `Symbol`.
+ */
+function requireExactOwnKeys(value: object, expectedKeys: readonly string[], field: string): void {
+  if (!hasExactOwnKeys(value, expectedKeys)) {
     rejectContract(FINALIZE_BOUNDED_AGENT_ATTEMPTS, field, "must have exactly the expected properties");
   }
 }
@@ -180,37 +210,52 @@ function requireEvaluationEntries(value: unknown): readonly unknown[] {
 }
 
 /**
+ * Compares a declared `evidenceIds` array against the expected one by index,
+ * reading each element defensively via {@link readSafe} rather than
+ * `Array.prototype.every` — which silently skips holes. A sparse array with
+ * the same `length` as `expected` (a hole standing in for a required id)
+ * cannot pass this way: a hole, like a throwing `Proxy` trap, reads as
+ * `undefined`, and `undefined` never equals a real evidence id.
+ */
+function evidenceIdsMatch(declared: unknown, expected: readonly string[]): boolean {
+  if (!Array.isArray(declared)) return false;
+  if (readSafe(declared, "length") !== expected.length) return false;
+  for (let index = 0; index < expected.length; index += 1) {
+    if (readSafe(declared, String(index)) !== expected[index]) return false;
+  }
+  return true;
+}
+
+/**
  * Structurally compares a caller-declared proposal against a trustworthy one,
  * field for field. Never trusts the declared value's shape: a non-object, an
- * extra injected property, a wrong-length `evidenceIds` or any differing
- * field fails.
+ * extra injected property (including one hidden as non-enumerable or keyed
+ * by a `Symbol`), a wrong-length or sparse `evidenceIds`, or any differing
+ * field fails. Every field is read via {@link readSafe}, so a throwing
+ * getter or `Proxy` trap anywhere in `declared` — even one throwing an
+ * already-`ContractValidationError` value — can only ever produce a
+ * non-matching read, never escape as an exception.
  */
 function proposalMatches(declared: unknown, expected: AgentProposal): boolean {
   if (typeof declared !== "object" || declared === null || Array.isArray(declared)) return false;
-  const candidateKeys = Object.keys(declared);
-  if (candidateKeys.length !== PROPOSAL_KEYS.length || candidateKeys.some((key) => !(PROPOSAL_KEYS as readonly string[]).includes(key))) {
-    return false;
-  }
-  const candidate = declared as Record<string, unknown>;
+  if (!hasExactOwnKeys(declared, PROPOSAL_KEYS)) return false;
   if (
-    candidate.schemaVersion !== expected.schemaVersion ||
-    candidate.proposalId !== expected.proposalId ||
-    candidate.cycleId !== expected.cycleId ||
-    candidate.agentId !== expected.agentId ||
-    candidate.action !== expected.action ||
-    candidate.asset !== expected.asset ||
-    candidate.confidence !== expected.confidence ||
-    candidate.positionPct !== expected.positionPct ||
-    candidate.reason !== expected.reason ||
-    candidate.veto !== expected.veto ||
-    candidate.promptVersion !== expected.promptVersion ||
-    candidate.model !== expected.model
+    readSafe(declared, "schemaVersion") !== expected.schemaVersion ||
+    readSafe(declared, "proposalId") !== expected.proposalId ||
+    readSafe(declared, "cycleId") !== expected.cycleId ||
+    readSafe(declared, "agentId") !== expected.agentId ||
+    readSafe(declared, "action") !== expected.action ||
+    readSafe(declared, "asset") !== expected.asset ||
+    readSafe(declared, "confidence") !== expected.confidence ||
+    readSafe(declared, "positionPct") !== expected.positionPct ||
+    readSafe(declared, "reason") !== expected.reason ||
+    readSafe(declared, "veto") !== expected.veto ||
+    readSafe(declared, "promptVersion") !== expected.promptVersion ||
+    readSafe(declared, "model") !== expected.model
   ) {
     return false;
   }
-  const evidenceIds = candidate.evidenceIds;
-  if (!Array.isArray(evidenceIds) || evidenceIds.length !== expected.evidenceIds.length) return false;
-  return evidenceIds.every((id, index) => id === expected.evidenceIds[index]);
+  return evidenceIdsMatch(readSafe(declared, "evidenceIds"), expected.evidenceIds);
 }
 
 /**

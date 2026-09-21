@@ -5089,3 +5089,106 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-031 — correção 1/3 da revisão `REQUEST_CHANGES` (PR #59, SHA `08072b9`)
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Corrigidos os três bloqueios apontados na revisão `REQUEST_CHANGES` de André no PR #59 sobre o
+SHA `08072b946b72078b89ef2d0679f083134fb991e3`, em `src/agent/finalize-bounded-agent-attempts.ts`,
+sem ampliar o escopo de TASK-031 e sem alterar nenhuma mensagem pública já existente:
+
+1. **`ContractValidationError` lançado por um `Proxy`/getter hostil não é mais confiado cegamente.**
+   `requireExactOwnKeys` chamava `Object.keys(value)` diretamente e `proposalMatches` chamava
+   `Object.keys(declared)`/`evidenceIds.every(...)` diretamente — nenhuma dessas três leituras
+   passava por `readProperty`/`readSafe`. Um `Proxy` cuja trap `ownKeys` (ou cujo trap `get`
+   acessado durante o `.every`) lançasse deliberadamente `new ContractValidationError(...)` com um
+   segredo escapava sem sanitização: a fronteira externa reconhece `instanceof
+   ContractValidationError` e relança a mensagem original, confiando na classe da exceção mesmo
+   quando ela se origina de dado hostil. As três leituras agora passam por operações protegidas
+   (`safeOwnKeys`/`hasExactOwnKeys`, que nunca relançam o que a trap lançar, convertendo qualquer
+   exceção — inclusive um `ContractValidationError` forjado — no mesmo `ContractValidationError`
+   fixo e seguro que a estrutura genuinamente incompatível já produzia) e `evidenceIdsMatch`, que lê
+   cada índice via `readSafe`.
+2. **`requireExactOwnKeys` agora usa `Reflect.ownKeys` em vez de `Object.keys`.** `Object.keys`
+   ignora propriedades próprias não enumeráveis e símbolos, então uma entrada podia carregar uma
+   propriedade extra oculta dessa forma e ainda ser aceita como união exatamente fechada.
+   `safeOwnKeys`/`hasExactOwnKeys` (compartilhado agora por `requireExactOwnKeys` e por
+   `proposalMatches`) usam `Reflect.ownKeys`, que enumera toda chave própria — enumerável ou não,
+   string ou `Symbol` — e rejeitam qualquer extra desse tipo tanto no objeto de nível superior/
+   entrada de avaliação quanto na proposta declarada.
+3. **`proposalMatches` não usa mais `evidenceIds.every` para comparar `evidenceIds`.** Um array
+   esparso com o mesmo `length` do esperado passava porque `.every` pula posições vazias
+   silenciosamente, tratando a ausência de um id exigido como aprovação vácua. A nova função
+   `evidenceIdsMatch` compara por índice via `readSafe`, onde um buraco (ou uma leitura que lança)
+   é tratado exatamente como `undefined`, que nunca é igual a um id de evidência real.
+
+Como efeito colateral direto dessas três correções, `proposalMatches` também passou a ler todos os
+demais campos do `proposal` declarado (`schemaVersion`, `proposalId`, `action`, etc.) via
+`readSafe` em vez de acesso direto de propriedade, fechando o último ponto deste módulo em que um
+getter/`Proxy` hostil dentro do `proposal` declarado poderia lançar sem sanitização.
+
+### Arquivos alterados
+
+- `src/agent/finalize-bounded-agent-attempts.ts` (`safeOwnKeys`, `hasExactOwnKeys`,
+  `evidenceIdsMatch` novos; `requireExactOwnKeys` e `proposalMatches` reescritos sobre eles)
+- `tests/finalize-bounded-agent-attempts.test.ts` (sete novos testes de regressão)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- `Proxy` hostil cuja trap `ownKeys` no objeto de nível superior lança um `ContractValidationError`
+  contendo um segredo: a chamada falha com um `ContractValidationError` sanitizado (mensagem sem o
+  segredo);
+- o mesmo ataque, agora na trap `ownKeys` de um `proposal` declarado dentro do resultado aceito;
+- `Proxy` hostil sobre `evidenceIds` cuja trap `get` lança um `ContractValidationError` contendo um
+  segredo para qualquer índice: mesma sanitização;
+- união de nível superior com propriedade extra não enumerável: rejeitada;
+- união de nível superior com propriedade extra por `Symbol`: rejeitada;
+- `proposal` declarado com propriedade extra não enumerável: rejeitado;
+- `evidenceIds` esparso (mesmo `length` do esperado, mas com buraco no lugar de um id exigido):
+  rejeitado.
+
+Os três primeiros reproduzem exatamente o cenário do bloqueio 1 (incluindo a variante em que o
+próprio `ContractValidationError` é a arma); os dois seguintes reproduzem o bloqueio 2; o último
+reproduz o bloqueio 3. Cada um falha na versão anterior do código e passa após a correção.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **871 testes, 871 passaram, 0 falharam** (864 anteriores + 7 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas na entrega original de TASK-031. Esta correção não altera o
+contrato público de `finalizeBoundedAgentAttempts`, `runBoundedAgentAttempts` ou
+`evaluateAgentResponseCapture`, não amplia `StubAgentAdapter` e não introduz rede, persistência,
+credencial ou rota financeira. Nenhuma mensagem de erro pública mudou para estruturas
+genuinamente inválidas (não forjadas via `Proxy`/getter): elas continuam recebendo as mesmas
+mensagens específicas por campo de antes desta correção.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** conforme instrução do comentário `@claude` no PR #59.
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
