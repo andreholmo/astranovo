@@ -5409,3 +5409,148 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-033 — executa lote offline de ciclos finalizados
+
+- **Status reportado:** entrega executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Criado `src/agent/run-finalized-agent-cycles.ts`, definindo `runFinalizedAgentCycles`: a menor
+composição assíncrona e offline que executa, em ordem, um lote não vazio de ciclos individuais
+já finalizados por `runFinalizedAgentCycle` (TASK-032), isolando a falha de um item num código
+fechado sem impedir os demais:
+
+```text
+readonly FinalizedAgentCycleBatchItem[]
+→ runFinalizedAgentCycle (uma vez por item, em ordem)
+→ COMPLETED | FAILED por item
+→ readonly FinalizedAgentCycleBatchResult[]
+```
+
+Cada item do lote é `{ itemId, request }`: `itemId` é uma string explícita, não vazia,
+limitada e única dentro do lote — nunca gerada ou normalizada — e `request` é exatamente o
+contrato existente de `runFinalizedAgentCycle` (`RunBoundedAgentAttemptsRequest`, reexportado
+sem alteração). Um resultado `COMPLETED` preserva `itemId` e o `FinalizedBoundedAgentAttemptsResult`
+retornado por `runFinalizedAgentCycle` sem remodelá-lo. Um resultado `FAILED` preserva somente
+`itemId` e o código fechado `AGENT_CYCLE_FAILED` — nunca mensagem, stack, payload ou objeto de
+erro. `FinalizedAgentCycleBatchResults` é sempre uma lista congelada, na mesma ordem e com o
+mesmo tamanho do lote de entrada.
+
+A estrutura inteira do lote é validada de forma fail-closed antes de qualquer chamada a
+adapter: `value` deve ser um array real, não vazio e denso (`length` mais cada índice
+correspondem exatamente às próprias chaves próprias do array, via `Reflect.ownKeys` — um buraco,
+ou uma propriedade extra, não enumerável ou `Symbol` no próprio array, falha aqui); cada item
+deve ser um objeto com exatamente `itemId` e `request`, sem propriedade extra, não enumerável ou
+`Symbol`; e cada `itemId` deve ser único, verificado na ordem recebida. `request` não é
+revalidado neste módulo — essa responsabilidade continua exclusiva de `runFinalizedAgentCycle` e
+de tudo que ele chama (`runBoundedAgentAttempts`, `finalizeBoundedAgentAttempts` e o que está
+abaixo deles), para não duplicar validação de request, retry ou finalização.
+
+Toda leitura do lote não confiável — `length`, cada índice, as chaves de cada item e o próprio
+`itemId` — passa por `readProperty` e por uma verificação local de chaves exatas baseada em
+`Reflect.ownKeys` (mesmo padrão já usado em `finalize-bounded-agent-attempts.ts`), então um
+getter ou `Proxy` hostil, inclusive um que lança um `ContractValidationError` forjado carregando
+um segredo, nunca escapa: é tratado exatamente como valor ausente antes mesmo de chegar a
+qualquer `catch`. A validação inteira ainda está envolvida por um `try/catch` de defesa em
+profundidade que converte qualquer exceção que não seja um `ContractValidationError` genuíno
+numa mensagem constante e sem segredo.
+
+Depois da validação estrutural, os itens são executados sequencialmente, na ordem recebida —
+nunca em paralelo —, chamando `runFinalizedAgentCycle` exatamente uma vez por item. Uma
+rejeição de qualquer item — já sanitizada por `runFinalizedAgentCycle` e por tudo abaixo dele —
+nunca é inspecionada, interpolada ou propagada: vira exatamente `{ itemId, status: "FAILED",
+code: "AGENT_CYCLE_FAILED" }`, e o lote continua para o próximo item. Uma falha nunca vira
+`COMPLETED`, `ACCEPTED` ou `HOLD`.
+
+Não cria agregação, votação, consenso, handoff, seleção de proposta, contexto compartilhado,
+concorrência/paralelismo, Risk Manager, `PaperBroker`, fill, carteira, ledger, persistência,
+provider de mercado, integração Astra real, timeout, backoff ou agendamento. Não usa HTTP, SDK
+externo, fila, timer, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial,
+wallet, blockchain, testnet, corretora ou dinheiro real. `StubAgentAdapter` não foi tocado; os
+testes usam apenas adapters stub locais e determinísticos definidos no próprio arquivo de teste
+(`SequentialAdapter`, `ThrowingAdapter` e um `TrackingAdapter` local para verificar ordem de
+chamadas), no mesmo padrão já usado por `tests/run-finalized-agent-cycle.test.ts`.
+
+### Arquivos alterados
+
+- `src/agent/run-finalized-agent-cycles.ts` (novo — `runFinalizedAgentCycles` e os tipos
+  `FinalizedAgentCycleBatchItem`/`FinalizedAgentCycleBatchItems`/`FinalizedAgentCycleBatchResult`/
+  `FinalizedAgentCycleBatchResults`)
+- `tests/run-finalized-agent-cycles.test.ts` (novo — suíte completa)
+- `README.md` (nova entrada na lista de arquivos, atualização da frase de M4 e nova seção "Lote
+  offline de ciclos finalizados")
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- lote com um item aceito devolve um `COMPLETED/ACCEPTED`;
+- lote com um item esgotado devolve um `COMPLETED/HOLD`;
+- lote com três itens preserva ordem, `itemId` e resultados individuais;
+- cada ciclo e cada adapter são chamados exatamente uma vez, sequencialmente e na ordem
+  recebida, sem duplicação;
+- uma falha (erro lançado pelo adapter, e uma `request` hostil cuja leitura de propriedade
+  lança) num item produz `FAILED/AGENT_CYCLE_FAILED` e os itens seguintes ainda executam;
+- nenhuma mensagem, stack, segredo ou payload do erro aparece no resultado (verificado via
+  `JSON.stringify` do resultado inteiro);
+- entrada `null`, array vazio, array esparso, item inválido (não objeto), `itemId` duplicado e
+  `itemId` vazio/em branco falham antes da primeira chamada a adapter;
+- propriedades extras — enumeráveis, não enumeráveis e `Symbol` — em um item e no próprio array
+  do lote falham fechadas antes da primeira chamada a adapter;
+- getters e `Proxy` que lançam em `length`, num índice, nas chaves (`Reflect.ownKeys`) e no
+  próprio `itemId` — inclusive lançando um `ContractValidationError` forjado com um segredo
+  embutido — não vazam o segredo e falham fechados;
+- resultados, a lista de resultados e cada item ficam congelados (`Object.isFrozen`);
+- o lote de entrada e seus itens não são mutados;
+- mesmos stubs e dados determinísticos produzem uma lista de resultados campo a campo idêntica,
+  inclusive com tempo decorrido real entre chamadas (`setTimeout` apenas para medir, nunca
+  consultado pela função);
+- nenhuma chamada a timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência, Risk
+  Manager, broker ou I/O — a própria composição não contém nenhuma dessas chamadas;
+- toda a suíte anterior (897 testes antes desta tarefa) continua verde.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **922 testes, 922 passaram, 0 falharam** (897 anteriores + 25 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas nas entregas anteriores de `src/agent`. Esta tarefa não cria
+agregação, votação, consenso, handoff, seleção de proposta, contexto compartilhado,
+concorrência/paralelismo, Risk Manager, `PaperBroker`, fill, carteira, ledger, persistência,
+provider de mercado, integração Astra real, timeout, backoff ou agendamento — nada disso estava
+no escopo de TASK-033. `runFinalizedAgentCycles` não adiciona nenhuma fronteira de sanitização
+própria para o conteúdo de cada `request`: a validação e a sanitização de cada ciclo individual
+continuam sendo responsabilidade exclusiva de `runFinalizedAgentCycle` e de tudo que ele chama,
+como já documentado no relatório de TASK-032. A execução é estritamente sequencial (nunca
+concorrente), conforme exigido pelo escopo exato da tarefa.
+
+Este sandbox de execução não teve acesso de rede para `git fetch origin main`; a sincronização
+foi verificada confirmando que a branch de trabalho já estava nivelada com o `main` local
+fornecido no checkout inicial (mesmo hash de commit em ambos, `f11c92a`), sem alterações remotas
+pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: executa lote offline de ciclos finalizados`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
