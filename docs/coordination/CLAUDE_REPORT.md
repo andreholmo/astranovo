@@ -6263,3 +6263,133 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-036 — serializa resumo offline em JSON canônico (M4)
+
+- **ID da tarefa:** TASK-036
+- **Milestone:** M4 — serialização canônica do resumo offline
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-21
+- **Base:** `main` em `c6b044b` (`docs: preparar TASK-036`), sem alterações remotas pendentes
+
+## Resumo da entrega
+
+Adiciona `serializeFinalizedAgentCyclesSummary`, a menor transformação pura e offline que converte
+um `FinalizedAgentCyclesSummary` já produzido (TASK-034) numa string JSON canônica, compacta e
+determinística, sem I/O:
+
+```text
+FinalizedAgentCyclesSummary
+→ serializeFinalizedAgentCyclesSummary
+→ string JSON canônica
+```
+
+A saída tem ordem fixa de chaves — `total`, `acceptedCount`, `holdCount`, `failedCount`,
+`acceptedItemIds`, `holdItemIds`, `failedItemIds` —, cada lista de `itemId` na própria ordem
+original, sem espaço nem quebra de linha. Entradas campo a campo idênticas sempre produzem os
+mesmos bytes.
+
+A estrutura pública inteira é revalidada de forma fail-closed em runtime, antes de qualquer
+serialização, mirando exatamente as mesmas primitivas defensivas já usadas em
+`summarize-finalized-agent-cycles.ts` (leitura protegida de propriedade e verificação de chaves
+exatas via `Reflect.ownKeys`), sem importar seus símbolos privados: `value` deve ter exatamente as
+sete propriedades públicas já declaradas — nenhuma extra, não enumerável ou `Symbol`; cada
+contagem deve ser um inteiro seguro não negativo igual ao comprimento da própria lista; `total`
+deve ser exatamente `acceptedCount + holdCount + failedCount`; cada `itemId` deve ser não vazio,
+limitado (reaproveita `requireBoundedText`/64 caracteres de `summarize-finalized-agent-cycles.ts`)
+e único entre as três listas combinadas. A saída é montada a partir de primitivos já validados —
+nunca de `value` nem de suas listas diretamente —, então um `toJSON` hostil em `value` (próprio ou
+herdado do protótipo) nunca é chamado; a checagem de chaves fechadas já rejeita um `toJSON` próprio
+como propriedade extra. Nunca muta nem congela `value`.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_035.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/agent/summarize-finalized-agent-cycles.ts`,
+`src/agent/run-finalized-agent-cycles-with-summary.ts` e `TASK.md`.
+
+## Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/serialize-finalized-agent-cycles-summary.ts` | criado |
+| `tests/serialize-finalized-agent-cycles-summary.test.ts` | criado |
+| `README.md` | atualizado (nova entrada na lista de módulos e nova seção "Serialização canônica do resumo offline") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado (este registro) |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime. Nenhum contrato público de `run-finalized-agent-cycles.ts`,
+`finalize-bounded-agent-attempts.ts`, `summarize-finalized-agent-cycles.ts` ou
+`run-finalized-agent-cycles-with-summary.ts` foi alterado.
+
+## Escopo e limites respeitados
+
+- sem ranking, votação, comparação de desempenho ou seleção de proposta;
+- sem dashboard, gráfico ou UI;
+- sem rede, credenciais, wallet, testnet, corretora ou dinheiro real;
+- sem HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de ambiente ou persistência;
+- reaproveita o tipo `FinalizedAgentCyclesSummary` e o limite de tamanho de `itemId` já existentes
+  em `summarize-finalized-agent-cycles.ts`, sem alterar esse módulo.
+
+## Testes adicionados
+
+`tests/serialize-finalized-agent-cycles-summary.test.ts` cobre:
+
+- resumo válido produz exatamente a string JSON canônica esperada, incluindo caso todas as
+  categorias vazias (`total = 0`);
+- ausência de espaço ou quebra de linha na saída; ordem de `itemId` preservada, sem ordenação;
+- mesma entrada produz bytes idênticos entre chamadas, e duas entradas campo a campo idênticas
+  produzem o mesmo resultado;
+- `value` nulo, array ou primitivo em vez de objeto falha fechado;
+- propriedade extra enumerável, não enumerável ou `Symbol` falha fechado; propriedade obrigatória
+  ausente falha fechado;
+- `toJSON` hostil como propriedade própria falha fechado (chave extra); `toJSON` herdado do
+  protótipo nunca é invocado — a saída ignora completamente esse `toJSON`;
+- contagem incoerente com o comprimento da própria lista, `total` incoerente com a soma das três
+  contagens, `itemId` duplicado dentro da mesma categoria e `itemId` duplicado entre categorias
+  diferentes falham fechado;
+- contagens negativas, fracionárias, infinitas, `NaN` ou acima de `Number.MAX_SAFE_INTEGER`, e
+  contagem não numérica, falham fechado;
+- lista de `itemId` não array, esparsa, com propriedade extra, com `itemId` vazio/em branco/acima
+  do limite/não string, e um `Proxy` reportando `length` enorme sem alocar proporcional a ele,
+  falham fechado;
+- getter hostil em `total` e em uma entrada de `itemId`, e `Proxy` hostil no `Reflect.ownKeys` do
+  resumo e de uma lista de `itemId`, todos lançando um `ContractValidationError` forjado carregando
+  um segredo, falham fechado sem que a mensagem do erro reproduza o segredo;
+- entrada não é mutada; entrada não é congelada; um resumo já congelado (como o produzido por
+  `summarizeFinalizedAgentCycles`) é aceito normalmente;
+- toda a suíte anterior continua verde.
+
+## Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **1049 testes, 1049 passaram, 0 falharam** (1005 anteriores + 44 novos) |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+## Limitações conhecidas
+
+Este sandbox de execução não teve acesso de rede aprovado para `git fetch origin main` (o comando
+exigiu aprovação indisponível neste ambiente não interativo). A verificação alternativa — inspeção
+de `git status`/`git log`/`git branch -a` local — confirmou que a branch de trabalho já continha
+exatamente o mesmo commit de `main` (`c6b044b`) no checkout inicial, sem alterações remotas
+pendentes a incorporar.
+
+O hash completo do commit desta entrega não pode ser citado neste próprio registro por
+construção (o hash de um commit depende do conteúdo de todos os arquivos nele, incluindo este
+arquivo); ele é informado no comentário da automação no GitHub e no link do PR gerado por esta
+entrega.
+
+## Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+## Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
