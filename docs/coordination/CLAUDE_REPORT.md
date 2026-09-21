@@ -5658,3 +5658,492 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-034 — resume lote offline de ciclos finalizados
+
+- **Status reportado:** entrega executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Criado `src/agent/summarize-finalized-agent-cycles.ts`, definindo `summarizeFinalizedAgentCycles`:
+a menor transformação pura, síncrona e offline que resume o resultado já finalizado de um lote
+não vazio (`FinalizedAgentCycleBatchResults`, produzido por `runFinalizedAgentCycles`, TASK-033)
+em contagens e listas ordenadas de `itemId`:
+
+```text
+FinalizedAgentCycleBatchResults
+→ summarizeFinalizedAgentCycles
+→ total + ACCEPTED + HOLD + FAILED
+```
+
+`FinalizedAgentCyclesSummary` é uma interface fechada e o valor retornado é sempre congelado,
+com exatamente `total`, `acceptedCount`, `holdCount`, `failedCount`, `acceptedItemIds`,
+`holdItemIds` e `failedItemIds` — cada lista de `itemId` também congelada e preservando a ordem
+original do lote. O resumo serve só para observabilidade e auditoria: não classifica agentes,
+não compara desempenho, não vota, não escolhe proposta e não altera nenhum resultado.
+
+A estrutura pública inteira é revalidada de forma fail-closed em runtime, antes de qualquer
+classificação, sem confiar no tipo declarado em TypeScript: o lote deve ser um array real, não
+vazio e denso (mesma verificação de cardinalidade de `Reflect.ownKeys` contra `length + 1` já
+usada e corrigida em TASK-033, sem alocação ou iteração proporcional a um `length` declarado não
+confiável); cada item deve ter exatamente `itemId`/`status`/`result` quando `status` é
+`COMPLETED`, ou exatamente `itemId`/`status`/`code` quando `status` é `FAILED` — nenhuma
+propriedade extra, não enumerável ou `Symbol` em nenhum dos dois casos, e `code` deve ser
+exatamente o valor fechado `AGENT_CYCLE_FAILED`; cada `itemId` deve ser uma string não vazia,
+limitada e única dentro do lote inteiro, verificada na ordem recebida.
+
+O `result` de um item `COMPLETED` é lido só o suficiente para distinguir `ACCEPTED` de `HOLD` e
+confirmar que carrega exatamente o conjunto fechado de propriedades que esse resultado permite
+(`status`/`evaluations`/`result` para `ACCEPTED`; `status`/`reason`/`evaluations`/`rejectionCodes`
+para `HOLD`) — nunca recalculado a partir da captura, nunca comparado campo a campo com uma
+reconstrução, e nenhum dos seus valores (evaluations, proposta, rejectionCodes) é copiado para o
+resumo. Isso é deliberado: assim como `runFinalizedAgentCycles` deixa `request` sem validação
+profunda no seu próprio limite porque essa responsabilidade já pertence a
+`runFinalizedAgentCycle`, este módulo deixa o conteúdo interno de `result` sem revalidação
+profunda porque essa responsabilidade já pertence a `finalizeBoundedAgentAttempts` — recalculá-lo
+aqui duplicaria exatamente a validação que a tarefa proíbe.
+
+Toda leitura do lote não confiável — `length`, cada índice, as chaves de cada item, do próprio
+`itemId`, do `status`, do `code` e do `result` aninhado — passa por `readProperty` e por uma
+verificação local de chaves exatas baseada em `Reflect.ownKeys` (mesmo padrão já usado em
+`run-finalized-agent-cycles.ts` e `finalize-bounded-agent-attempts.ts`, duplicado localmente
+neste módulo seguindo o mesmo precedente de não compartilhamento dessas primitivas privadas entre
+módulos de `src/agent`), então um getter ou `Proxy` hostil, inclusive um que lança um
+`ContractValidationError` forjado carregando um segredo, nunca escapa: é tratado exatamente como
+valor ausente antes mesmo de chegar a qualquer `catch`. A validação inteira ainda está envolvida
+por um `try/catch` de defesa em profundidade que converte qualquer exceção que não seja um
+`ContractValidationError` genuíno numa mensagem constante e sem segredo.
+
+Não cria ranking, pontuação, comparação de desempenho, agregação de propostas, votação, consenso,
+handoff, seleção de vencedor, retry, Risk Manager, `PaperBroker`, fill, carteira, ledger,
+persistência, provider de mercado ou integração Astra real. Não chama adapter, retry, finalizador,
+timer, relógio, aleatoriedade, HTTP, SDK, variável de ambiente, token, segredo, credencial,
+wallet, blockchain, testnet ou corretora.
+
+### Arquivos alterados
+
+- `src/agent/summarize-finalized-agent-cycles.ts` (novo — `summarizeFinalizedAgentCycles` e o
+  tipo `FinalizedAgentCyclesSummary`)
+- `tests/summarize-finalized-agent-cycles.test.ts` (novo — suíte completa, 36 testes)
+- `README.md` (nova entrada na lista de arquivos, atualização da frase de M4 e nova seção
+  "Resumo offline de lote finalizado")
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- lote misto real (construído de ponta a ponta via `runFinalizedAgentCycles`) com `ACCEPTED`,
+  `HOLD` e `FAILED` produz contagens exatas;
+- as três listas de `itemId` preservam a ordem original do lote;
+- cada item aparece em exatamente uma lista e `acceptedCount + holdCount + failedCount` é sempre
+  igual a `total`;
+- lotes contendo somente uma das três categorias (`ACCEPTED`, `HOLD` ou `FAILED`) funcionam;
+- `itemId` duplicado, `status`/`código` incompatível (status desconhecido, `code` diferente de
+  `AGENT_CYCLE_FAILED`, `result.status` diferente de `ACCEPTED`/`HOLD`), item com união
+  adulterada (`result` e `code` simultâneos), array vazio, array esparso e `itemId` vazio/em
+  branco falham fechados;
+- propriedades extras enumeráveis, não enumeráveis e `Symbol` — em um item, no `result` aninhado
+  e no próprio array do lote — falham fechadas;
+- getter/`Proxy` hostil em `length`, `Reflect.ownKeys` do lote, `itemId`, `status`, `code` e no
+  `result` aninhado (incluindo `Reflect.ownKeys` do próprio `result`), inclusive lançando um
+  `ContractValidationError` forjado carregando um segredo, não vazam o segredo e falham fechados;
+- array real esparso e `Proxy` de array reportando `.length` de quatro bilhões são rejeitados sem
+  alocação ou iteração proporcional ao comprimento declarado, em menos de 500ms;
+- o resumo retornado e as três listas de `itemId` ficam congelados (`Object.isFrozen`);
+- um lote de entrada simples (não congelado) não é mutado;
+- mesmos dados produzem um resumo campo a campo idêntico, inclusive entre duas execuções
+  independentes de `runFinalizedAgentCycles` com o mesmo lote de especificação;
+- resumir um lote já finalizado nunca chama novamente o adapter de nenhum item (contagem de
+  chamadas do adapter verificada antes e depois de `summarizeFinalizedAgentCycles`);
+- nenhuma chamada a adapter, retry, finalizador, timer, relógio, aleatoriedade, HTTP, SDK,
+  ambiente, persistência, Risk Manager, broker ou I/O — a própria transformação não contém
+  nenhuma dessas chamadas nem as importa;
+- toda a suíte anterior (925 testes antes desta tarefa) continua verde.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **961 testes, 961 passaram, 0 falharam** (925 anteriores + 36 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas nas entregas anteriores de `src/agent`. Esta tarefa não cria
+ranking, pontuação, comparação de desempenho, agregação de propostas, votação, consenso, handoff,
+seleção de vencedor, retry, Risk Manager, `PaperBroker`, fill, carteira, ledger, persistência,
+provider de mercado ou integração Astra real — nada disso estava no escopo de TASK-034.
+`summarizeFinalizedAgentCycles` não recalcula tentativas nem resultados: o `result` de um item
+`COMPLETED` é revalidado só na profundidade necessária para classificá-lo (`status` e o conjunto
+fechado de chaves de primeiro nível), nunca reconstruído a partir de `evaluations`/capturas como
+`finalizeBoundedAgentAttempts` já faz — duplicar essa reconstrução aqui estava explicitamente fora
+do escopo da tarefa.
+
+Este sandbox de execução não teve acesso de rede para `git fetch origin main` (o comando exigiu
+aprovação indisponível neste ambiente não interativo); a sincronização foi verificada confirmando
+que a branch de trabalho (`claude/issue-64-20260921-1441`) já estava com a árvore de trabalho
+limpa e nivelada com `main` no checkout inicial fornecido pela automação, sem alterações remotas
+pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: resume lote offline de ciclos finalizados`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-034 — correção solicitada na revisão (ciclo 1/3) do PR #65
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+André (`andreholmo`) solicitou, na revisão do PR #65 sobre o commit `f358bc3`, correção porque a
+revalidação do `result` aninhado em `classifyCompletedResult` (`src/agent/summarize-finalized-agent-cycles.ts`)
+verificava apenas o discriminante `status` e o conjunto fechado de chaves de primeiro nível, mas
+aceitava valores incompatíveis dentro de cada braço da união — três casos citados explicitamente
+na revisão eram aceitos e contados indevidamente antes desta correção:
+
+- `HOLD` com `reason: "QUALQUER_COISA"` em vez do único valor fechado `ATTEMPTS_EXHAUSTED`;
+- `HOLD` com `evaluations: null` e `rejectionCodes: null` em vez de arrays;
+- `ACCEPTED` com `evaluations: null` e `result: null` em vez de array/objeto JSON.
+
+A correção acrescenta, em `classifyCompletedResult`, checagens rasas adicionais depois da
+checagem de chaves exatas já existente — sem recomputar tentativas, evaluations ou proposta, e
+sem inspecionar o conteúdo interno de `evaluations`/`rejectionCodes`/`result`, exatamente como a
+tarefa original exige:
+
+- para `HOLD`: `reason` deve ser exatamente `"ATTEMPTS_EXHAUSTED"`; `evaluations` e
+  `rejectionCodes` devem ser arrays (`Array.isArray`, nunca `null` ou outro tipo);
+- para `ACCEPTED`: `evaluations` deve ser um array; `result` deve ser um objeto JSON não nulo e
+  não array.
+
+Duas funções auxiliares novas foram adicionadas: `safeIsArray` (envolve `Array.isArray` em
+`try/catch`, porque a checagem pode lançar sobre um `Proxy` revogado — tratada exatamente como
+"não é array", nunca relançada) e `isJsonObject` (objeto não nulo e não array). Ambas seguem o
+mesmo padrão fail-closed de `safeOwnKeys`/`hasExactOwnKeys` já presentes no módulo. Nenhuma outra
+função foi alterada; a sanitização de getters/`Proxy` via `readProperty` já existente cobre as
+novas leituras sem necessidade de mudança.
+
+### Arquivos alterados
+
+- `src/agent/summarize-finalized-agent-cycles.ts` (`classifyCompletedResult` reforçado com
+  checagens de tipo/valor para `reason`, `evaluations`, `rejectionCodes` e `result`; novas funções
+  `safeIsArray` e `isJsonObject`; constante `HOLD_RESULT_REASON`; comentários atualizados)
+- `tests/summarize-finalized-agent-cycles.test.ts` (5 novos testes de regressão cobrindo
+  exatamente os três casos citados na revisão, mais duas variações correlatas)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- rejeita item `COMPLETED/HOLD` cujo `reason` não é o valor fechado `ATTEMPTS_EXHAUSTED`;
+- rejeita item `COMPLETED/HOLD` cujos `evaluations`/`rejectionCodes` são `null` em vez de arrays;
+- rejeita item `COMPLETED/ACCEPTED` cujos `evaluations`/`result` são `null`;
+- rejeita item `COMPLETED/ACCEPTED` cujo `result` é um array em vez de objeto JSON;
+- rejeita item `COMPLETED/ACCEPTED` cujo `evaluations` é um objeto em vez de array.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **966 testes, 966 passaram, 0 falharam** (961 anteriores + 5 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR — estava em `action_required`
+no momento da revisão, conforme observado por André.
+
+### Limitações conhecidas
+
+Escopo permanece totalmente offline e sem recomputação: as checagens acrescentadas são
+estritamente mais rasas que a revalidação de `finalizeBoundedAgentAttempts` — nunca inspecionam o
+conteúdo de `evaluations`, `rejectionCodes` ou de `result`, apenas confirmam que cada campo
+obrigatório tem o tipo/valor básico que seu próprio braço fechado da união exige. Nenhuma
+propriedade adicional, ranking, Risk Manager, `PaperBroker`, rede, credencial ou rota financeira
+real foi introduzida.
+
+Este sandbox de execução não teve acesso de rede para `git fetch origin main` (o comando exigiu
+aprovação indisponível neste ambiente não interativo); a branch de trabalho
+(`claude/issue-64-20260921-1441`) já estava com a árvore de trabalho limpa no checkout inicial
+fornecido pela automação, sem alterações remotas pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: revalida tipos dos campos do result no resumo de ciclos finalizados`
+- **Hash:** `8db34537eba453951dc75ef461e4e0713d73146c`
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-034 — correção solicitada na revisão (ciclo 2/3) do PR #65
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+André (`andreholmo`) solicitou, no ciclo 2/3 da revisão do PR #65 (após os três casos do ciclo 1/3
+já corrigidos), nova correção porque `classifyCompletedResult`
+(`src/agent/summarize-finalized-agent-cycles.ts`) ainda aceitava resultados que
+`finalizeBoundedAgentAttempts` jamais poderia ter produzido. O próprio fixture sintético
+`completedAccepted` do arquivo de testes — `{ status: "ACCEPTED", evaluations: [], result: {} }`
+— era aceito e contado; da mesma forma, um `HOLD` com `evaluations`/`rejectionCodes` vazios,
+esparsos ou com propriedades extras também passava, embora `finalizeBoundedAgentAttempts` sempre
+produza entre 1 e 3 avaliações, cada uma com uma união interna fechada.
+
+A correção acrescenta, ainda sem recomputar tentativas nem chamar `evaluateAgentResponseCapture`,
+validação estrutural mais profunda em `classifyCompletedResult`:
+
+- `evaluations` (em ambos os desfechos) deve ser um array denso — sem buraco nem propriedade
+  extra enumerável, não enumerável ou `Symbol` — com entre 1 e `MAX_AGENT_RETRY_ATTEMPTS` (3)
+  entradas, reaproveitando `MIN_AGENT_RETRY_ATTEMPTS`/`MAX_AGENT_RETRY_ATTEMPTS` de
+  `retry-policy.ts`;
+- cada entrada de `evaluations` deve ser um objeto JSON com exatamente o conjunto fechado de
+  chaves do seu próprio `status` — `REJECTED`: `status`/`capture`/`code`, `ACCEPTED`:
+  `status`/`capture`/`proposal` — com `capture` (e, quando `ACCEPTED`, `proposal`) pelo menos um
+  objeto JSON, e `code` (quando `REJECTED`) um dos valores fechados de `AgentResponseRejectionCode`
+  (reaproveitado de `evaluate-agent-response-capture.ts`, sem duplicar o array);
+- `ACCEPTED.result` deve ter a mesma forma fechada de uma avaliação `ACCEPTED`
+  (`status`/`capture`/`proposal`, com `status` exatamente `"ACCEPTED"`);
+- toda entrada de `HOLD.evaluations` deve ser `REJECTED`-shaped — nenhuma entrada
+  `ACCEPTED`-shaped é aceita dentro de um `HOLD`;
+- `HOLD.rejectionCodes` deve ser um array denso — mesma checagem de "sem propriedade extra" — cujo
+  comprimento e ordem coincidem exatamente com os `code`s próprios já declarados em cada entrada de
+  `evaluations` (comparação estrutural entre os dois campos já lidos, nunca recomputada a partir de
+  uma `capture`).
+
+Isso fecha o bypass relatado sem duplicar a recomputação de `finalizeBoundedAgentAttempts`:
+`capture` e `proposal` continuam sendo lidos apenas como "objeto JSON", nunca inspecionados campo a
+campo, e `evaluateAgentResponseCapture` nunca é chamado por este módulo.
+
+Como os fixtures sintéticos `completedAccepted`/`completedHold` do arquivo de testes usavam
+exatamente a estrutura vazia agora rejeitada, ambos foram reescritos para uma estrutura
+genuinamente possível (uma entrada de `evaluations` fechada por discriminante, com `capture`/
+`proposal` sintéticos e `rejectionCodes` coerentes), conforme pedido explicitamente na revisão.
+
+### Arquivos alterados
+
+- `src/agent/summarize-finalized-agent-cycles.ts` (`classifyCompletedResult` reescrito para
+  validar estruturalmente `evaluations`/`result`/`rejectionCodes`; novas funções
+  `requireDenseArrayEntries`, `requireEvaluationEntries`, `requireEvaluationEntryShape`,
+  `isKnownRejectionCode`; novas constantes `REJECTED_EVALUATION_KEYS`/`ACCEPTED_EVALUATION_KEYS`;
+  reaproveita `MIN_AGENT_RETRY_ATTEMPTS`/`MAX_AGENT_RETRY_ATTEMPTS` de `retry-policy.ts` e
+  `AGENT_RESPONSE_REJECTION_CODES` de `evaluate-agent-response-capture.ts`; comentário de módulo
+  atualizado)
+- `tests/summarize-finalized-agent-cycles.test.ts` (fixtures `completedAccepted`/`completedHold`
+  reescritas para uma estrutura genuinamente possível; 14 novos testes de regressão estruturais;
+  um teste existente ajustado para continuar exercitando seu cenário original com `evaluations`
+  válido)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- rejeita `ACCEPTED` com `evaluations` vazio (o bypass relatado pelo fixture `completedAccepted`);
+- rejeita `HOLD` com `evaluations`/`rejectionCodes` vazios (o bypass relatado);
+- rejeita `evaluations` com mais de 3 entradas;
+- rejeita `evaluations` esparso;
+- rejeita `evaluations` com propriedade extra não enumerável;
+- rejeita `rejectionCodes` com propriedade extra `Symbol`;
+- rejeita entrada de `evaluations` com propriedade extra;
+- rejeita entrada `REJECTED` com `code` fora do conjunto fechado;
+- rejeita `HOLD.evaluations` contendo uma entrada `ACCEPTED`-shaped;
+- rejeita `ACCEPTED.result` com a forma `REJECTED` em vez de `ACCEPTED`;
+- rejeita `ACCEPTED.result` sem `proposal`;
+- rejeita `rejectionCodes` cujo comprimento não bate com `evaluations`;
+- rejeita `rejectionCodes` cuja ordem não bate com os `code`s declarados;
+- aceita `HOLD` no limite máximo de 3 avaliações (caso positivo, garante que o limite superior não
+  rejeita incorretamente).
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **980 testes, 980 passaram, 0 falharam** (966 anteriores + 14 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+A validação continua estritamente mais rasa que a recomputação de `finalizeBoundedAgentAttempts`:
+`capture` e `proposal` nunca têm seus campos internos lidos ou comparados, e nada aqui confirma que
+uma `capture` genuinamente produziu o `proposal`/`code` ao lado dela — apenas que a forma é
+interna e mutuamente consistente e fechada. Isso é intencional: este módulo nunca recalcula uma
+tentativa ou um resultado. Nenhuma propriedade adicional, ranking, Risk Manager, `PaperBroker`,
+rede, credencial ou rota financeira real foi introduzida.
+
+Este sandbox de execução não teve acesso de rede para `git fetch origin main` (o comando exigiu
+aprovação indisponível neste ambiente não interativo); a branch de trabalho
+(`claude/issue-64-20260921-1441`) já estava com a árvore de trabalho limpa no checkout inicial,
+sem alterações remotas pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: valida estruturalmente evaluations, result e rejectionCodes no resumo de ciclos finalizados`
+- **Hash:** `06596680c8c6e6ecb8a954117e1b94320f01ae6f`
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-034 — correção solicitada na revisão (ciclo 3/3, último) do PR #65
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+André (`andreholmo`) solicitou, no ciclo 3/3 — o último permitido — da revisão do PR #65 (após os
+casos dos ciclos 1/3 e 2/3 já corrigidos), a correção final porque o braço `ACCEPTED` de
+`classifyCompletedResult` (`src/agent/summarize-finalized-agent-cycles.ts`) ainda aceitava estados
+que `finalizeBoundedAgentAttempts` jamais poderia ter produzido:
+
+- `evaluations` inteiramente `REJECTED` com um `result` separado de forma `ACCEPTED`;
+- uma avaliação `ACCEPTED` antes da última posição, ou mais de uma avaliação `ACCEPTED`;
+- `result` de forma `ACCEPTED` que não correspondia à última avaliação aceita;
+- `capture`/`proposal` vazios ou adulterados, pois bastava serem objetos JSON para passar.
+
+A correção, ainda sem recomputar tentativas nem chamar `evaluateAgentResponseCapture`,
+`captureAgentResponse` ou `parseAgentProposal`, acrescenta a `classifyCompletedResult` (braço
+`ACCEPTED`):
+
+- apenas a última entrada de `evaluations` pode ser `ACCEPTED`-shaped — qualquer entrada
+  `ACCEPTED`-shaped antes da última posição falha fechado, o que cobre tanto uma avaliação aceita
+  antecipada quanto mais de uma avaliação aceita (duplicada);
+- a última entrada deve existir e ser `ACCEPTED`-shaped — uma sequência inteiramente `REJECTED`
+  falha fechado, mesmo que `result` isoladamente pareça válido;
+- `result` deve ser `ACCEPTED`-shaped e idêntico, campo a campo, à `capture`/`proposal` dessa
+  última entrada — comparação estrutural entre dois valores já validados por forma neste mesmo
+  limite, nunca uma recomputação a partir de uma `capture`.
+
+Três novas funções (`requireClosedRequestShape`, `requireClosedCaptureShape`,
+`requireClosedProposalShape`) validam a forma pública fechada de `request`/`capture`/`proposal` —
+exatamente as chaves próprias de `AgentRequest`/`AgentResponseCapture`/`AgentProposal`, com
+`schemaVersion` fechado em `1`, `action` num dos valores fechados de `PROPOSAL_ACTIONS` e
+`evidenceIds` um array denso de strings sem propriedade extra (enumerável, não enumerável ou
+`Symbol`) — em vez do antigo `isJsonObject` isolado, fechando o bypass de `capture`/`proposal`
+vazios ou adulterados. `requireEvaluationEntryShape` agora retorna esses campos já validados (em
+vez de só o discriminante `"ACCEPTED" | "REJECTED"`), reaproveitados tanto pela comparação
+`result`/última-avaliação em `ACCEPTED` quanto pela extração de `code` em `HOLD` (sem reler
+`entry.code` cru). `rawResponse`/`request` continuam sem terem o próprio conteúdo interpretado —
+apenas comparados como string/campos opacos, nunca decodificados ou reavaliados.
+
+### Arquivos alterados
+
+- `src/agent/summarize-finalized-agent-cycles.ts` (`classifyCompletedResult` — braço `ACCEPTED`
+  reescrito para exigir só-a-última-avaliação-aceita e `result` idêntico campo a campo à última
+  avaliação; `requireEvaluationEntryShape` retorna a forma validada de `capture`/`code`/`proposal`
+  em vez de só o discriminante; novas funções `requireClosedRequestShape`,
+  `requireClosedCaptureShape`, `requireClosedProposalShape`, `requireClosedEvidenceIds`,
+  `requireNonEmptyString` e as comparações estruturais `requestFieldsEqual`, `captureFieldsEqual`,
+  `evidenceIdsEqual`, `proposalFieldsEqual`, `acceptedEvaluationShapesMatch`; novas constantes
+  `REQUEST_KEYS`/`CAPTURE_KEYS`/`PROPOSAL_KEYS`; reaproveita `PROPOSAL_ACTIONS` de
+  `src/domain/contracts.ts`; comentários de módulo atualizados)
+- `tests/summarize-finalized-agent-cycles.test.ts` (fixtures sintéticas `syntheticCapture`/
+  `syntheticProposalValue`/`acceptedEvaluationEntry`/`rejectedEvaluationEntry` reescritas para uma
+  estrutura `AgentRequest`/`AgentResponseCapture`/`AgentProposal` genuinamente possível,
+  reaproveitando os builders `request`/`proposal` já existentes no arquivo; 12 novos testes de
+  regressão)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+- `README.md` (parágrafo do resumo offline de lote finalizado atualizado para descrever as
+  invariantes fechadas atuais de `evaluations`/`result`/`capture`/`proposal`)
+
+### Testes de regressão adicionados
+
+- rejeita `ACCEPTED` com `evaluations` inteiramente `REJECTED` e `result` separado de forma
+  `ACCEPTED` (o bypass relatado no ciclo 3/3);
+- rejeita `ACCEPTED` cuja única avaliação `ACCEPTED`-shaped está antes da última posição;
+- rejeita `ACCEPTED` que declara duas avaliações `ACCEPTED`-shaped;
+- rejeita `ACCEPTED` cujo `result` diverge da última avaliação aceita;
+- aceita `ACCEPTED` cujo `result` corresponde à última avaliação aceita campo a campo (caso
+  positivo);
+- rejeita `ACCEPTED` cuja `capture` carrega propriedade extra;
+- rejeita `ACCEPTED` cuja `capture.request` está com propriedade obrigatória ausente;
+- rejeita `ACCEPTED` cuja `proposal.action` está fora do conjunto fechado;
+- rejeita `ACCEPTED` cuja `proposal.evidenceIds` é esparso;
+- rejeita `ACCEPTED` cuja `proposal.evidenceIds` carrega propriedade extra `Symbol`;
+- rejeita `ACCEPTED` cuja `capture` está vazia;
+- rejeita `ACCEPTED` cuja `proposal` está vazia.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **992 testes, 992 passaram, 0 falharam** (980 anteriores + 12 novos) |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+A validação continua estritamente mais rasa que a recomputação de `finalizeBoundedAgentAttempts`:
+`rawResponse` nunca tem seu conteúdo decodificado/interpretado, e `request`/`proposal` nunca têm
+suas regras de negócio (padrões de slug/identificador, limites de tamanho, a regra
+`HOLD`→`positionPct === 0`) revalidadas — apenas a forma pública fechada e a igualdade campo a
+campo entre dois valores já validados por forma dentro do mesmo lote. Nada aqui confirma que uma
+`capture` genuinamente produziu o `proposal`/`code` ao lado dela, nem que um `rawResponse`
+realmente decodifica para o `proposal` declarado. Isso é intencional: este módulo nunca recalcula
+uma tentativa ou um resultado, responsabilidade que permanece de `finalizeBoundedAgentAttempts`.
+Nenhuma propriedade adicional, ranking, Risk Manager, `PaperBroker`, rede, credencial ou rota
+financeira real foi introduzida.
+
+Este sandbox de execução não teve acesso de rede para `git fetch origin main` (o comando exigiu
+aprovação indisponível neste ambiente não interativo); a branch de trabalho
+(`claude/issue-64-20260921-1441`) já estava com a árvore de trabalho limpa no checkout inicial,
+sem alterações remotas pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova. Este era o último ciclo de correção permitido pela revisão; caso ainda reste algum
+problema estrutural após esta correção, a automação deve parar e escalar a André em vez de propor
+uma quarta correção, conforme instruído.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: fecha invariantes estruturais restantes do braço ACCEPTED no resumo de ciclos finalizados`
+- **Hash:** `3d93e3816022116af30d9a28955f322c3aa2d741`
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
