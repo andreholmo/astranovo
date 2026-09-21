@@ -21,7 +21,9 @@ estratégia com o buy-and-hold, o relatório determinístico consolidado dessas 
 comparações, a seleção/série de snapshots sem look-ahead para replay, e o relatório
 multiagente offline que consolida esses resumos para N agentes**, e **M4 — o
 adaptador de agente stub determinístico, o registro imutável de resposta bruta, a política
-de retry controlado, e a execução determinística de uma tentativa única de agente**.
+de retry controlado, a execução determinística de uma tentativa única de agente, a execução
+limitada e auditável de até três tentativas sequenciais, e a finalização pura e fail-closed
+do resultado final: proposta aceita preservada ou `HOLD` explícito após esgotamento**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -89,6 +91,10 @@ de retry controlado, e a execução determinística de uma tentativa única de a
 - `src/agent/run-bounded-agent-attempts.ts` — `runBoundedAgentAttempts`, a menor composição
   offline que encadeia até `policy.maxAttempts` tentativas auditáveis sequenciais, avançando
   somente após `REJECTED`, parando imediatamente em `ACCEPTED` ou `ATTEMPTS_EXHAUSTED`;
+- `src/agent/finalize-bounded-agent-attempts.ts` — `finalizeBoundedAgentAttempts`, a menor
+  transformação pura e offline que converte o `BoundedAgentAttemptsResult` já auditado no
+  resultado final seguro do agente: `ACCEPTED` preserva a proposta aceita sem alteração,
+  `ATTEMPTS_EXHAUSTED` vira `HOLD` explícito com razão fechada, nunca fabricando proposta;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.

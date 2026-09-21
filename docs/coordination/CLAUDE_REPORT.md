@@ -4776,6 +4776,133 @@ Nenhum bloqueio.
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
 
+## TASK-031 — finaliza tentativas com hold seguro
+
+- **Status reportado:** entrega executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Criado `src/agent/finalize-bounded-agent-attempts.ts`, definindo `finalizeBoundedAgentAttempts`: a
+menor transformação pura e offline que converte o `BoundedAgentAttemptsResult` já produzido por
+`runBoundedAgentAttempts` (`./run-bounded-agent-attempts.ts`) no resultado final seguro de um
+agente para um ciclo:
+
+```text
+ACCEPTED           → ACCEPTED (proposta aceita preservada, sem alteração)
+ATTEMPTS_EXHAUSTED → HOLD (razão fechada: ATTEMPTS_EXHAUSTED)
+```
+
+Esta função apenas representa uma decisão já tomada pelo laço de retry; não chama
+`AgentAdapter`, `RiskManager` ou `Broker`, não executa retry, não toca carteira/ledger e não tem
+relógio, aleatoriedade, rede, SDK, variável de ambiente ou persistência de qualquer tipo. `HOLD` é
+o substituto seguro e auditável explícito para "nenhuma proposta pôde ser confiada" — nunca
+fabrica `AgentProposal`, preço, posição, confiança ou evidência.
+
+`value` nunca é confiado apenas por seu tipo declarado: todo campo lido é revalidado fail-closed
+em runtime, inclusive uma união inteiramente forjada. Cada avaliação é recomputada do zero a
+partir da sua própria `capture`, via `evaluateAgentResponseCapture`
+(`./evaluate-agent-response-capture.ts`), e o `status`/`code`/`proposal` declarados — e, em
+`ACCEPTED`, o `result` de nível superior — precisam bater exatamente com essa recomputação, sem
+propriedade extra ou faltante (inclusive uma presente apenas com valor `undefined`). Uma união
+`ATTEMPTS_EXHAUSTED` declarada não pode conter uma avaliação `ACCEPTED`; uma união `ACCEPTED`
+declarada não pode conter uma avaliação `ACCEPTED` em posição diferente da última, e seu `result`
+precisa bater exatamente com essa última avaliação. `evaluations` precisa ter entre uma e
+`MAX_AGENT_RETRY_ATTEMPTS` entradas — nunca vazia, nunca acima do que a política jamais
+permitiria.
+
+Toda a revalidação roda dentro de uma única fronteira fail-closed: qualquer exceção lançada ao
+ler ou recomputar um valor forjado — inclusive uma lançada por uma trap de `Proxy` ou getter
+lançador aninhado em qualquer profundidade, já sendo um `ContractValidationError` ou não — é
+convertida, na borda deste módulo, num `ContractValidationError` sanitizado, sem payload,
+mensagem, stack ou causa da exceção original. Isso fecha inclusive o vetor em que
+`captureAgentResponse` (`./capture-agent-response.ts`) lê `request`/`responseId`/`rawResponse`/
+`promptVersion`/`model` por acesso direto de propriedade (sem `readProperty`): um `capture`
+forjado, agora aceito de uma fonte externa e potencialmente adversária, poderia antes lançar um
+segredo bruto por essa via.
+
+Reutiliza `evaluateAgentResponseCapture` para a recomputação e `MIN_AGENT_RETRY_ATTEMPTS`/
+`MAX_AGENT_RETRY_ATTEMPTS` (`./retry-policy.ts`) para o limite de entradas, em vez de duplicar a
+lógica de nenhum dos dois módulos. Nenhum contrato público de `runBoundedAgentAttempts`,
+`evaluateAgentResponseCapture` ou `AgentRetryPolicy` foi alterado. `StubAgentAdapter` não foi
+tocado.
+
+### Arquivos alterados
+
+- `src/agent/finalize-bounded-agent-attempts.ts` (novo — `finalizeBoundedAgentAttempts` e seus
+  tipos)
+- `tests/finalize-bounded-agent-attempts.test.ts` (novo — suíte completa)
+- `README.md` (nova entrada na lista de arquivos e atualização da frase de M4)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- converte `ACCEPTED` preservando proposta, captura, histórico e ordem, na primeira tentativa e
+  após rejeições;
+- converte `ATTEMPTS_EXHAUSTED` em `HOLD` com razão fechada `ATTEMPTS_EXHAUSTED` e códigos
+  alinhados, para 1, 2 e 3 rejeições;
+- nunca fabrica `AgentProposal`, preço, posição, confiança ou evidência no ramo `HOLD` (o tipo
+  `FinalizedHoldAgentAttempts` não tem `result`, e suas avaliações nunca têm `proposal`);
+- resultado e listas retornadas são congelados (`Object.isFrozen`) em ambos os ramos;
+- entrada não é mutada em nenhum dos dois ramos;
+- rejeita união adulterada: status inválido, entrada `null`/array, resultado aceito divergente
+  (capture diferente ou proposta alterada), avaliação `ACCEPTED` dentro do ramo
+  `ATTEMPTS_EXHAUSTED`, código divergente (no `rejectionCodes` de nível superior ou numa entrada
+  individual), lista de avaliações vazia ou acima do limite de três (em ambos os ramos), avaliação
+  `ACCEPTED` fora da última posição, e `result` que não corresponde à última avaliação
+  efetivamente aceita;
+- rejeita propriedade extra e faltante no objeto de nível superior e em cada entrada de
+  avaliação, inclusive quando presente com valor `undefined`, e propriedade extra numa proposta;
+- getters e `Proxy` forjados no `status`, em `evaluations` (incluindo um `Proxy` sobre um array
+  real), em `result`, na `capture` de uma entrada e num campo interno de uma `capture` (`responseId`)
+  falham com `ContractValidationError` sanitizado, sem vazar o segredo lançado;
+- mesma entrada válida produz resultado campo a campo idêntico, em `ACCEPTED` e em `HOLD`;
+- nenhuma chamada a adapter, retry, timer, relógio, aleatoriedade, HTTP, SDK, ambiente,
+  persistência ou I/O — verificado inclusive substituindo `Date.now`, `Math.random`,
+  `setTimeout` e `fetch` por versões que lançam;
+- toda a suíte anterior continua verde.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **864 testes, 864 passaram, 0 falharam** (823 anteriores + 41 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas nas entregas anteriores de `src/agent`. Esta tarefa não executa
+tentativa, não cria coordenador multiagente, Risk Manager, `PaperBroker`, fill, carteira, ledger,
+persistência, logs externos, provider de mercado, integração Astra real, timeout, backoff ou
+agendamento — nada disso estava no escopo de TASK-031. A conversão de qualquer exceção
+não-`ContractValidationError` (por exemplo, uma vinda de um getter/`Proxy` forjado em qualquer
+profundidade dentro de `value`) num `ContractValidationError` genérico, na borda de
+`finalizeBoundedAgentAttempts`, é intencional e documentada no cabeçalho do módulo: garante que
+nenhum segredo escape, ao custo de uma mensagem de erro menos específica nesses casos forjados —
+nunca nos casos de estrutura genuinamente inválida, que continuam recebendo mensagens específicas
+por campo.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: finaliza tentativas com hold seguro`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
+
 ## TASK-030 — correção 1/3 da revisão `REQUEST_CHANGES` (PR #57, SHA `55b55bd`)
 
 - **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
