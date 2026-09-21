@@ -5283,3 +5283,129 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-032 — compõe ciclo offline finalizado de agente
+
+- **Status reportado:** entrega executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Criado `src/agent/run-finalized-agent-cycle.ts`, definindo `runFinalizedAgentCycle`: a menor
+composição assíncrona e offline que fecha o ciclo de exatamente um agente encadeando as duas
+primitivas já existentes e revisadas em TASK-030/TASK-031:
+
+```text
+RunBoundedAgentAttemptsRequest
+→ runBoundedAgentAttempts (uma chamada)
+→ finalizeBoundedAgentAttempts (uma chamada)
+→ ACCEPTED | HOLD
+```
+
+A função recebe exatamente o mesmo contrato de entrada de `runBoundedAgentAttempts`
+(`RunBoundedAgentAttemptsRequest`, reexportado sem alteração), chama `runBoundedAgentAttempts`
+exatamente uma vez, entrega o `BoundedAgentAttemptsResult` retornado diretamente a
+`finalizeBoundedAgentAttempts` — sem remodelar, copiar, reinterpretar ou enriquecer nenhum campo
+— exatamente uma vez, e devolve a união `FinalizedBoundedAgentAttemptsResult` resultante sem
+alteração. `ACCEPTED` é preservado integralmente; `ATTEMPTS_EXHAUSTED` só vira `HOLD` através do
+finalizador já existente. Nenhuma validação, captura, decisão de progresso, retry ou lógica de
+finalização foi duplicada — cada responsabilidade continua vivendo em exatamente um módulo
+(`run-auditable-agent-attempt.ts`, `decide-agent-attempt-progress.ts`,
+`run-bounded-agent-attempts.ts` e `finalize-bounded-agent-attempts.ts`).
+
+Se `runBoundedAgentAttempts` lançar — uma falha anterior a qualquer captura válida —, o erro já
+sanitizado por esse módulo se propaga imediatamente e `finalizeBoundedAgentAttempts` nunca chega
+a ser chamado; nenhuma tentativa adicional é feita. A própria composição não introduz nenhum
+`try`/`catch`, então nenhuma mensagem, stack ou payload é reembalado ou alterado nesse caminho.
+`runFinalizedAgentCycle` não gera id, timestamp, mensagem, proposta ou qualquer outro dado
+implícito, e não altera o contrato público de nenhum dos dois módulos que compõe.
+
+Não cria coordenador multiagente, agregação, votação, handoff, Risk Manager, `PaperBroker`, fill,
+carteira, ledger, persistência, provider de mercado, integração Astra real, timeout, backoff ou
+agendamento. Não usa HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de
+ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora ou dinheiro real.
+`StubAgentAdapter` não foi tocado; os testes usam apenas adapters stub locais e determinísticos
+definidos no próprio arquivo de teste (`SequentialAdapter`, `ThrowingAdapter`), no mesmo padrão já
+usado por `tests/run-bounded-agent-attempts.test.ts`.
+
+### Arquivos alterados
+
+- `src/agent/run-finalized-agent-cycle.ts` (novo — `runFinalizedAgentCycle` e reexportação dos
+  tipos `RunBoundedAgentAttemptsRequest`/`FinalizedBoundedAgentAttemptsResult`)
+- `tests/run-finalized-agent-cycle.test.ts` (novo — suíte completa)
+- `README.md` (nova entrada na lista de arquivos, atualização da frase de M4 e nova seção "Ciclo
+  offline finalizado de um agente")
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- rejeição seguida de aceitação devolve `ACCEPTED`, preservando capturas, proposta, ordem e ids;
+- esgotamento com 1, 2 e 3 tentativas devolve `HOLD` com razão `ATTEMPTS_EXHAUSTED` e códigos
+  fechados na ordem;
+- o adapter é chamado exatamente o número necessário de vezes e nunca após aceitação (mesmo com
+  ids/respostas extras disponíveis) ou após uma falha lançada;
+- cada `responseId` explícito é usado uma vez e na ordem fornecida, refletido em
+  `evaluation.capture.responseId` de cada tentativa;
+- entrada `null`/array, `responseIds` insuficientes, `responseIds` duplicados, adapter `null` e um
+  `Proxy` forjado sobre `responseIds` falham antes da primeira chamada ao adapter;
+- uma exceção lançada pelo adapter, e uma resposta bruta que não é `string`, permanecem
+  sanitizadas (sem vazar segredo) e não iniciam nova tentativa — exatamente uma chamada ao
+  adapter em ambos os casos;
+- resultado e suas listas (`evaluations`/`rejectionCodes`) permanecem congelados em `ACCEPTED` e
+  em `HOLD`;
+- `responseIds` e o `AgentRequest` de entrada não são mutados;
+- mesmos dados determinísticos produzem resultado campo a campo idêntico, em `ACCEPTED` e em
+  `HOLD`, inclusive com tempo decorrido real entre chamadas (`setTimeout` apenas para medir, nunca
+  consultado pela função);
+- nenhuma duplicação de proposta, captura, validação, retry ou finalização: verificado comparando
+  o resultado de `runFinalizedAgentCycle` byte a byte com o resultado de chamar
+  `runBoundedAgentAttempts` seguido de `finalizeBoundedAgentAttempts` manualmente, para `ACCEPTED`
+  e para `HOLD`;
+- nenhuma chamada a timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência, Risk
+  Manager, broker ou I/O — a própria composição não contém nenhuma dessas chamadas, apenas dois
+  `await`/chamadas diretas;
+- toda a suíte anterior (873 testes antes desta tarefa, incluindo TASK-030/TASK-031) continua
+  verde.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **897 testes, 897 passaram, 0 falharam** (873 anteriores + 24 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas nas entregas anteriores de `src/agent`. Esta tarefa não executa
+tentativa própria, não cria coordenador multiagente, Risk Manager, `PaperBroker`, fill, carteira,
+ledger, persistência, logs externos, provider de mercado, integração Astra real, timeout, backoff
+ou agendamento — nada disso estava no escopo de TASK-032. `runFinalizedAgentCycle` não adiciona
+nenhuma fronteira de sanitização própria: a sanitização de exceções continua sendo
+responsabilidade exclusiva de `runBoundedAgentAttempts` (para falhas antes de qualquer captura) e
+de `finalizeBoundedAgentAttempts` (para uma união forjada), como já documentado nos relatórios de
+TASK-030 e TASK-031.
+
+Este sandbox de execução não teve acesso de rede para `git fetch origin main`; a sincronização foi
+verificada confirmando que a branch de trabalho já estava nivelada com o `main` local fornecido no
+checkout inicial (mesmo hash de commit em ambos), sem alterações remotas pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: compõe ciclo offline finalizado de agente`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
