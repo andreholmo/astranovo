@@ -424,3 +424,136 @@ describe("runSingleAgentAttempt validates metadata fail-closed before calling th
     assert.equal(adapter.callCount, 0);
   });
 });
+
+describe("runSingleAgentAttempt keeps its original public validation messages byte for byte", () => {
+  it("keeps the original adapter validation message and contract name", async () => {
+    const error = await expectRejection(
+      runSingleAgentAttempt({ ...BASE_INPUT, adapter: {} as unknown as AgentAdapter })
+    );
+
+    assert.equal(error.contract, "RunSingleAgentAttempt");
+    assert.equal(
+      error.message,
+      "Invalid RunSingleAgentAttempt: adapter must be an object exposing a call(request) function"
+    );
+  });
+
+  it("keeps the original message for a non-object adapter without exposing its value", async () => {
+    const secret = "SECRET_TOKEN_NOT_AN_ADAPTER";
+
+    const error = await expectRejection(
+      runSingleAgentAttempt({ ...BASE_INPUT, adapter: secret as unknown as AgentAdapter })
+    );
+
+    assert.equal(error.contract, "RunSingleAgentAttempt");
+    assert.equal(
+      error.message,
+      "Invalid RunSingleAgentAttempt: adapter must be an object exposing a call(request) function"
+    );
+    assert.ok(!error.message.includes(secret));
+  });
+
+  it("keeps the original responseId validation message and contract name", async () => {
+    const adapter = new CountingAdapter(VALID_RAW_RESPONSE);
+
+    const error = await expectRejection(
+      runSingleAgentAttempt({ adapter, ...BASE_INPUT, responseId: 123 as unknown as string })
+    );
+
+    assert.equal(error.contract, "RunSingleAgentAttempt");
+    assert.equal(error.message, "Invalid RunSingleAgentAttempt: responseId must be a string");
+    assert.equal(adapter.callCount, 0);
+  });
+
+  it("keeps the original promptVersion validation message and contract name", async () => {
+    const adapter = new CountingAdapter(VALID_RAW_RESPONSE);
+
+    const error = await expectRejection(
+      runSingleAgentAttempt({ adapter, ...BASE_INPUT, promptVersion: "   " })
+    );
+
+    assert.equal(error.contract, "RunSingleAgentAttempt");
+    assert.equal(error.message, "Invalid RunSingleAgentAttempt: promptVersion must not be empty or blank");
+    assert.equal(adapter.callCount, 0);
+  });
+
+  it("keeps the original model validation message and contract name", async () => {
+    const adapter = new CountingAdapter(VALID_RAW_RESPONSE);
+
+    const error = await expectRejection(runSingleAgentAttempt({ adapter, ...BASE_INPUT, model: "" }));
+
+    assert.equal(error.contract, "RunSingleAgentAttempt");
+    assert.equal(error.message, "Invalid RunSingleAgentAttempt: model must not be empty or blank");
+    assert.equal(adapter.callCount, 0);
+  });
+
+  it("keeps the original AgentRequest validation contract name", async () => {
+    const adapter = new CountingAdapter(VALID_RAW_RESPONSE);
+    const invalidRequest = {
+      schemaVersion: 1,
+      agentId: "",
+      cycleId: "cycle-1",
+      snapshotId: "snapshot-1"
+    } as unknown as AgentRequest;
+
+    const error = await expectRejection(
+      runSingleAgentAttempt({ adapter, ...BASE_INPUT, request: invalidRequest })
+    );
+
+    assert.notEqual(error.contract, "RunAuditableAgentAttempt");
+    assert.equal(adapter.callCount, 0);
+  });
+});
+
+describe("runSingleAgentAttempt sanitizes a forged adapter whose call getter/proxy throws", () => {
+  it("fails closed without leaking a secret thrown by a getter for call, reading it exactly once and never calling it", async () => {
+    const secret = "SECRET_FROM_CALL_GETTER";
+    let getterReads = 0;
+    const forgedAdapter: Record<string, unknown> = {};
+    Object.defineProperty(forgedAdapter, "call", {
+      enumerable: true,
+      configurable: true,
+      get(): never {
+        getterReads += 1;
+        throw new Error(secret);
+      }
+    });
+
+    const error = await expectRejection(
+      runSingleAgentAttempt({ ...BASE_INPUT, adapter: forgedAdapter as unknown as AgentAdapter })
+    );
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(error.contract, "RunSingleAgentAttempt");
+    assert.equal(
+      error.message,
+      "Invalid RunSingleAgentAttempt: adapter must be an object exposing a call(request) function"
+    );
+    assert.equal(getterReads, 1);
+  });
+
+  it("fails closed without leaking a secret thrown by a Proxy get trap for call, reading it exactly once", async () => {
+    const secret = "SECRET_FROM_PROXY_TRAP";
+    let trapReads = 0;
+    const forgedAdapter = new Proxy(
+      {},
+      {
+        get(_target, property): unknown {
+          if (property === "call") {
+            trapReads += 1;
+            throw new Error(secret);
+          }
+          return undefined;
+        }
+      }
+    );
+
+    const error = await expectRejection(
+      runSingleAgentAttempt({ ...BASE_INPUT, adapter: forgedAdapter as unknown as AgentAdapter })
+    );
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(error.contract, "RunSingleAgentAttempt");
+    assert.equal(trapReads, 1);
+  });
+});

@@ -4466,3 +4466,201 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-029 — executa tentativa auditável de agente
+
+- **ID da tarefa:** TASK-029
+- **Status reportado:** entrega executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Criado `src/agent/run-auditable-agent-attempt.ts`, definindo `runAuditableAgentAttempt`: a
+menor composição que chama `AgentAdapter.call` exatamente uma vez e devolve diretamente a
+união imutável `AgentResponseEvaluation` (`ACCEPTED(AgentProposal) | REJECTED(código seguro)`),
+em vez de lançar exceção para uma resposta inválida. A sequência é fail-closed em cada passo:
+
+1. valida o próprio objeto de entrada, `adapter`, `request` (`parseAgentRequest`), `responseId`,
+   `promptVersion` e `model` antes de tocar o adapter;
+2. chama `adapter.call(request)` exatamente uma vez; qualquer exceção lançada vira uma
+   `ContractValidationError` com mensagem fixa e sanitizada, sem `message`, `stack`, `cause` ou
+   conteúdo original;
+3. exige que o retorno bruto seja `string` — outro tipo falha fechado antes de criar captura;
+4. entrega a resposta bruta, sem normalização, a `evaluateAgentResponseCapture`, que preserva a
+   captura tanto em `ACCEPTED` quanto em `REJECTED`.
+
+`src/agent/run-single-agent-attempt.ts` foi refatorado para delegar inteiramente a
+`runAuditableAgentAttempt` — nenhuma segunda implementação da validação ou da chamada ao
+adapter permanece nesse arquivo. `runSingleAgentAttempt` mantém seu contrato público idêntico:
+`ACCEPTED` continua devolvendo `{ capture, proposal }`; `REJECTED` continua sendo convertido na
+mesma `ContractValidationError` sanitizada já existente para cada um dos seis códigos, via a
+função `rejectForCode` preservada sem alteração de comportamento. Nenhuma chamada adicional ao
+adaptador é introduzida.
+
+Como a validação de metadados (`adapter`, `responseId`, `promptVersion`, `model`) agora vive em
+`runAuditableAgentAttempt`, o nome de contrato usado nessas mensagens sanitizadas passou de
+`RunSingleAgentAttempt` para `RunAuditableAgentAttempt`. Nenhum teste (novo ou pré-existente)
+depende do texto literal dessas mensagens — apenas de `instanceof ContractValidationError` e da
+ausência de conteúdo sensível — então o comportamento público observável de
+`runSingleAgentAttempt` permanece o mesmo.
+
+### Arquivos alterados
+
+- `src/agent/run-auditable-agent-attempt.ts` (novo)
+- `src/agent/run-single-agent-attempt.ts` (refatorado para delegar)
+- `tests/run-auditable-agent-attempt.test.ts` (novo)
+- `README.md` (nova seção "Tentativa auditável de agente"; substitui a seção anterior
+  "Tentativa única de agente stub")
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- `ACCEPTED` chama o adaptador exatamente uma vez e preserva captura/proposta;
+- os seis códigos `REJECTED` (`INVALID_JSON`, `INVALID_PROPOSAL`, `AGENT_ID_MISMATCH`,
+  `CYCLE_ID_MISMATCH`, `PROMPT_VERSION_MISMATCH`, `MODEL_MISMATCH`) são devolvidos como dado,
+  com captura bruta byte a byte;
+- resposta não-string (`object`, `undefined`, `null`, número) e exceção do adaptador (com
+  `Error` e com valor não-`Error`) falham fechado, sem segunda chamada;
+- mensagem, stack, cause, token, segredo ou valor arbitrário lançado pelo adaptador não aparecem
+  no erro;
+- objeto de entrada forjado (`null`, array), adaptador forjado (`null`, sem `call`, `call` não
+  função, valor não-objeto), `AgentRequest` inválido, `promptVersion`/`model`/`responseId`
+  inválidos falham antes da chamada ao adaptador;
+- `runSingleAgentAttempt` mantém todos os 36 testes pré-existentes (`tests/run-single-agent-attempt.test.ts`,
+  inalterado) após a refatoração;
+- resultados congelados (`ACCEPTED` e `REJECTED`), ausência de mutação do `AgentRequest` e do
+  objeto de entrada, e determinismo campo a campo para o mesmo adaptador stub;
+- prova de ausência de retry (`StubAgentAdapter` de rota única não responde uma segunda vez), de
+  leitura de relógio (resultado idêntico independentemente do tempo decorrido) e de geração
+  implícita de `responseId`; nenhuma dependência de rede, SDK, ambiente ou persistência é usada
+  em nenhum dos dois módulos.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **771 testes, 771 passaram, 0 falharam** (739 anteriores + 32 novos, ambiente local Node.js 22) |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+- A execução local só cobriu Node.js 22 (versão disponível no ambiente); Node.js 20 será
+  verificado pela matriz de CI no PR.
+- A pendência sobre `snapshotId` fora da proveniência exigida, registrada em entregas
+  anteriores, continua em aberto para confirmação por André/ChatGPT.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: executa tentativa auditavel de agente`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
+
+## TASK-029 — correção 1/3 (revisão `REQUEST_CHANGES` no SHA `260f1c005dfa5d2b2f1b8105eb81f48325d74939`)
+
+- **Status reportado:** correção executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+A revisão de André apontou dois problemas na entrega original de TASK-029, ambos corrigidos sem
+ampliar o escopo:
+
+1. **Mensagens públicas de `runSingleAgentAttempt` deixaram de ser idênticas às anteriores.**
+   Após a refatoração, a validação de `adapter`, `responseId`, `promptVersion` e `model` passou a
+   lançar `ContractValidationError` com o nome de contrato `RunAuditableAgentAttempt`, em vez do
+   histórico `RunSingleAgentAttempt` — uma mudança real de mensagem pública, mesmo sem nenhum
+   teste existente depender do texto literal. Corrigido extraindo a sequência inteira de
+   validação e chamada única para `runAuditableAgentAttemptAs(contract, value)`
+   (`src/agent/run-auditable-agent-attempt.ts`), parametrizada pelo nome do contrato usado em
+   cada mensagem sanitizada. `runAuditableAgentAttempt` passou a ser essa função chamada com o
+   próprio nome de contrato do módulo; `runSingleAgentAttempt` (`src/agent/run-single-agent-attempt.ts`)
+   passou a chamá-la com `RunSingleAgentAttempt`, restaurando byte a byte as mensagens que sempre
+   lançou. Continua existindo uma única implementação da validação e da chamada ao adapter — nenhuma
+   duplicação.
+2. **`requireAdapter` podia expor o valor lançado por um `call` forjado.** A leitura de
+   `value.call` acontecia fora de qualquer guarda; um adaptador com um getter (ou um `Proxy` com
+   trap de `get`) que lança ao ser lido fazia esse valor — mensagem, stack, `cause`, segredo —
+   escapar sem sanitização, antes mesmo de qualquer chamada ao adapter. Corrigido com
+   `readAdapterCall`, que lê `call` dentro de um `try/catch` e trata qualquer exceção como
+   "propriedade ausente", falhando fechado com a mesma `ContractValidationError` sanitizada de
+   sempre — sem jamais invocar `call` nem repassar o valor lançado.
+
+Nenhuma chamada adicional ao adapter foi introduzida; a sequência permanece validação
+fail-closed → uma única `adapter.call` → avaliação.
+
+### Arquivos alterados
+
+- `src/agent/run-auditable-agent-attempt.ts` (contrato parametrizado; `requireAdapter` protegida
+  contra getter/proxy que lança; nova função exportada `runAuditableAgentAttemptAs`)
+- `src/agent/run-single-agent-attempt.ts` (delega a `runAuditableAgentAttemptAs` com seu próprio
+  nome de contrato)
+- `tests/run-auditable-agent-attempt.test.ts` (testes de contrato parametrizado e de getter/proxy
+  malicioso)
+- `tests/run-single-agent-attempt.test.ts` (testes de regressão comparando as mensagens públicas
+  anteriores byte a byte, e de getter/proxy malicioso)
+- `README.md` (documenta `runAuditableAgentAttemptAs` e a proteção de `requireAdapter`)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- `runAuditableAgentAttemptAs` usa o nome de contrato do chamador em toda validação anterior à
+  chamada do adapter (objeto de entrada, adaptador, `responseId`/`promptVersion`/`model`), e
+  `runAuditableAgentAttempt` continua usando o seu próprio;
+- `runSingleAgentAttempt` mantém, byte a byte, as mensagens (`error.message`) e o nome de
+  contrato (`error.contract`) originais para adaptador inválido (incluindo valor não-objeto sem
+  vazar o valor), `responseId` não-string, `promptVersion` em branco, `model` vazio e
+  `AgentRequest` inválido;
+- adaptador forjado com getter de `call` que lança um segredo, e com `Proxy` cujo trap de `get`
+  lança um segredo: em ambos os casos a rejeição é sanitizada, a propriedade é lida exatamente
+  uma vez e nenhuma chamada ao adapter ocorre — testado tanto em
+  `runAuditableAgentAttempt` quanto em `runSingleAgentAttempt`;
+- suíte completa permanece verde: `npm run typecheck` sem erros; `npm test` **785 testes, 785
+  passaram, 0 falharam** (771 anteriores + 14 novos), ambiente local Node.js 22.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **785 testes, 785 passaram, 0 falharam** |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Mesmas da entrega original de TASK-029; nenhuma nova introduzida por esta correção.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** ajuste solicitado via comentário do PR #55 (correção 1/3 da revisão
+  `REQUEST_CHANGES`), sem alterar `TASK.md` nem o status de TASK-029.
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.

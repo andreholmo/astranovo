@@ -77,9 +77,12 @@ de retry controlado, e a execução determinística de uma tentativa única de a
   memória entre uma `AgentRequest` e a resposta bruta que ela recebeu;
 - `src/agent/retry-policy.ts` — `AgentRetryPolicy` e `shouldRetryAgentAttempt`, o contrato puro
   para decidir se resta uma tentativa, sem jamais executar uma;
-- `src/agent/run-single-agent-attempt.ts` — `runSingleAgentAttempt`, a composição determinística
-  e fail-closed de exatamente uma tentativa de agente: chama o adapter uma única vez, preserva a
-  resposta bruta e valida a proposta tipada com alinhamento de identidade e proveniência;
+- `src/agent/run-auditable-agent-attempt.ts` — `runAuditableAgentAttempt`, a menor composição
+  que chama o adapter exatamente uma vez e devolve a avaliação auditável completa
+  (`ACCEPTED`/`REJECTED`), preservando a captura mesmo quando a resposta é inválida;
+- `src/agent/run-single-agent-attempt.ts` — `runSingleAgentAttempt`, um wrapper fino sobre
+  `runAuditableAgentAttempt` que preserva o contrato público anterior: `ACCEPTED` devolve
+  `{ capture, proposal }`, `REJECTED` continua sendo lançado como `ContractValidationError`;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -838,39 +841,64 @@ Nenhuma das duas funções cria uma tentativa, chama `AgentAdapter`, executa ret
 relógio, aguarda, calcula backoff, usa aleatoriedade ou faz I/O — apenas responde, de forma
 pura, se mais uma tentativa está dentro do limite explícito da política.
 
-## Tentativa única de agente stub
+## Tentativa auditável de agente
 
-`src/agent/run-single-agent-attempt.ts` define `runSingleAgentAttempt`, a menor composição
-determinística e fail-closed que executa exatamente uma tentativa de agente:
+`src/agent/run-auditable-agent-attempt.ts` define `runAuditableAgentAttempt`, a menor composição
+determinística e fail-closed que executa exatamente uma tentativa de agente e devolve a
+avaliação auditável completa, em vez de lançar exceção para uma resposta inválida:
 
 ```text
-AgentRequest → AgentAdapter.call (uma vez) → captura auditável → AgentProposal validada
+AgentRequest → AgentAdapter.call (uma vez) → AgentResponseCapture
+→ ACCEPTED(AgentProposal) | REJECTED(código seguro)
 ```
 
 Recebe explicitamente um `AgentAdapter`, um `AgentRequest`, `responseId`, `promptVersion` e
 `model`. Sequência sem desvio possível:
 
-1. valida `adapter`, `request`, `responseId`, `promptVersion` e `model` fail-closed **antes** de
-   tocar o adapter — `adapter` precisa ser um objeto que exponha uma função `call`;
+1. valida o próprio objeto de entrada, `adapter`, `request`, `responseId`, `promptVersion` e
+   `model` fail-closed **antes** de tocar o adapter — `adapter` precisa ser um objeto que
+   exponha uma função `call`; a própria leitura da propriedade `call` é protegida, então um
+   adaptador forjado cujo getter (ou trap de `Proxy`) lance ao ser lido também falha fechado sem
+   expor o valor lançado;
 2. chama `adapter.call(request)` exatamente uma vez, dentro de uma guarda que converte qualquer
    exceção lançada pelo adapter numa `ContractValidationError` com mensagem fixa e sanitizada,
    descartando por completo a mensagem, `cause`, stack ou qualquer outro conteúdo do erro
    original — sem retry;
-3. exige que a resposta bruta seja uma `string`;
-4. entrega `{ request, responseId, rawResponse, promptVersion, model }` a
+3. exige que a resposta bruta seja uma `string`; qualquer outro tipo falha fechado antes de criar
+   uma captura;
+4. entrega `{ request, responseId, rawResponse, promptVersion, model }`, sem normalização, a
    `evaluateAgentResponseCapture` (`./evaluate-agent-response-capture.ts`), que captura a resposta
    verbatim, interpreta como JSON, valida com `parseAgentProposal` e checa o alinhamento de
    `agentId`/`cycleId`/`promptVersion`/`model`;
-5. um resultado `REJECTED` é convertido aqui na mesma `ContractValidationError` sanitizada que
-   esta função sempre lançou para cada falha — o contrato público não muda;
-6. um resultado `ACCEPTED` devolve `{ capture, proposal }`, congelado — nada além disso.
+5. devolve diretamente a união imutável `AgentResponseEvaluation` — `ACCEPTED` ou `REJECTED`,
+   preservando a captura auditável nos dois casos, mesmo quando a resposta do agente é inválida.
 
-Toda rejeição usa `ContractValidationError` e nomeia somente o contrato, o campo e o requisito
-violado — nunca a resposta bruta, o JSON interpretado, um token, um segredo ou qualquer outro
-conteúdo arbitrário do agente ou do adapter. Não gera id, timestamp ou qualquer valor implícito, e
-não implementa retry, delay, timeout ou fallback: uma rejeição em qualquer passo — incluindo uma
-exceção lançada pelo próprio adapter — encerra a tentativa, cabendo a `src/agent/retry-policy.ts`
-e ao chamador decidir e executar uma nova tentativa, se houver.
+Só lança `ContractValidationError` quando nenhuma captura válida chega a existir: objeto de
+entrada, adaptador ou metadados inválidos, exceção do adapter, ou resposta bruta que não é
+`string`. Toda rejeição nomeia somente o contrato, o campo e o requisito violado — nunca a
+resposta bruta, o JSON interpretado, um token, um segredo ou qualquer outro conteúdo arbitrário
+do agente ou do adapter. Não gera id, timestamp ou qualquer valor implícito, e não implementa
+retry, delay, timeout ou fallback.
+
+A sequência de validação e chamada única vive apenas em `runAuditableAgentAttemptAs(contract,
+value)`, parametrizada pelo nome do contrato usado em cada mensagem sanitizada de validação;
+`runAuditableAgentAttempt` é apenas essa função chamada com o próprio nome de contrato do
+módulo (`RunAuditableAgentAttempt`).
+
+`src/agent/run-single-agent-attempt.ts` define `runSingleAgentAttempt`, mantido como um wrapper
+fino sobre `runAuditableAgentAttemptAs` para preservar seu contrato público anterior — sem
+segunda implementação da validação ou da chamada ao adapter:
+
+1. delega inteiramente a `runAuditableAgentAttemptAs`, chamada com o próprio nome de contrato
+   histórico de `runSingleAgentAttempt` (`RunSingleAgentAttempt`), de modo que toda mensagem de
+   validação de `adapter`, `request`, `responseId`, `promptVersion` e `model` permanece
+   byte a byte a mesma que sempre foi;
+2. um resultado `REJECTED` é convertido aqui na mesma `ContractValidationError` sanitizada que
+   esta função sempre lançou para cada um dos seis códigos — o contrato público não muda;
+3. um resultado `ACCEPTED` devolve `{ capture, proposal }`, congelado — nada além disso.
+
+Cabe a `src/agent/retry-policy.ts` e ao chamador decidir e executar uma nova tentativa, se
+houver — nenhum dos dois módulos acima implementa retry.
 
 ## Decisão pura de progresso de tentativas auditáveis
 
