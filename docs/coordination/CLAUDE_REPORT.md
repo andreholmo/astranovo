@@ -5658,3 +5658,150 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-034 — resume lote offline de ciclos finalizados
+
+- **Status reportado:** entrega executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Criado `src/agent/summarize-finalized-agent-cycles.ts`, definindo `summarizeFinalizedAgentCycles`:
+a menor transformação pura, síncrona e offline que resume o resultado já finalizado de um lote
+não vazio (`FinalizedAgentCycleBatchResults`, produzido por `runFinalizedAgentCycles`, TASK-033)
+em contagens e listas ordenadas de `itemId`:
+
+```text
+FinalizedAgentCycleBatchResults
+→ summarizeFinalizedAgentCycles
+→ total + ACCEPTED + HOLD + FAILED
+```
+
+`FinalizedAgentCyclesSummary` é uma interface fechada e o valor retornado é sempre congelado,
+com exatamente `total`, `acceptedCount`, `holdCount`, `failedCount`, `acceptedItemIds`,
+`holdItemIds` e `failedItemIds` — cada lista de `itemId` também congelada e preservando a ordem
+original do lote. O resumo serve só para observabilidade e auditoria: não classifica agentes,
+não compara desempenho, não vota, não escolhe proposta e não altera nenhum resultado.
+
+A estrutura pública inteira é revalidada de forma fail-closed em runtime, antes de qualquer
+classificação, sem confiar no tipo declarado em TypeScript: o lote deve ser um array real, não
+vazio e denso (mesma verificação de cardinalidade de `Reflect.ownKeys` contra `length + 1` já
+usada e corrigida em TASK-033, sem alocação ou iteração proporcional a um `length` declarado não
+confiável); cada item deve ter exatamente `itemId`/`status`/`result` quando `status` é
+`COMPLETED`, ou exatamente `itemId`/`status`/`code` quando `status` é `FAILED` — nenhuma
+propriedade extra, não enumerável ou `Symbol` em nenhum dos dois casos, e `code` deve ser
+exatamente o valor fechado `AGENT_CYCLE_FAILED`; cada `itemId` deve ser uma string não vazia,
+limitada e única dentro do lote inteiro, verificada na ordem recebida.
+
+O `result` de um item `COMPLETED` é lido só o suficiente para distinguir `ACCEPTED` de `HOLD` e
+confirmar que carrega exatamente o conjunto fechado de propriedades que esse resultado permite
+(`status`/`evaluations`/`result` para `ACCEPTED`; `status`/`reason`/`evaluations`/`rejectionCodes`
+para `HOLD`) — nunca recalculado a partir da captura, nunca comparado campo a campo com uma
+reconstrução, e nenhum dos seus valores (evaluations, proposta, rejectionCodes) é copiado para o
+resumo. Isso é deliberado: assim como `runFinalizedAgentCycles` deixa `request` sem validação
+profunda no seu próprio limite porque essa responsabilidade já pertence a
+`runFinalizedAgentCycle`, este módulo deixa o conteúdo interno de `result` sem revalidação
+profunda porque essa responsabilidade já pertence a `finalizeBoundedAgentAttempts` — recalculá-lo
+aqui duplicaria exatamente a validação que a tarefa proíbe.
+
+Toda leitura do lote não confiável — `length`, cada índice, as chaves de cada item, do próprio
+`itemId`, do `status`, do `code` e do `result` aninhado — passa por `readProperty` e por uma
+verificação local de chaves exatas baseada em `Reflect.ownKeys` (mesmo padrão já usado em
+`run-finalized-agent-cycles.ts` e `finalize-bounded-agent-attempts.ts`, duplicado localmente
+neste módulo seguindo o mesmo precedente de não compartilhamento dessas primitivas privadas entre
+módulos de `src/agent`), então um getter ou `Proxy` hostil, inclusive um que lança um
+`ContractValidationError` forjado carregando um segredo, nunca escapa: é tratado exatamente como
+valor ausente antes mesmo de chegar a qualquer `catch`. A validação inteira ainda está envolvida
+por um `try/catch` de defesa em profundidade que converte qualquer exceção que não seja um
+`ContractValidationError` genuíno numa mensagem constante e sem segredo.
+
+Não cria ranking, pontuação, comparação de desempenho, agregação de propostas, votação, consenso,
+handoff, seleção de vencedor, retry, Risk Manager, `PaperBroker`, fill, carteira, ledger,
+persistência, provider de mercado ou integração Astra real. Não chama adapter, retry, finalizador,
+timer, relógio, aleatoriedade, HTTP, SDK, variável de ambiente, token, segredo, credencial,
+wallet, blockchain, testnet ou corretora.
+
+### Arquivos alterados
+
+- `src/agent/summarize-finalized-agent-cycles.ts` (novo — `summarizeFinalizedAgentCycles` e o
+  tipo `FinalizedAgentCyclesSummary`)
+- `tests/summarize-finalized-agent-cycles.test.ts` (novo — suíte completa, 36 testes)
+- `README.md` (nova entrada na lista de arquivos, atualização da frase de M4 e nova seção
+  "Resumo offline de lote finalizado")
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- lote misto real (construído de ponta a ponta via `runFinalizedAgentCycles`) com `ACCEPTED`,
+  `HOLD` e `FAILED` produz contagens exatas;
+- as três listas de `itemId` preservam a ordem original do lote;
+- cada item aparece em exatamente uma lista e `acceptedCount + holdCount + failedCount` é sempre
+  igual a `total`;
+- lotes contendo somente uma das três categorias (`ACCEPTED`, `HOLD` ou `FAILED`) funcionam;
+- `itemId` duplicado, `status`/`código` incompatível (status desconhecido, `code` diferente de
+  `AGENT_CYCLE_FAILED`, `result.status` diferente de `ACCEPTED`/`HOLD`), item com união
+  adulterada (`result` e `code` simultâneos), array vazio, array esparso e `itemId` vazio/em
+  branco falham fechados;
+- propriedades extras enumeráveis, não enumeráveis e `Symbol` — em um item, no `result` aninhado
+  e no próprio array do lote — falham fechadas;
+- getter/`Proxy` hostil em `length`, `Reflect.ownKeys` do lote, `itemId`, `status`, `code` e no
+  `result` aninhado (incluindo `Reflect.ownKeys` do próprio `result`), inclusive lançando um
+  `ContractValidationError` forjado carregando um segredo, não vazam o segredo e falham fechados;
+- array real esparso e `Proxy` de array reportando `.length` de quatro bilhões são rejeitados sem
+  alocação ou iteração proporcional ao comprimento declarado, em menos de 500ms;
+- o resumo retornado e as três listas de `itemId` ficam congelados (`Object.isFrozen`);
+- um lote de entrada simples (não congelado) não é mutado;
+- mesmos dados produzem um resumo campo a campo idêntico, inclusive entre duas execuções
+  independentes de `runFinalizedAgentCycles` com o mesmo lote de especificação;
+- resumir um lote já finalizado nunca chama novamente o adapter de nenhum item (contagem de
+  chamadas do adapter verificada antes e depois de `summarizeFinalizedAgentCycles`);
+- nenhuma chamada a adapter, retry, finalizador, timer, relógio, aleatoriedade, HTTP, SDK,
+  ambiente, persistência, Risk Manager, broker ou I/O — a própria transformação não contém
+  nenhuma dessas chamadas nem as importa;
+- toda a suíte anterior (925 testes antes desta tarefa) continua verde.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **961 testes, 961 passaram, 0 falharam** (925 anteriores + 36 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas nas entregas anteriores de `src/agent`. Esta tarefa não cria
+ranking, pontuação, comparação de desempenho, agregação de propostas, votação, consenso, handoff,
+seleção de vencedor, retry, Risk Manager, `PaperBroker`, fill, carteira, ledger, persistência,
+provider de mercado ou integração Astra real — nada disso estava no escopo de TASK-034.
+`summarizeFinalizedAgentCycles` não recalcula tentativas nem resultados: o `result` de um item
+`COMPLETED` é revalidado só na profundidade necessária para classificá-lo (`status` e o conjunto
+fechado de chaves de primeiro nível), nunca reconstruído a partir de `evaluations`/capturas como
+`finalizeBoundedAgentAttempts` já faz — duplicar essa reconstrução aqui estava explicitamente fora
+do escopo da tarefa.
+
+Este sandbox de execução não teve acesso de rede para `git fetch origin main` (o comando exigiu
+aprovação indisponível neste ambiente não interativo); a sincronização foi verificada confirmando
+que a branch de trabalho (`claude/issue-64-20260921-1441`) já estava com a árvore de trabalho
+limpa e nivelada com `main` no checkout inicial fornecido pela automação, sem alterações remotas
+pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: resume lote offline de ciclos finalizados`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.

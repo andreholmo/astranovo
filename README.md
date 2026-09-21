@@ -25,8 +25,10 @@ de retry controlado, a execução determinística de uma tentativa única de age
 limitada e auditável de até três tentativas sequenciais, a finalização pura e fail-closed
 do resultado final: proposta aceita preservada ou `HOLD` explícito após esgotamento, e a
 composição offline que fecha o ciclo de um agente encadeando essa execução limitada com
-essa finalização, e o lote offline que executa em ordem N ciclos individuais já
-finalizados, isolando a falha de um item em um código fechado sem impedir os demais**.
+essa finalização, o lote offline que executa em ordem N ciclos individuais já
+finalizados, isolando a falha de um item em um código fechado sem impedir os demais, e o
+resumo puro e imutável desse lote finalizado em contagens e listas ordenadas de `itemId`
+por `ACCEPTED`, `HOLD` e `FAILED`**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -106,6 +108,10 @@ finalizados, isolando a falha de um item em um código fechado sem impedir os de
   offline que executa em ordem um lote não vazio de ciclos individuais já finalizados,
   chamando `runFinalizedAgentCycle` exatamente uma vez por item e isolando a falha de um
   item em `FAILED/AGENT_CYCLE_FAILED` sem impedir os demais;
+- `src/agent/summarize-finalized-agent-cycles.ts` — `summarizeFinalizedAgentCycles`, a menor
+  transformação pura e offline que resume um lote finalizado em `total` mais contagens e
+  listas ordenadas de `itemId` por `ACCEPTED`, `HOLD` e `FAILED`, só para observabilidade e
+  auditoria — sem ranking, votação, seleção de proposta ou rota financeira;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -1079,6 +1085,49 @@ Manager, `PaperBroker`, fill, carteira, ledger, persistência, provider de merca
 Astra real, timeout, backoff ou agendamento. Sem HTTP, SDK externo, fila, timer, relógio,
 aleatoriedade, variável de ambiente, token, segredo, credencial, wallet, blockchain, testnet,
 corretora ou dinheiro real.
+
+## Resumo offline de lote finalizado
+
+`src/agent/summarize-finalized-agent-cycles.ts` define `summarizeFinalizedAgentCycles`, a
+menor transformação pura e offline que resume o resultado já finalizado de um lote
+(`runFinalizedAgentCycles`) em contagens e listas ordenadas de `itemId`, só para
+observabilidade e auditoria:
+
+```text
+FinalizedAgentCycleBatchResults
+→ summarizeFinalizedAgentCycles
+→ total + ACCEPTED + HOLD + FAILED
+```
+
+`FinalizedAgentCyclesSummary` é fechado, congelado e tem exatamente `total`, `acceptedCount`,
+`holdCount`, `failedCount`, `acceptedItemIds`, `holdItemIds` e `failedItemIds` — cada lista de
+`itemId` também congelada e na ordem original do lote. Cada item aparece em exatamente uma
+lista, e `acceptedCount + holdCount + failedCount` é sempre igual a `total`.
+
+A estrutura pública inteira é revalidada de forma fail-closed em runtime, antes de qualquer
+classificação: o lote deve ser um array real, não vazio e denso, sem propriedade extra, não
+enumerável ou `Symbol` em si mesmo; cada item deve ter exatamente `itemId`/`status`/`result`
+(quando `COMPLETED`) ou `itemId`/`status`/`code` (quando `FAILED`, e `code` deve ser exatamente
+`AGENT_CYCLE_FAILED`); cada `itemId` deve ser não vazio, limitado e único no lote. O `result`
+de um item `COMPLETED` é lido só o suficiente para distinguir `ACCEPTED` de `HOLD` e confirmar
+seu próprio conjunto fechado de propriedades — nunca recalculado, nunca copiado para o resumo:
+exatamente como `runFinalizedAgentCycles` deixa `request` sem validação nesse limite, este
+módulo deixa `evaluations`/`rejectionCodes`/proposta dentro de `result` sem validação, porque
+esse conteúdo nunca é lido, copiado ou exposto aqui.
+
+Toda leitura do lote não confiável passa pelas mesmas primitivas defensivas já usadas em
+`src/agent` — leitura protegida de propriedade e verificação de chaves exatas via
+`Reflect.ownKeys` —, então um getter ou `Proxy` hostil, inclusive um que lança um
+`ContractValidationError` forjado carregando um segredo, nunca escapa sem ser tratado como
+valor ausente. O resumo carrega somente strings de `itemId` e contagens derivadas delas:
+nenhuma proposta, captura, avaliação, código de rejeição ou outro texto livre de qualquer item
+chega ao resumo retornado.
+
+Não cria ranking, pontuação, comparação de desempenho, agregação de propostas, votação,
+consenso, handoff, seleção de vencedor, retry, Risk Manager, `PaperBroker`, fill, carteira,
+ledger, persistência, provider de mercado ou integração Astra real. Sem HTTP, SDK externo,
+fila, timer, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial, wallet,
+blockchain, testnet, corretora ou dinheiro real.
 
 ## Relatório multiagente offline
 
