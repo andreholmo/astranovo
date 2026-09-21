@@ -4664,3 +4664,114 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-030 — executa tentativas auditáveis limitadas
+
+- **Status reportado:** entrega executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Criado `src/agent/run-bounded-agent-attempts.ts`, definindo `runBoundedAgentAttempts`: a menor
+composição offline que encadeia `runAuditableAgentAttempt` (`./run-auditable-agent-attempt.ts`) e
+`decideAgentAttemptProgress` (`./decide-agent-attempt-progress.ts`) para executar, no máximo,
+`policy.maxAttempts` tentativas sequenciais de um mesmo agente/ciclo:
+
+```text
+AgentRetryPolicy + ids explícitos
+→ runAuditableAgentAttempt (uma chamada por tentativa)
+→ ACCEPTED | próxima tentativa | ATTEMPTS_EXHAUSTED
+```
+
+A função recebe explicitamente `adapter`, `request`, `policy`, `responseIds` (lista ordenada
+fornecida pelo chamador, uma por tentativa permitida), `promptVersion` e `model`. Antes de
+qualquer chamada ao adapter, valida fail-closed o próprio objeto de entrada, o adaptador (com a
+mesma proteção contra getter/`Proxy` malicioso em `call` já usada em
+`run-auditable-agent-attempt.ts`), `request`, `policy`, `promptVersion`, `model` e a lista inteira
+de `responseIds` — exigindo exatamente `policy.maxAttempts` entradas, todas válidas e distintas,
+na ordem fornecida, sem gerar, normalizar ou deduzir nenhum id. Na execução, chama
+`runAuditableAgentAttempt` exatamente uma vez por tentativa e usa `decideAgentAttemptProgress`
+após cada avaliação para decidir entre continuar, aceitar ou encerrar; uma nova tentativa só
+acontece depois de uma avaliação `REJECTED`, e a sequência para imediatamente no primeiro
+`ACCEPTED` ou quando as tentativas se esgotam. Se `runAuditableAgentAttempt` lançar — falha
+anterior à existência de qualquer captura —, o erro sanitizado se propaga imediatamente e nenhuma
+nova tentativa é feita. O resultado devolvido é imutável e fechado: `ACCEPTED` carrega todas as
+avaliações realizadas mais a avaliação aceita; `ATTEMPTS_EXHAUSTED` carrega todas as avaliações
+realizadas (todas `REJECTED`) mais os códigos fechados na mesma ordem.
+
+Nenhum contrato público de `runAuditableAgentAttempt`, `runSingleAgentAttempt`,
+`decideAgentAttemptProgress` ou `AgentRetryPolicy` foi alterado. `StubAgentAdapter` não foi
+ampliado; os testes usam um adaptador sequencial local e determinístico
+(`SequentialAdapter`), definido apenas em `tests/run-bounded-agent-attempts.test.ts`.
+
+### Arquivos alterados
+
+- `src/agent/run-bounded-agent-attempts.ts` (novo — `runBoundedAgentAttempts` e seus tipos)
+- `tests/run-bounded-agent-attempts.test.ts` (novo — suíte completa)
+- `README.md` (nova entrada na lista de arquivos e seção "Tentativas auditáveis limitadas em
+  sequência")
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- aceita na primeira tentativa e não consome as demais respostas/ids (uma única chamada);
+- rejeita uma vez e aceita na segunda, com exatamente duas chamadas;
+- esgota políticas de 1, 2 e 3 tentativas sem exceder o limite, em cada caso;
+- preserva avaliações, capturas brutas, `responseId`, ordem e códigos alinhados entre si;
+- nunca tenta novamente após exceção do adaptador (mensagem sanitizada, sem vazar segredo) ou
+  resposta não-string, em ambos os casos com exatamente uma chamada;
+- toda a entrada — incluindo todos os `responseIds` — é validada antes da primeira chamada
+  (`responseId` inválido no fim da lista falha sem nenhuma chamada; objeto de entrada `null`/array
+  também falha);
+- `responseIds` ausentes/extras/duplicados/inválidos (branco, vazio, não-string, caractere de
+  controle)/forjados (não-array, array-like) falham fechado, sempre sem chamar o adapter;
+- política forjada (fora de `[1,3]`, `null`), `AgentRequest` inválido, adaptador `null`/sem
+  `call`/com getter ou `Proxy` malicioso em `call` (sem vazar segredo, lido uma única vez),
+  `promptVersion`/`model` inválidos: todos falham fechado sem chamar o adapter;
+- resultado, lista de avaliações e lista de `rejectionCodes` são congelados (`Object.isFrozen`)
+  tanto em `ACCEPTED` quanto em `ATTEMPTS_EXHAUSTED`; `responseIds` e `AgentRequest` de entrada
+  não são mutados;
+- mesmo adaptador sequencial determinístico e mesma entrada produzem resultado campo a campo
+  idêntico (comparação via `JSON.stringify`/`JSON.parse`), inclusive quando há um atraso real
+  entre as duas execuções;
+- nenhuma chamada após `ACCEPTED` e nenhuma quarta chamada sob qualquer entrada testada;
+- ausência de timer, delay, backoff, timeout, relógio, aleatoriedade, HTTP, SDK, variável de
+  ambiente, persistência e I/O — nenhum destes é importado ou usado no módulo;
+- toda a suíte anterior continua verde.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **818 testes, 818 passaram, 0 falharam** (785 anteriores + 33 novos), ambiente local Node.js 22 |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas nas entregas anteriores de `src/agent`. Esta tarefa não
+introduz `StubAgentAdapter` estendido, coordenador multiagente, HOLD final, persistência,
+logs externos, provider de mercado, integração Astra real, ordem, fill, Risk Manager,
+PaperBroker, ledger, banco, dashboard, cloud, HTTP, SDK externo, fila, timer, relógio,
+aleatoriedade, variável de ambiente, token, segredo, credencial, wallet, blockchain, testnet,
+corretora ou dinheiro real — nada disso estava no escopo de TASK-030.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: executa tentativas auditaveis limitadas`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
