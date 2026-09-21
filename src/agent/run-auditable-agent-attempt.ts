@@ -34,6 +34,14 @@
  * rather than imported from sibling modules, whose helpers are private and
  * whose exports this task does not authorise changing. The pattern mirrors
  * the small local revalidation already done throughout `src/agent`.
+ *
+ * The validate-then-call-once sequence itself lives only in
+ * {@link runAuditableAgentAttemptAs}, parameterized by the contract name used
+ * in every sanitized validation failure it raises before the adapter is
+ * touched. `runAuditableAgentAttempt` calls it with this module's own
+ * contract name; `./run-single-agent-attempt.js` calls it with its own, so
+ * that module's public messages stay byte-for-byte what they always were,
+ * with no second copy of the validation or the call.
  */
 
 import { rejectContract } from "../domain/errors.js";
@@ -56,9 +64,9 @@ const RAW_AGENT_RESPONSE = "RawAgentResponse";
 
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
 
-function requireInputObject(value: unknown): Record<string, unknown> {
+function requireInputObject(value: unknown, contract: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    rejectContract(RUN_AUDITABLE_AGENT_ATTEMPT, "value", "must be a JSON object");
+    rejectContract(contract, "value", "must be a JSON object");
   }
   return value as Record<string, unknown>;
 }
@@ -69,38 +77,50 @@ function requireInputObject(value: unknown): Record<string, unknown> {
  * and `model` metadata, validated here before the adapter is ever touched —
  * never for agent-supplied content.
  */
-function requireBoundedText(value: unknown, field: string, maxLength: number): string {
+function requireBoundedText(value: unknown, contract: string, field: string, maxLength: number): string {
   if (typeof value !== "string") {
-    rejectContract(RUN_AUDITABLE_AGENT_ATTEMPT, field, "must be a string");
+    rejectContract(contract, field, "must be a string");
   }
   if (value.length === 0 || value.trim().length === 0) {
-    rejectContract(RUN_AUDITABLE_AGENT_ATTEMPT, field, "must not be empty or blank");
+    rejectContract(contract, field, "must not be empty or blank");
   }
   if (value.length > maxLength) {
-    rejectContract(RUN_AUDITABLE_AGENT_ATTEMPT, field, `must be at most ${maxLength} characters`);
+    rejectContract(contract, field, `must be at most ${maxLength} characters`);
   }
   if (CONTROL_CHARACTER_PATTERN.test(value)) {
-    rejectContract(RUN_AUDITABLE_AGENT_ATTEMPT, field, "must not contain control characters");
+    rejectContract(contract, field, "must not contain control characters");
   }
   return value;
 }
 
 /**
+ * Reads `value.call` defensively: a forged adapter can make `call` a getter
+ * (directly, or via a `Proxy` `get` trap) that throws instead of returning a
+ * function, and whatever it throws — message, stack, cause, a secret — must
+ * never escape this check. Any exception here means "no usable `call`",
+ * exactly like the property being absent; it never rethrows the original
+ * value.
+ */
+function readAdapterCall(value: object): unknown {
+  try {
+    return (value as { call?: unknown }).call;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Validates fail-closed, before any call is attempted, that `value` is a
  * usable `AgentAdapter` — an object exposing a `call` function. Never invokes
- * it and never inspects its result.
+ * it and never inspects its result. Reading the `call` property itself is
+ * guarded so a forged adapter cannot use a throwing getter/proxy to leak a
+ * value through this check.
  */
-function requireAdapter(value: unknown): AgentAdapter {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    typeof (value as { call?: unknown }).call !== "function"
-  ) {
-    rejectContract(
-      RUN_AUDITABLE_AGENT_ATTEMPT,
-      "adapter",
-      "must be an object exposing a call(request) function"
-    );
+function requireAdapter(value: unknown, contract: string): AgentAdapter {
+  const isObject = typeof value === "object" && value !== null;
+  const call = isObject ? readAdapterCall(value) : undefined;
+  if (!isObject || typeof call !== "function") {
+    rejectContract(contract, "adapter", "must be an object exposing a call(request) function");
   }
   return value as AgentAdapter;
 }
@@ -120,9 +140,15 @@ export interface RunAuditableAgentAttemptRequest {
 }
 
 /**
- * Runs exactly one agent attempt and returns its full auditable evaluation.
- * Synchronous work wrapped in `async` only to preserve the existing
- * boundary's calling convention; there is no `await` on any I/O.
+ * Runs exactly one agent attempt and returns its full auditable evaluation,
+ * raising every fail-closed validation error under `contract` rather than a
+ * fixed name. This is the only implementation of the validate-then-call-once
+ * sequence: `runAuditableAgentAttempt` below calls it with this module's own
+ * contract name, and `./run-single-agent-attempt.js` calls it with its own,
+ * so each caller's sanitized messages read exactly as that caller's public
+ * contract has always promised. Synchronous work wrapped in `async` only to
+ * preserve the existing boundary's calling convention; there is no `await`
+ * on any I/O.
  *
  * Sequence, with no deviation possible:
  *
@@ -148,20 +174,22 @@ export interface RunAuditableAgentAttemptRequest {
  * not retry, delay, time out or fall back — a rejection at any step ends the
  * attempt.
  */
-export async function runAuditableAgentAttempt(
+export async function runAuditableAgentAttemptAs(
+  contract: string,
   value: RunAuditableAgentAttemptRequest
 ): Promise<AgentResponseEvaluation> {
-  const source = requireInputObject(value);
+  const source = requireInputObject(value, contract);
 
-  const adapter = requireAdapter(source.adapter);
+  const adapter = requireAdapter(source.adapter, contract);
   const request = parseAgentRequest(source.request);
-  const responseId = requireBoundedText(source.responseId, "responseId", MAX_RESPONSE_ID_LENGTH);
+  const responseId = requireBoundedText(source.responseId, contract, "responseId", MAX_RESPONSE_ID_LENGTH);
   const promptVersion = requireBoundedText(
     source.promptVersion,
+    contract,
     "promptVersion",
     MAX_PROMPT_VERSION_LENGTH
   );
-  const model = requireBoundedText(source.model, "model", MAX_MODEL_LENGTH);
+  const model = requireBoundedText(source.model, contract, "model", MAX_MODEL_LENGTH);
 
   let rawResponse: unknown;
   try {
@@ -180,4 +208,16 @@ export async function runAuditableAgentAttempt(
     promptVersion,
     model
   });
+}
+
+/**
+ * Runs exactly one agent attempt and returns its full auditable evaluation,
+ * using this module's own contract name (`RunAuditableAgentAttempt`) for
+ * every validation failure. See {@link runAuditableAgentAttemptAs} for the
+ * full sequence.
+ */
+export async function runAuditableAgentAttempt(
+  value: RunAuditableAgentAttemptRequest
+): Promise<AgentResponseEvaluation> {
+  return runAuditableAgentAttemptAs(RUN_AUDITABLE_AGENT_ATTEMPT, value);
 }

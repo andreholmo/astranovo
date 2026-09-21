@@ -4,7 +4,10 @@ import { describe, it } from "node:test";
 import { ContractValidationError } from "../src/domain/errors.js";
 import { parseAgentRequest, type AgentAdapter, type AgentRequest } from "../src/agent/agent-adapter.js";
 import { StubAgentAdapter } from "../src/agent/stub-agent-adapter.js";
-import { runAuditableAgentAttempt } from "../src/agent/run-auditable-agent-attempt.js";
+import {
+  runAuditableAgentAttempt,
+  runAuditableAgentAttemptAs
+} from "../src/agent/run-auditable-agent-attempt.js";
 
 const REQUEST: AgentRequest = parseAgentRequest({
   schemaVersion: 1,
@@ -391,5 +394,101 @@ describe("runAuditableAgentAttempt error messages never expose raw or agent-supp
     const error = await expectRejection(runAuditableAgentAttempt({ adapter, ...BASE_INPUT }));
 
     assert.ok(!error.message.includes(secret));
+  });
+});
+
+describe("runAuditableAgentAttemptAs raises every pre-call validation under the caller-supplied contract name", () => {
+  it("names the caller's contract for a non-object input value", async () => {
+    const error = await expectRejection(runAuditableAgentAttemptAs("CallerContract", null as never));
+
+    assert.equal(error.contract, "CallerContract");
+  });
+
+  it("names the caller's contract for an invalid adapter", async () => {
+    const error = await expectRejection(
+      runAuditableAgentAttemptAs("CallerContract", {
+        ...BASE_INPUT,
+        adapter: {} as unknown as AgentAdapter
+      })
+    );
+
+    assert.equal(error.contract, "CallerContract");
+  });
+
+  it("names the caller's contract for an invalid responseId, promptVersion and model", async () => {
+    const overridesList: ReadonlyArray<Record<string, unknown>> = [
+      { responseId: 123 },
+      { promptVersion: "   " },
+      { model: "" }
+    ];
+
+    for (const overrides of overridesList) {
+      const adapter = new CountingAdapter(VALID_RAW_RESPONSE);
+      const error = await expectRejection(
+        runAuditableAgentAttemptAs("CallerContract", { adapter, ...BASE_INPUT, ...overrides } as never)
+      );
+
+      assert.equal(error.contract, "CallerContract");
+      assert.equal(adapter.callCount, 0);
+    }
+  });
+
+  it("runAuditableAgentAttempt itself always uses its own module contract name", async () => {
+    const error = await expectRejection(
+      runAuditableAgentAttempt({ ...BASE_INPUT, adapter: null as unknown as AgentAdapter })
+    );
+
+    assert.equal(error.contract, "RunAuditableAgentAttempt");
+  });
+});
+
+describe("runAuditableAgentAttempt sanitizes a forged adapter whose call getter/proxy throws", () => {
+  it("fails closed without leaking a secret thrown by a getter for call, reading it exactly once", async () => {
+    const secret = "SECRET_FROM_CALL_GETTER";
+    let getterReads = 0;
+    const forgedAdapter: Record<string, unknown> = {};
+    Object.defineProperty(forgedAdapter, "call", {
+      enumerable: true,
+      configurable: true,
+      get(): never {
+        getterReads += 1;
+        throw new Error(secret);
+      }
+    });
+
+    const error = await expectRejection(
+      runAuditableAgentAttempt({ ...BASE_INPUT, adapter: forgedAdapter as unknown as AgentAdapter })
+    );
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(
+      error.message,
+      "Invalid RunAuditableAgentAttempt: adapter must be an object exposing a call(request) function"
+    );
+    assert.equal(getterReads, 1);
+  });
+
+  it("fails closed without leaking a secret thrown by a Proxy get trap for call, reading it exactly once", async () => {
+    const secret = "SECRET_FROM_PROXY_TRAP";
+    let trapReads = 0;
+    const forgedAdapter = new Proxy(
+      {},
+      {
+        get(_target, property): unknown {
+          if (property === "call") {
+            trapReads += 1;
+            throw new Error(secret);
+          }
+          return undefined;
+        }
+      }
+    );
+
+    const error = await expectRejection(
+      runAuditableAgentAttempt({ ...BASE_INPUT, adapter: forgedAdapter as unknown as AgentAdapter })
+    );
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(trapReads, 1);
   });
 });

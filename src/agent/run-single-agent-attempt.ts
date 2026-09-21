@@ -10,13 +10,15 @@
  *
  * All validation — the input object, the adapter, the `AgentRequest`,
  * `responseId`, `promptVersion`, `model` — and the single `adapter.call`
- * happen inside `runAuditableAgentAttempt`; this module adds no second
- * implementation of that call and never touches the adapter itself. It only
- * translates the returned `AgentResponseEvaluation` back into this
- * function's original, narrower public contract: `ACCEPTED` returns
- * `{ capture, proposal }`, `REJECTED` is converted into the same sanitized
- * `ContractValidationError` this function has always thrown for each of the
- * six rejection codes.
+ * happen inside `runAuditableAgentAttemptAs`; this module adds no second
+ * implementation of that call and never touches the adapter itself. It calls
+ * that shared core with this module's own contract name
+ * (`RunSingleAgentAttempt`), so every one of those validation failures reads
+ * exactly as it always has, unchanged by the extraction. It then translates
+ * the returned `AgentResponseEvaluation` back into this function's original,
+ * narrower public contract: `ACCEPTED` returns `{ capture, proposal }`,
+ * `REJECTED` is converted into the same sanitized `ContractValidationError`
+ * this function has always thrown for each of the six rejection codes.
  *
  * This module has no retry, delay, timeout, fallback, clock, randomness,
  * network or I/O. Deciding whether another attempt is allowed is
@@ -33,11 +35,12 @@ import { rejectContract } from "../domain/errors.js";
 import { type AgentAdapter, type AgentRequest } from "./agent-adapter.js";
 import { type AgentResponseCapture } from "./capture-agent-response.js";
 import { type AgentResponseRejectionCode } from "./evaluate-agent-response-capture.js";
-import { runAuditableAgentAttempt } from "./run-auditable-agent-attempt.js";
+import { runAuditableAgentAttemptAs } from "./run-auditable-agent-attempt.js";
 import { type AgentProposal } from "../domain/contracts.js";
 
 export { ContractValidationError } from "../domain/errors.js";
 
+const RUN_SINGLE_AGENT_ATTEMPT = "RunSingleAgentAttempt";
 const RAW_AGENT_RESPONSE = "RawAgentResponse";
 const AGENT_PROPOSAL_ALIGNMENT = "AgentProposalAlignment";
 
@@ -104,14 +107,15 @@ export interface SingleAgentAttemptResult {
  *
  * Sequence, with no deviation possible:
  *
- * 1. delegates entirely to `runAuditableAgentAttempt`, which validates the
- *    input object, `adapter`, `request`, `responseId`, `promptVersion` and
- *    `model` — before the adapter is ever touched — then calls
- *    `adapter.call(request)` exactly once, inside a guard that turns any
- *    exception the adapter throws into a sanitized `ContractValidationError`
- *    carrying a fixed, stable message — never the thrown value's `message`,
- *    `cause`, stack or any other of its content — and does not retry;
- * 2. `runAuditableAgentAttempt` requires the raw result to be a `string`,
+ * 1. delegates entirely to `runAuditableAgentAttemptAs`, called with this
+ *    module's own contract name, which validates the input object,
+ *    `adapter`, `request`, `responseId`, `promptVersion` and `model` —
+ *    before the adapter is ever touched — then calls `adapter.call(request)`
+ *    exactly once, inside a guard that turns any exception the adapter
+ *    throws into a sanitized `ContractValidationError` carrying a fixed,
+ *    stable message — never the thrown value's `message`, `cause`, stack or
+ *    any other of its content — and does not retry;
+ * 2. `runAuditableAgentAttemptAs` requires the raw result to be a `string`,
  *    then hands `{ request, responseId, rawResponse, promptVersion, model }`
  *    to `evaluateAgentResponseCapture`, which captures the response
  *    verbatim, parses it as JSON, validates it with `parseAgentProposal` and
@@ -123,12 +127,12 @@ export interface SingleAgentAttemptResult {
  *
  * Does not generate an id, timestamp or any other implicit value, and does
  * not retry, delay, time out or fall back — a rejection at any step ends the
- * attempt. No call to the adapter happens outside `runAuditableAgentAttempt`.
+ * attempt. No call to the adapter happens outside `runAuditableAgentAttemptAs`.
  */
 export async function runSingleAgentAttempt(
   value: RunSingleAgentAttemptRequest
 ): Promise<SingleAgentAttemptResult> {
-  const evaluation = await runAuditableAgentAttempt(value);
+  const evaluation = await runAuditableAgentAttemptAs(RUN_SINGLE_AGENT_ATTEMPT, value);
 
   if (evaluation.status === "REJECTED") {
     rejectForCode(evaluation.code);

@@ -857,7 +857,9 @@ Recebe explicitamente um `AgentAdapter`, um `AgentRequest`, `responseId`, `promp
 
 1. valida o próprio objeto de entrada, `adapter`, `request`, `responseId`, `promptVersion` e
    `model` fail-closed **antes** de tocar o adapter — `adapter` precisa ser um objeto que
-   exponha uma função `call`;
+   exponha uma função `call`; a própria leitura da propriedade `call` é protegida, então um
+   adaptador forjado cujo getter (ou trap de `Proxy`) lance ao ser lido também falha fechado sem
+   expor o valor lançado;
 2. chama `adapter.call(request)` exatamente uma vez, dentro de uma guarda que converte qualquer
    exceção lançada pelo adapter numa `ContractValidationError` com mensagem fixa e sanitizada,
    descartando por completo a mensagem, `cause`, stack ou qualquer outro conteúdo do erro
@@ -878,12 +880,19 @@ resposta bruta, o JSON interpretado, um token, um segredo ou qualquer outro cont
 do agente ou do adapter. Não gera id, timestamp ou qualquer valor implícito, e não implementa
 retry, delay, timeout ou fallback.
 
-`src/agent/run-single-agent-attempt.ts` define `runSingleAgentAttempt`, mantido como um wrapper
-fino sobre `runAuditableAgentAttempt` para preservar seu contrato público anterior — sem
-segunda implementação da chamada ao adapter:
+A sequência de validação e chamada única vive apenas em `runAuditableAgentAttemptAs(contract,
+value)`, parametrizada pelo nome do contrato usado em cada mensagem sanitizada de validação;
+`runAuditableAgentAttempt` é apenas essa função chamada com o próprio nome de contrato do
+módulo (`RunAuditableAgentAttempt`).
 
-1. delega inteiramente a `runAuditableAgentAttempt` (validação, chamada única ao adapter e
-   avaliação);
+`src/agent/run-single-agent-attempt.ts` define `runSingleAgentAttempt`, mantido como um wrapper
+fino sobre `runAuditableAgentAttemptAs` para preservar seu contrato público anterior — sem
+segunda implementação da validação ou da chamada ao adapter:
+
+1. delega inteiramente a `runAuditableAgentAttemptAs`, chamada com o próprio nome de contrato
+   histórico de `runSingleAgentAttempt` (`RunSingleAgentAttempt`), de modo que toda mensagem de
+   validação de `adapter`, `request`, `responseId`, `promptVersion` e `model` permanece
+   byte a byte a mesma que sempre foi;
 2. um resultado `REJECTED` é convertido aqui na mesma `ContractValidationError` sanitizada que
    esta função sempre lançou para cada um dos seis códigos — o contrato público não muda;
 3. um resultado `ACCEPTED` devolve `{ capture, proposal }`, congelado — nada além disso.
