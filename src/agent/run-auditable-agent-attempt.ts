@@ -30,10 +30,12 @@
  * network or I/O. It calls the adapter exactly once and returns; deciding
  * whether another attempt is allowed remains `./retry-policy.js`'s job.
  *
- * `requireBoundedText`/`requireObject` are duplicated here in miniature
- * rather than imported from sibling modules, whose helpers are private and
- * whose exports this task does not authorise changing. The pattern mirrors
- * the small local revalidation already done throughout `src/agent`.
+ * `requireInputObject`/`requireBoundedText`/`requireAdapter` come from
+ * `./internal/attempt-input-validation.js`, the one shared implementation of
+ * this boundary also used by `./run-bounded-agent-attempts.js`, so the two
+ * modules no longer keep independent copies of the same validation. Every
+ * message raised through them is unchanged from what this module has always
+ * thrown.
  *
  * The validate-then-call-once sequence itself lives only in
  * {@link runAuditableAgentAttemptAs}, parameterized by the contract name used
@@ -55,75 +57,17 @@ import {
   evaluateAgentResponseCapture,
   type AgentResponseEvaluation
 } from "./evaluate-agent-response-capture.js";
+import {
+  requireAdapter,
+  requireBoundedText,
+  requireInputObject
+} from "./internal/attempt-input-validation.js";
 
 export { ContractValidationError } from "../domain/errors.js";
 
 const RUN_AUDITABLE_AGENT_ATTEMPT = "RunAuditableAgentAttempt";
 const AGENT_ADAPTER_CALL = "AgentAdapterCall";
 const RAW_AGENT_RESPONSE = "RawAgentResponse";
-
-const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
-
-function requireInputObject(value: unknown, contract: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    rejectContract(contract, "value", "must be a JSON object");
-  }
-  return value as Record<string, unknown>;
-}
-
-/**
- * Validates a short identifying/version string: non-empty, non-blank, bounded
- * and free of control characters. Used only for `responseId`, `promptVersion`
- * and `model` metadata, validated here before the adapter is ever touched —
- * never for agent-supplied content.
- */
-function requireBoundedText(value: unknown, contract: string, field: string, maxLength: number): string {
-  if (typeof value !== "string") {
-    rejectContract(contract, field, "must be a string");
-  }
-  if (value.length === 0 || value.trim().length === 0) {
-    rejectContract(contract, field, "must not be empty or blank");
-  }
-  if (value.length > maxLength) {
-    rejectContract(contract, field, `must be at most ${maxLength} characters`);
-  }
-  if (CONTROL_CHARACTER_PATTERN.test(value)) {
-    rejectContract(contract, field, "must not contain control characters");
-  }
-  return value;
-}
-
-/**
- * Reads `value.call` defensively: a forged adapter can make `call` a getter
- * (directly, or via a `Proxy` `get` trap) that throws instead of returning a
- * function, and whatever it throws — message, stack, cause, a secret — must
- * never escape this check. Any exception here means "no usable `call`",
- * exactly like the property being absent; it never rethrows the original
- * value.
- */
-function readAdapterCall(value: object): unknown {
-  try {
-    return (value as { call?: unknown }).call;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Validates fail-closed, before any call is attempted, that `value` is a
- * usable `AgentAdapter` — an object exposing a `call` function. Never invokes
- * it and never inspects its result. Reading the `call` property itself is
- * guarded so a forged adapter cannot use a throwing getter/proxy to leak a
- * value through this check.
- */
-function requireAdapter(value: unknown, contract: string): AgentAdapter {
-  const isObject = typeof value === "object" && value !== null;
-  const call = isObject ? readAdapterCall(value) : undefined;
-  if (!isObject || typeof call !== "function") {
-    rejectContract(contract, "adapter", "must be an object exposing a call(request) function");
-  }
-  return value as AgentAdapter;
-}
 
 /** Everything one single, non-retried, auditable agent attempt depends on. */
 export interface RunAuditableAgentAttemptRequest {

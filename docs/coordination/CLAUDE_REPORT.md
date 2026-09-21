@@ -4775,3 +4775,91 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-030 — correção 1/3 da revisão `REQUEST_CHANGES` (PR #57, SHA `55b55bd`)
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Corrigidos os dois bloqueios apontados na revisão `REQUEST_CHANGES` de André no PR #57 sobre o
+SHA `55b55bd987eb4bc16dbc39b7a7f495d9838c0bf2`, sem ampliar o escopo de TASK-030 e sem alterar
+nenhuma mensagem pública já existente:
+
+1. **Entradas forjadas (`Proxy`/getters) agora falham fechado sem vazar segredo, em
+   `src/agent/run-bounded-agent-attempts.ts`.** Toda leitura de propriedade do objeto de entrada
+   caller-supplied (`adapter`, `request`, `policy`, `responseIds`, `promptVersion`, `model`) passa
+   por `readProperty`, que trata qualquer exceção de um getter/trap `Proxy` exatamente como
+   propriedade ausente (`undefined`), nunca relançando o valor original. `requireResponseIds` foi
+   reescrita para não usar mais `for...of` (que invocaria `Symbol.iterator`, outro vetor de fuga em
+   um `Proxy` forjado): agora lê `length` e cada índice individualmente via `readProperty`, de modo
+   que um `Proxy` sobre um array real — que passa em `Array.isArray` mas pode lançar em `length`,
+   num elemento ou no iterador — também falha fechado com o mesmo `ContractValidationError`
+   sanitizado que uma entrada ausente/ inválida já produzia, sem nenhuma chamada ao adapter.
+2. **Duplicação material removida.** `requireInputObject`, `requireBoundedText`, `requireAdapter` e
+   a leitura protegida de `call` (antes `readAdapterCall`, agora generalizada em `readProperty`)
+   passaram a viver em um único módulo interno,
+   `src/agent/internal/attempt-input-validation.ts` (não exportado fora de `src/agent`, sem
+   contrato público próprio), importado tanto por `run-auditable-agent-attempt.ts` quanto por
+   `run-bounded-agent-attempts.ts`. As mensagens de erro de cada contrato (`RunAuditableAgentAttempt`,
+   `RunBoundedAgentAttempts`, `RunSingleAgentAttempt` via `runAuditableAgentAttemptAs`) permanecem
+   byte a byte as mesmas; `runAuditableAgentAttempt` continua sendo a única fronteira de chamada e
+   avaliação do adapter.
+
+### Arquivos alterados
+
+- `src/agent/internal/attempt-input-validation.ts` (novo — `readProperty`, `requireInputObject`,
+  `requireBoundedText`, `requireAdapter` compartilhados)
+- `src/agent/run-auditable-agent-attempt.ts` (passa a importar os helpers compartilhados; nenhuma
+  mudança de comportamento ou de mensagem)
+- `src/agent/run-bounded-agent-attempts.ts` (importa os helpers compartilhados; leituras de
+  `source.*` e de `responseIds` protegidas contra getter/`Proxy` forjado)
+- `tests/run-bounded-agent-attempts.test.ts` (dois novos testes de regressão)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- getter forjado no campo `policy` do próprio objeto de entrada: lança um segredo ao ser lido: a
+  chamada falha com `ContractValidationError` sanitizado (mensagem não contém o segredo), o getter
+  é lido exatamente uma vez e o adapter nunca é chamado;
+- `Proxy` sobre um array real de `responseIds` cujo trap `get` lança um segredo para qualquer
+  propriedade lida (`length`, índice ou `Symbol.iterator`): a chamada falha com
+  `ContractValidationError` sanitizado e o adapter nunca é chamado.
+
+Ambos reproduzem exatamente os dois cenários apontados na revisão de André.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **820 testes, 820 passaram, 0 falharam**, ambiente local Node.js 22 |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas na entrega original de TASK-030. Esta correção não altera o
+contrato público de `runAuditableAgentAttempt`, `runSingleAgentAttempt`,
+`decideAgentAttemptProgress` ou `AgentRetryPolicy`, não amplia `StubAgentAdapter` e não introduz
+rede, persistência, credencial ou rota financeira.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** conforme instrução do comentário `@claude` no PR #57.
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.

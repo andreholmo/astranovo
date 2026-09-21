@@ -32,11 +32,21 @@
  * `runAuditableAgentAttempt`, `runSingleAgentAttempt`,
  * `decideAgentAttemptProgress` or `AgentRetryPolicy`.
  *
- * `requireInputObject`/`requireBoundedText`/`requireAdapter`/`readAdapterCall`
- * are duplicated here in miniature rather than imported from sibling modules,
- * whose helpers are private and whose exports this task does not authorise
- * changing. The pattern mirrors the small local revalidation already done
- * throughout `src/agent`.
+ * `requireInputObject`/`requireBoundedText`/`requireAdapter` come from
+ * `./internal/attempt-input-validation.js`, the one shared implementation of
+ * this boundary also used by `./run-auditable-agent-attempt.js`, so the two
+ * modules no longer keep independent copies of the same validation. Every
+ * message raised through them is unchanged from what this module has always
+ * thrown.
+ *
+ * Every property this module reads off the caller-supplied input object —
+ * `adapter`, `request`, `policy`, `responseIds`, `promptVersion`, `model`,
+ * and each entry and the length of `responseIds` itself — goes through
+ * `readProperty` (same module), which treats a throwing getter or `Proxy`
+ * trap exactly like the property being absent rather than letting whatever
+ * it throws escape unsanitized. `responseIds` is walked by index, never with
+ * `for...of`, so a forged array-like cannot leak a value through a
+ * `Symbol.iterator` trap either.
  */
 
 import { rejectContract } from "../domain/errors.js";
@@ -55,6 +65,12 @@ import {
   type AgentResponseRejectionCode,
   type RejectedAgentResponseEvaluation
 } from "./evaluate-agent-response-capture.js";
+import {
+  readProperty,
+  requireAdapter,
+  requireBoundedText,
+  requireInputObject
+} from "./internal/attempt-input-validation.js";
 import { parseAgentRetryPolicy, type AgentRetryPolicy } from "./retry-policy.js";
 import { runAuditableAgentAttempt } from "./run-auditable-agent-attempt.js";
 
@@ -62,83 +78,32 @@ export { ContractValidationError } from "../domain/errors.js";
 
 const RUN_BOUNDED_AGENT_ATTEMPTS = "RunBoundedAgentAttempts";
 
-const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/;
-
-function requireInputObject(value: unknown, contract: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    rejectContract(contract, "value", "must be a JSON object");
-  }
-  return value as Record<string, unknown>;
-}
-
-/**
- * Validates a short identifying/version string: non-empty, non-blank, bounded
- * and free of control characters. Used only for `responseIds` entries,
- * `promptVersion` and `model` metadata — validated here before the adapter is
- * ever touched, never for agent-supplied content.
- */
-function requireBoundedText(value: unknown, contract: string, field: string, maxLength: number): string {
-  if (typeof value !== "string") {
-    rejectContract(contract, field, "must be a string");
-  }
-  if (value.length === 0 || value.trim().length === 0) {
-    rejectContract(contract, field, "must not be empty or blank");
-  }
-  if (value.length > maxLength) {
-    rejectContract(contract, field, `must be at most ${maxLength} characters`);
-  }
-  if (CONTROL_CHARACTER_PATTERN.test(value)) {
-    rejectContract(contract, field, "must not contain control characters");
-  }
-  return value;
-}
-
-/**
- * Reads `value.call` defensively: a forged adapter can make `call` a getter
- * (directly, or via a `Proxy` `get` trap) that throws instead of returning a
- * function, and whatever it throws — message, stack, cause, a secret — must
- * never escape this check. Any exception here means "no usable `call`",
- * exactly like the property being absent; it never rethrows the original
- * value.
- */
-function readAdapterCall(value: object): unknown {
-  try {
-    return (value as { call?: unknown }).call;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Validates fail-closed, before any call is attempted, that `value` is a
- * usable `AgentAdapter` — an object exposing a `call` function. Never invokes
- * it and never inspects its result.
- */
-function requireAdapter(value: unknown, contract: string): AgentAdapter {
-  const isObject = typeof value === "object" && value !== null;
-  const call = isObject ? readAdapterCall(value) : undefined;
-  if (!isObject || typeof call !== "function") {
-    rejectContract(contract, "adapter", "must be an object exposing a call(request) function");
-  }
-  return value as AgentAdapter;
-}
-
 /**
  * Validates `responseIds` fail-closed: must be an array with exactly
  * `maxAttempts` entries, each a valid, bounded id string, with no duplicate
  * — checked in the exact order supplied. Never generates, trims, reorders or
  * substitutes an id.
+ *
+ * Walked by index via {@link readProperty} rather than `for...of`: a forged
+ * array-like (a `Proxy` over a real array, or any object that merely passes
+ * `Array.isArray`) can make `length`, an individual index, or
+ * `Symbol.iterator` throw an arbitrary value instead of returning one, and
+ * none of that may escape this check. A throwing read is treated exactly
+ * like a missing/invalid entry — it fails the same `requireBoundedText`
+ * checks a genuinely missing or malformed id would.
  */
 function requireResponseIds(value: unknown, maxAttempts: number, contract: string): readonly string[] {
   if (!Array.isArray(value)) {
     rejectContract(contract, "responseIds", "must be an array");
   }
-  if (value.length !== maxAttempts) {
+  const length = readProperty(value, "length");
+  if (typeof length !== "number" || length !== maxAttempts) {
     rejectContract(contract, "responseIds", "must have exactly policy.maxAttempts entries");
   }
   const seen = new Set<string>();
   const ids: string[] = [];
-  for (const entry of value) {
+  for (let index = 0; index < length; index += 1) {
+    const entry = readProperty(value, String(index));
     const id = requireBoundedText(entry, contract, "responseIds", MAX_RESPONSE_ID_LENGTH);
     if (seen.has(id)) {
       rejectContract(contract, "responseIds", "must not contain duplicate ids");
@@ -248,17 +213,26 @@ export async function runBoundedAgentAttempts(
 ): Promise<BoundedAgentAttemptsResult> {
   const source = requireInputObject(value, RUN_BOUNDED_AGENT_ATTEMPTS);
 
-  const adapter = requireAdapter(source.adapter, RUN_BOUNDED_AGENT_ATTEMPTS);
-  const request = parseAgentRequest(source.request);
-  const policy = parseAgentRetryPolicy(source.policy);
-  const responseIds = requireResponseIds(source.responseIds, policy.maxAttempts, RUN_BOUNDED_AGENT_ATTEMPTS);
+  const adapter = requireAdapter(readProperty(source, "adapter"), RUN_BOUNDED_AGENT_ATTEMPTS);
+  const request = parseAgentRequest(readProperty(source, "request"));
+  const policy = parseAgentRetryPolicy(readProperty(source, "policy"));
+  const responseIds = requireResponseIds(
+    readProperty(source, "responseIds"),
+    policy.maxAttempts,
+    RUN_BOUNDED_AGENT_ATTEMPTS
+  );
   const promptVersion = requireBoundedText(
-    source.promptVersion,
+    readProperty(source, "promptVersion"),
     RUN_BOUNDED_AGENT_ATTEMPTS,
     "promptVersion",
     MAX_PROMPT_VERSION_LENGTH
   );
-  const model = requireBoundedText(source.model, RUN_BOUNDED_AGENT_ATTEMPTS, "model", MAX_MODEL_LENGTH);
+  const model = requireBoundedText(
+    readProperty(source, "model"),
+    RUN_BOUNDED_AGENT_ATTEMPTS,
+    "model",
+    MAX_MODEL_LENGTH
+  );
 
   async function attemptAt(
     index: number,

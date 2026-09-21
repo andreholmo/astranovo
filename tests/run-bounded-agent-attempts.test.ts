@@ -302,6 +302,25 @@ describe("runBoundedAgentAttempts: responseIds fail closed", () => {
     assert.equal(adapter.callCount, 0);
   });
 
+  it("fails closed without leaking a secret thrown by a Proxy over a real responseIds array, and never calls the adapter", async () => {
+    const secret = "SECRET_FROM_RESPONSE_IDS_ARRAY_PROXY";
+    const adapter = new SequentialAdapter([ACCEPTED_RESPONSE, ACCEPTED_RESPONSE, ACCEPTED_RESPONSE]);
+    const forgedResponseIds = new Proxy(["id-1", "id-2", "id-3"], {
+      get(): never {
+        throw new Error(secret);
+      }
+    });
+
+    const error = await expectRejection(
+      runBoundedAgentAttempts(
+        baseInput({ adapter, policy: policy(3), responseIds: forgedResponseIds as unknown as readonly string[] })
+      )
+    );
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(adapter.callCount, 0);
+  });
+
   it("rejects a non-array responseIds value", async () => {
     const adapter = new SequentialAdapter([ACCEPTED_RESPONSE]);
 
@@ -379,6 +398,35 @@ describe("runBoundedAgentAttempts: policy, request, adapter, metadata and input 
 
     assert.ok(!error.message.includes(secret));
     assert.equal(getterReads, 1);
+  });
+
+  it("fails closed without leaking a secret thrown by a getter for a field of the input object, and never calls the adapter", async () => {
+    const secret = "SECRET_FROM_POLICY_GETTER";
+    let getterReads = 0;
+    const adapter = new SequentialAdapter([ACCEPTED_RESPONSE]);
+    const forgedInput: Record<string, unknown> = {
+      adapter,
+      request: REQUEST,
+      responseIds: ids(1),
+      promptVersion: PROMPT_VERSION,
+      model: MODEL
+    };
+    Object.defineProperty(forgedInput, "policy", {
+      enumerable: true,
+      configurable: true,
+      get(): never {
+        getterReads += 1;
+        throw new Error(secret);
+      }
+    });
+
+    const error = await expectRejection(
+      runBoundedAgentAttempts(forgedInput as unknown as RunBoundedAgentAttemptsRequest)
+    );
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(getterReads, 1);
+    assert.equal(adapter.callCount, 0);
   });
 
   it("rejects a blank promptVersion without calling the adapter", async () => {
