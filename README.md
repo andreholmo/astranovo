@@ -83,6 +83,12 @@ de retry controlado, e a execução determinística de uma tentativa única de a
 - `src/agent/run-single-agent-attempt.ts` — `runSingleAgentAttempt`, um wrapper fino sobre
   `runAuditableAgentAttempt` que preserva o contrato público anterior: `ACCEPTED` devolve
   `{ capture, proposal }`, `REJECTED` continua sendo lançado como `ContractValidationError`;
+- `src/agent/decide-agent-attempt-progress.ts` — `decideAgentAttemptProgress`, a máquina de
+  estados pura que decide, a partir da política e do histórico já auditado, se resta
+  tentativa, se o resultado foi aceito ou se as tentativas se esgotaram;
+- `src/agent/run-bounded-agent-attempts.ts` — `runBoundedAgentAttempts`, a menor composição
+  offline que encadeia até `policy.maxAttempts` tentativas auditáveis sequenciais, avançando
+  somente após `REJECTED`, parando imediatamente em `ACCEPTED` ou `ATTEMPTS_EXHAUSTED`;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -950,6 +956,45 @@ resposta bruta. Somente `ACCEPTED` preserva a captura auditável e a proposta va
 Não chama `AgentAdapter`, não executa retry, não produz `HOLD`, não persiste e não aciona
 nenhuma integração — apenas decide, de forma pura e determinística, qual transição é
 permitida. Sem relógio, aleatoriedade, I/O ou persistência.
+
+## Tentativas auditáveis limitadas em sequência
+
+`src/agent/run-bounded-agent-attempts.ts` define `runBoundedAgentAttempts`, a menor composição
+offline que encadeia `runAuditableAgentAttempt` e `decideAgentAttemptProgress` para executar,
+no máximo, `policy.maxAttempts` tentativas sequenciais de um mesmo agente/ciclo:
+
+```text
+AgentRetryPolicy + ids explícitos
+→ runAuditableAgentAttempt (uma chamada por tentativa)
+→ ACCEPTED | próxima tentativa | ATTEMPTS_EXHAUSTED
+```
+
+Recebe explicitamente `adapter`, `request`, `policy`, `responseIds` (lista ordenada fornecida
+pelo chamador, uma por tentativa permitida), `promptVersion` e `model`. Sequência sem desvio
+possível:
+
+1. valida fail-closed o próprio objeto de entrada, `adapter`, `request`, `policy`,
+   `promptVersion`, `model` e a lista inteira de `responseIds` — **antes** de tocar o
+   adapter; `responseIds` precisa ter exatamente `policy.maxAttempts` entradas, todas válidas
+   e distintas, na ordem fornecida; nada aqui gera, normaliza ou deduz um id;
+2. chama `runAuditableAgentAttempt` exatamente uma vez por tentativa, usando o próximo
+   `responseId` não usado, na ordem fornecida;
+3. após cada avaliação, chama `decideAgentAttemptProgress` com o histórico completo até ali
+   para decidir entre continuar, aceitar ou encerrar — uma nova tentativa só acontece depois
+   de uma avaliação `REJECTED`;
+4. para imediatamente no primeiro `ACCEPTED`, ou quando `decideAgentAttemptProgress` reporta
+   `ATTEMPTS_EXHAUSTED`;
+5. se `runAuditableAgentAttempt` lançar — falha anterior à existência de qualquer captura —
+   o erro sanitizado se propaga imediatamente e nenhuma nova tentativa é feita;
+6. devolve um resultado imutável e fechado: `ACCEPTED` carrega todas as avaliações realizadas,
+   em ordem, mais a avaliação aceita (`result`); `ATTEMPTS_EXHAUSTED` carrega todas as
+   avaliações realizadas — todas `REJECTED` — mais os códigos fechados na mesma ordem
+   (`rejectionCodes`).
+
+Nunca faz uma quarta chamada, nunca chama o adapter depois de `ACCEPTED`, e nunca altera o
+contrato público de `runAuditableAgentAttempt`, `runSingleAgentAttempt`,
+`decideAgentAttemptProgress` ou `AgentRetryPolicy`. Sem timer, backoff, timeout, relógio,
+geração de id, persistência, HOLD, rede ou I/O.
 
 ## Relatório multiagente offline
 
