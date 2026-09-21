@@ -1,63 +1,63 @@
 # Tarefa atual
 
-- **ID:** TASK-035
-- **Milestone:** M4 — composição offline do lote finalizado com resumo
+- **ID:** TASK-036
+- **Milestone:** M4 — serialização canônica do resumo offline
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_034.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_035.md`
 
 ## Objetivo
 
-Criar a menor composição assíncrona e offline que execute um lote de ciclos finalizados e produza, junto dos resultados integrais, o resumo auditável já definido:
+Criar uma função pura que transforme o resumo auditável de ciclos finalizados em JSON canônico, determinístico e seguro para registro ou consumo visual futuro, sem realizar I/O:
 
 ```text
-FinalizedAgentCycleBatchInputs
-→ runFinalizedAgentCycles
-→ summarizeFinalizedAgentCycles
-→ { results, summary }
+FinalizedAgentCyclesSummary
+→ serializeFinalizedAgentCyclesSummary
+→ canonical JSON string
 ```
 
-A composição apenas encadeia contratos existentes. Não classifica agentes, não compara desempenho, não vota, não escolhe proposta e não altera resultados.
+A função apenas valida e serializa o contrato existente. Não grava arquivos, não cria dashboard, não executa agentes e não altera decisões.
 
 ## Leitura obrigatória
 
-Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_034.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/run-finalized-agent-cycles.ts`, `src/agent/summarize-finalized-agent-cycles.ts` e esta tarefa.
+Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_035.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/summarize-finalized-agent-cycles.ts`, `src/agent/run-finalized-agent-cycles-with-summary.ts` e esta tarefa.
 
 ## Escopo exato
 
-Crie `src/agent/run-finalized-agent-cycles-with-summary.ts`.
+Crie `src/agent/serialize-finalized-agent-cycles-summary.ts`.
 
-Defina um resultado fechado e congelado com exatamente:
+Defina `serializeFinalizedAgentCyclesSummary`, que:
 
-- `results`: a lista retornada por `runFinalizedAgentCycles`, preservada sem cópia semântica;
-- `summary`: o valor retornado por `summarizeFinalizedAgentCycles`, coerente com `results`.
+- recebe um `FinalizedAgentCyclesSummary`;
+- valida em runtime uma estrutura fechada com exatamente os campos públicos já definidos;
+- rejeita campos extras, inclusive não enumeráveis e `Symbol`;
+- rejeita arrays esparsos, propriedades extras em arrays, getters e `Proxy` hostis;
+- exige contagens inteiras seguras, não negativas e coerentes com os comprimentos das listas;
+- exige que `total` seja a soma exata de `acceptedCount + holdCount + failedCount`;
+- exige `itemId` válido e único entre todas as listas;
+- preserva a ordem dos IDs em cada categoria;
+- retorna JSON compacto com ordem fixa de chaves, sem espaços nem quebras de linha;
+- produz saída idêntica para entradas campo a campo idênticas;
+- falha fechada com erro público estável e sanitizado, sem incorporar valores, mensagens, stacks ou segredos da entrada;
+- não muta nem congela a entrada;
+- não usa `toJSON` fornecido pela entrada;
+- não executa I/O nem consulta estado externo.
 
-Defina `runFinalizedAgentCyclesWithSummary`, que:
-
-- recebe exatamente o contrato público de entrada de `runFinalizedAgentCycles`;
-- chama `runFinalizedAgentCycles` exatamente uma vez;
-- chama `summarizeFinalizedAgentCycles` exatamente uma vez sobre o resultado produzido;
-- preserva ordem, `itemId`, resultados `ACCEPTED | HOLD` e falhas isoladas `FAILED/AGENT_CYCLE_FAILED`;
-- retorna objeto congelado, sem mutar entrada nem resultados;
-- mantém as validações e sanitizações fail-closed dos módulos compostos;
-- não captura nem transforma erro de validação em sucesso;
-- não adiciona retry, concorrência, ranking, votação, decisão ou efeitos colaterais.
-
-Reutilize os tipos e funções existentes; não duplique suas validações internas.
+Reutilize os tipos e limites existentes. Não altere os contratos públicos do executor, finalizador, lote, resumo ou composição.
 
 ## Testes obrigatórios
 
-- lote misto produz `results` integrais e `summary` coerente;
-- ordem e identidades são preservadas nos dois campos;
-- cada adapter é chamado somente o número já determinado por seu ciclo, sem segunda execução causada pelo resumo;
-- uma falha isolada continua como `FAILED` e os demais itens continuam;
-- entrada inválida antes da execução falha fechada sem chamar adapter;
-- getter/`Proxy` hostil não vaza mensagem, stack, payload ou segredo;
-- objeto externo fica congelado e os congelamentos internos existentes são preservados;
+- resumo válido produz exatamente o JSON canônico esperado;
+- ordem fixa de chaves e ordem dos IDs são preservadas;
+- mesmas entradas produzem bytes idênticos;
+- contagens incompatíveis, total incompatível e IDs duplicados falham;
+- objeto com campo extra enumerável, não enumerável ou `Symbol` falha;
+- arrays vazios válidos são aceitos quando coerentes; arrays esparsos ou com propriedades extras falham;
+- números negativos, fracionários, infinitos ou acima de `Number.MAX_SAFE_INTEGER` falham;
+- getter, `Proxy`, `toJSON` hostil e erro forjado não executam código útil nem vazam segredo;
 - entrada não é mutada;
-- mesmos dados e adapters determinísticos produzem resultado campo a campo idêntico;
-- nenhuma chamada adicional a timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência, Risk Manager, broker ou I/O;
+- nenhuma chamada a agente, adapter, timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência, filesystem ou I/O;
 - toda a suíte anterior continua verde.
 
 ## Documentação
@@ -66,21 +66,21 @@ Atualize o README apenas no necessário e registre a entrega em `docs/coordinati
 
 ## Fora do escopo
 
-Não criar ranking, pontuação, comparação de desempenho, agregação de propostas, votação, consenso, handoff, seleção de vencedor, novo retry, Risk Manager, PaperBroker, fill, carteira, ledger, persistência, provider de mercado ou integração Astra real.
+Não criar arquivo de auditoria, banco, persistência, download, endpoint, dashboard, gráfico, UI, ranking, comparação, votação, consenso, seleção de vencedor ou novo agregador.
 
 Não usar HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora ou dinheiro real.
 
 ## Critérios de aceite
 
-- composição usa exatamente os dois módulos existentes, uma vez cada;
-- `summary` corresponde integralmente a `results`;
-- nenhuma execução de agente é repetida pelo resumo;
-- falhas e validações continuam fail-closed e sem vazamento;
-- nenhuma geração implícita, ranking ou decisão;
+- serialização é canônica, compacta e determinística;
+- validação é fechada, coerente e fail-closed;
+- nenhuma propriedade controlada pela entrada é executada durante a serialização;
+- erros não vazam dados da entrada;
+- nenhuma mutação, I/O ou execução de agente;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
 - nenhuma rede, credencial ou rota financeira real.
 
 ## Entrega
 
-Faça um único commit com a mensagem `feat: compoe lote finalizado com resumo offline`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
+Faça um único commit com a mensagem `feat: serializa resumo offline em json canonico`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
