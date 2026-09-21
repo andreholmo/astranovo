@@ -116,6 +116,9 @@ por `ACCEPTED`, `HOLD` e `FAILED`**.
   a menor composição offline que chama `runFinalizedAgentCycles` exatamente uma vez e entrega
   o resultado diretamente a `summarizeFinalizedAgentCycles` exatamente uma vez, retornando
   `{ results, summary }` congelado, sem ranking, votação, decisão ou execução repetida de agente;
+- `src/agent/serialize-finalized-agent-cycles-summary.ts` — `serializeFinalizedAgentCyclesSummary`,
+  a menor transformação pura e offline que converte um `FinalizedAgentCyclesSummary` já produzido
+  em uma string JSON canônica, compacta e determinística, para registro ou consumo visual futuro;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -1173,6 +1176,39 @@ desempenho, votação, consenso, seleção de proposta, retry, concorrência, Ri
 `PaperBroker`, fill, carteira, ledger, persistência, provider de mercado ou integração Astra
 real. Sem HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de ambiente, token,
 segredo, credencial, wallet, blockchain, testnet, corretora ou dinheiro real.
+
+## Serialização canônica do resumo offline
+
+`src/agent/serialize-finalized-agent-cycles-summary.ts` define
+`serializeFinalizedAgentCyclesSummary`, a menor transformação pura e offline que converte um
+`FinalizedAgentCyclesSummary` já produzido numa string JSON canônica, para registro ou consumo
+visual futuro, sem I/O:
+
+```text
+FinalizedAgentCyclesSummary
+→ serializeFinalizedAgentCyclesSummary
+→ string JSON canônica
+```
+
+A saída tem ordem fixa de chaves — `total`, `acceptedCount`, `holdCount`, `failedCount`,
+`acceptedItemIds`, `holdItemIds`, `failedItemIds` —, cada lista de `itemId` na própria ordem
+original, sem espaço nem quebra de linha. Entradas campo a campo idênticas sempre produzem os
+mesmos bytes.
+
+A estrutura pública inteira é revalidada de forma fail-closed em runtime, antes de qualquer
+serialização: `value` deve ser um objeto JSON com exatamente as sete propriedades públicas já
+declaradas — nenhuma extra, não enumerável ou `Symbol`; cada contagem deve ser um inteiro seguro
+não negativo igual ao comprimento da própria lista; `total` deve ser exatamente
+`acceptedCount + holdCount + failedCount`; cada `itemId` deve ser não vazio, limitado e único
+entre as três listas combinadas. Toda leitura passa pelas mesmas primitivas defensivas já usadas
+em `src/agent` — leitura protegida de propriedade e verificação de chaves exatas via
+`Reflect.ownKeys` —, então um getter ou `Proxy` hostil, inclusive um que lança um
+`ContractValidationError` forjado carregando um segredo, nunca escapa sem ser tratado como valor
+ausente. A saída é montada a partir de primitivos já validados, nunca de `value` diretamente, então
+um `toJSON` hostil em `value` — próprio ou herdado — nunca é chamado. Não muta nem congela
+`value`. Não cria dashboard, gráfico, UI, ranking, votação, comparação ou decisão. Sem HTTP, SDK
+externo, fila, timer, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial,
+wallet, blockchain, testnet, corretora ou dinheiro real.
 
 ## Relatório multiagente offline
 

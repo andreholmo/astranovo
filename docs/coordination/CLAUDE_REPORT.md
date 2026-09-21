@@ -6263,3 +6263,334 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-036 — serializa resumo offline em JSON canônico (M4)
+
+- **ID da tarefa:** TASK-036
+- **Milestone:** M4 — serialização canônica do resumo offline
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-21
+- **Base:** `main` em `c6b044b` (`docs: preparar TASK-036`), sem alterações remotas pendentes
+
+## Resumo da entrega
+
+Adiciona `serializeFinalizedAgentCyclesSummary`, a menor transformação pura e offline que converte
+um `FinalizedAgentCyclesSummary` já produzido (TASK-034) numa string JSON canônica, compacta e
+determinística, sem I/O:
+
+```text
+FinalizedAgentCyclesSummary
+→ serializeFinalizedAgentCyclesSummary
+→ string JSON canônica
+```
+
+A saída tem ordem fixa de chaves — `total`, `acceptedCount`, `holdCount`, `failedCount`,
+`acceptedItemIds`, `holdItemIds`, `failedItemIds` —, cada lista de `itemId` na própria ordem
+original, sem espaço nem quebra de linha. Entradas campo a campo idênticas sempre produzem os
+mesmos bytes.
+
+A estrutura pública inteira é revalidada de forma fail-closed em runtime, antes de qualquer
+serialização, mirando exatamente as mesmas primitivas defensivas já usadas em
+`summarize-finalized-agent-cycles.ts` (leitura protegida de propriedade e verificação de chaves
+exatas via `Reflect.ownKeys`), sem importar seus símbolos privados: `value` deve ter exatamente as
+sete propriedades públicas já declaradas — nenhuma extra, não enumerável ou `Symbol`; cada
+contagem deve ser um inteiro seguro não negativo igual ao comprimento da própria lista; `total`
+deve ser exatamente `acceptedCount + holdCount + failedCount`; cada `itemId` deve ser não vazio,
+limitado (reaproveita `requireBoundedText`/64 caracteres de `summarize-finalized-agent-cycles.ts`)
+e único entre as três listas combinadas. A saída é montada a partir de primitivos já validados —
+nunca de `value` nem de suas listas diretamente —, então um `toJSON` hostil em `value` (próprio ou
+herdado do protótipo) nunca é chamado; a checagem de chaves fechadas já rejeita um `toJSON` próprio
+como propriedade extra. Nunca muta nem congela `value`.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_035.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/agent/summarize-finalized-agent-cycles.ts`,
+`src/agent/run-finalized-agent-cycles-with-summary.ts` e `TASK.md`.
+
+## Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/serialize-finalized-agent-cycles-summary.ts` | criado |
+| `tests/serialize-finalized-agent-cycles-summary.test.ts` | criado |
+| `README.md` | atualizado (nova entrada na lista de módulos e nova seção "Serialização canônica do resumo offline") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado (este registro) |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime. Nenhum contrato público de `run-finalized-agent-cycles.ts`,
+`finalize-bounded-agent-attempts.ts`, `summarize-finalized-agent-cycles.ts` ou
+`run-finalized-agent-cycles-with-summary.ts` foi alterado.
+
+## Escopo e limites respeitados
+
+- sem ranking, votação, comparação de desempenho ou seleção de proposta;
+- sem dashboard, gráfico ou UI;
+- sem rede, credenciais, wallet, testnet, corretora ou dinheiro real;
+- sem HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de ambiente ou persistência;
+- reaproveita o tipo `FinalizedAgentCyclesSummary` e o limite de tamanho de `itemId` já existentes
+  em `summarize-finalized-agent-cycles.ts`, sem alterar esse módulo.
+
+## Testes adicionados
+
+`tests/serialize-finalized-agent-cycles-summary.test.ts` cobre:
+
+- resumo válido produz exatamente a string JSON canônica esperada, incluindo caso todas as
+  categorias vazias (`total = 0`);
+- ausência de espaço ou quebra de linha na saída; ordem de `itemId` preservada, sem ordenação;
+- mesma entrada produz bytes idênticos entre chamadas, e duas entradas campo a campo idênticas
+  produzem o mesmo resultado;
+- `value` nulo, array ou primitivo em vez de objeto falha fechado;
+- propriedade extra enumerável, não enumerável ou `Symbol` falha fechado; propriedade obrigatória
+  ausente falha fechado;
+- `toJSON` hostil como propriedade própria falha fechado (chave extra); `toJSON` herdado do
+  protótipo nunca é invocado — a saída ignora completamente esse `toJSON`;
+- contagem incoerente com o comprimento da própria lista, `total` incoerente com a soma das três
+  contagens, `itemId` duplicado dentro da mesma categoria e `itemId` duplicado entre categorias
+  diferentes falham fechado;
+- contagens negativas, fracionárias, infinitas, `NaN` ou acima de `Number.MAX_SAFE_INTEGER`, e
+  contagem não numérica, falham fechado;
+- lista de `itemId` não array, esparsa, com propriedade extra, com `itemId` vazio/em branco/acima
+  do limite/não string, e um `Proxy` reportando `length` enorme sem alocar proporcional a ele,
+  falham fechado;
+- getter hostil em `total` e em uma entrada de `itemId`, e `Proxy` hostil no `Reflect.ownKeys` do
+  resumo e de uma lista de `itemId`, todos lançando um `ContractValidationError` forjado carregando
+  um segredo, falham fechado sem que a mensagem do erro reproduza o segredo;
+- entrada não é mutada; entrada não é congelada; um resumo já congelado (como o produzido por
+  `summarizeFinalizedAgentCycles`) é aceito normalmente;
+- toda a suíte anterior continua verde.
+
+## Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **1049 testes, 1049 passaram, 0 falharam** (1005 anteriores + 44 novos) |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+## Limitações conhecidas
+
+Este sandbox de execução não teve acesso de rede aprovado para `git fetch origin main` (o comando
+exigiu aprovação indisponível neste ambiente não interativo). A verificação alternativa — inspeção
+de `git status`/`git log`/`git branch -a` local — confirmou que a branch de trabalho já continha
+exatamente o mesmo commit de `main` (`c6b044b`) no checkout inicial, sem alterações remotas
+pendentes a incorporar.
+
+O hash completo do commit desta entrega não pode ser citado neste próprio registro por
+construção (o hash de um commit depende do conteúdo de todos os arquivos nele, incluindo este
+arquivo); ele é informado no comentário da automação no GitHub e no link do PR gerado por esta
+entrega.
+
+## Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+## Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-036 — correção 1/3: rejeitar propriedades acessoras sem invocar getters (revisão de PR #69)
+
+- **ID da tarefa:** TASK-036 (correção solicitada em revisão de PR, não uma nova tarefa em `TASK.md`)
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-21
+- **Origem:** revisão `CHANGES_REQUESTED` de @andreholmo no PR #69 — bloqueador de segurança 1/3
+
+## Resumo da correção
+
+A validação anterior usava `readProperty` (leitura via `source[key]`) para os sete campos públicos
+do resumo e para cada índice das listas de `itemId`. Isso invocava qualquer getter presente —
+inclusive um que retornasse um valor aparentemente válido (por exemplo `total` retornando `0`) mas
+com efeito colateral, como envenenar `Object.prototype.toJSON`/`Array.prototype.toJSON` antes do
+`JSON.stringify` final. `hasExactOwnKeys` só verificava a lista de chaves, não se cada uma era uma
+data property ou uma accessor property, então uma propriedade acessora hostil passava pela checagem
+de forma estrutural e, em seguida, tinha seu getter executado.
+
+A correção troca essa leitura, apenas para os sete campos do resumo e para cada índice das listas
+de `itemId`, por uma nova função local `readDataProperty`, que lê exclusivamente via
+`Object.getOwnPropertyDescriptor` e aceita somente `data property` (`"value" in descriptor`); uma
+`accessor property` — por mais plausível que seja o valor que seu getter retornaria — é tratada
+exatamente como propriedade ausente, sem que o getter chegue a ser chamado. Uma falha ao obter o
+descritor (por exemplo, uma trap `getOwnPropertyDescriptor` de `Proxy` que lança) também é tratada
+como ausência, com o mesmo erro público e estável já existente (`ContractValidationError` sem
+valor, mensagem, stack ou segredo da entrada).
+
+A leitura de `length` de cada lista permanece com a primitiva compartilhada `readProperty` (acesso
+por colchete) e não foi movida para `readDataProperty`: em um `Array` real, `length` é uma data
+property não configurável — nunca pode virar accessor —, então não há getter hostil a bloquear ali;
+migrar essa leitura específica para `Object.getOwnPropertyDescriptor` teria o efeito colateral de
+ignorar uma `Proxy` cuja trap `get` (não `getOwnPropertyDescriptor`) forja um `length` enorme, o que
+teria quebrado o teste de regressão pré-existente que exige rejeitar exatamente esse `Proxy`.
+
+Nenhum contrato público mudou: `serializeFinalizedAgentCyclesSummary` continua com a mesma
+assinatura, a mesma saída canônica para entradas válidas e as mesmas mensagens de erro públicas.
+
+## Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/serialize-finalized-agent-cycles-summary.ts` | alterado (nova `readDataProperty`; leitura dos sete campos e de cada índice de `itemId` migrada para ela; `length` permanece em `readProperty`; comentários atualizados) |
+| `tests/serialize-finalized-agent-cycles-summary.test.ts` | alterado (4 novos testes de regressão) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado (este registro) |
+
+## Testes adicionados
+
+Nova seção `serializeFinalizedAgentCyclesSummary: valid-looking accessor properties are never invoked`
+em `tests/serialize-finalized-agent-cycles-summary.test.ts`, cobrindo exatamente o cenário apontado
+na revisão — um getter que retorna um valor válido mas nunca deve ser chamado:
+
+- um getter de `total` que retorna `3` (contagem coerente com o resto do resumo) nunca é invocado —
+  a serialização falha fechado e uma flag local de "getter invocado" permanece `false`;
+- um getter de uma entrada de `acceptedItemIds[0]` que retorna `"a1"` nunca é invocado, pela mesma
+  checagem;
+- um getter de `total` que tentaria envenenar `Object.prototype.toJSON` antes da serialização nunca
+  é invocado — a serialização falha fechado e `Object.prototype.toJSON` permanece `undefined` depois
+  da chamada (limpo em `finally` por segurança do restante da suíte);
+- um getter de uma entrada de `acceptedItemIds[0]` que tentaria envenenar `Array.prototype.toJSON`
+  nunca é invocado, pela mesma checagem.
+
+Toda a suíte de testes anterior — incluindo o teste pré-existente de `Proxy` forjando um `length`
+enorme e os testes de getter/`Proxy` que lançam um `ContractValidationError` forjado com segredo —
+continua passando sem alteração de comportamento observável.
+
+## Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **1053 testes, 1053 passaram, 0 falharam** (1049 anteriores + 4 novos) |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+## Limitações conhecidas
+
+Mesma limitação de rede já registrada acima: `git fetch origin main` exigiu aprovação indisponível
+neste ambiente não interativo. `git status`/`git log`/`git branch -vv` locais confirmaram que a
+branch `claude/issue-68-20260921-1638` já estava sincronizada com o commit mais recente conhecido
+antes desta correção, sem alterações remotas pendentes a incorporar.
+
+## Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+## Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-036 — correção 2/3: eliminar o trap `get` na leitura de `length` (revisão de PR #69)
+
+- **ID da tarefa:** TASK-036 (correção solicitada em revisão de PR, não uma nova tarefa em `TASK.md`)
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-21
+- **Origem:** revisão `CHANGES_REQUESTED` de @andreholmo no PR #69 — bloqueador de segurança 2/3
+
+## Resumo da correção
+
+A correção 1/3 migrou a leitura dos sete campos do resumo e de cada índice das listas de `itemId`
+para `readDataProperty` (via `Object.getOwnPropertyDescriptor`), mas deixou deliberadamente a
+leitura de `length` de cada lista em `readProperty` (acesso por colchete `source[key]`), com a
+justificativa de que `length` é uma data property não configurável num `Array` real e por isso
+nunca poderia virar accessor. A revisão apontou o furo dessa justificativa: mesmo sendo uma
+propriedade que nunca vira accessor, o acesso por colchete a um `Proxy` ainda invoca a trap `get`
+do `Proxy`, e essa trap pode executar qualquer efeito colateral — por exemplo envenenar
+`Object.prototype.toJSON`/`Array.prototype.toJSON` — enquanto devolve o valor real e correto de
+`length`, deixando toda a validação passar e o `JSON.stringify` final rodar sobre um protótipo já
+comprometido.
+
+A correção troca essa leitura para `readDataProperty`, igual a todo o resto: `length` agora é lido
+via `Object.getOwnPropertyDescriptor`, nunca por acesso de colchete, então a trap `get` de um
+`Proxy` nunca é invocada para `length`, correta ou incorretamente forjada. Como `length` é
+*writable* (mesmo não configurável), as invariantes de `Proxy` não fixam seu valor para uma trap
+`getOwnPropertyDescriptor`, então um `Proxy` ainda pode forjar um `length` gigante por essa via sem
+lançar — mas isso continua barrado sem alocação proporcional: `hasExactDenseArrayKeys` já rejeita
+comparando a contagem real de `Reflect.ownKeys` contra `length + 1`, sem nunca iterar até o valor
+forjado.
+
+Também foi adicionada uma segunda camada de defesa, sugerida na revisão: a saída canônica
+(`envelope` e cada lista de `itemId`) agora é construída com protótipo `null`
+(`Object.create(null)` para o objeto; `Object.setPrototypeOf(array, null)` para cada lista, via
+nova função `toBarePrototypeArray`). Isso significa que mesmo um `toJSON` já envenenado em
+`Object.prototype`/`Array.prototype` por código totalmente alheio a este módulo — antes ou durante
+a chamada, por qualquer via — nunca é encontrado por `JSON.stringify`, porque a busca por `toJSON`
+percorre a cadeia de protótipos e a saída deste módulo não tem uma cadeia de protótipos com
+`toJSON` para encontrar. `Array.isArray` e o acesso indexado/`length` continuam funcionando
+normalmente, pois dependem dos slots internos exóticos do array, não do protótipo.
+
+Nenhum contrato público mudou: `serializeFinalizedAgentCyclesSummary` continua com a mesma
+assinatura, a mesma saída canônica para entradas válidas e as mesmas mensagens de erro públicas.
+
+## Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/serialize-finalized-agent-cycles-summary.ts` | alterado (`length` migrado de `readProperty` para `readDataProperty`; import de `readProperty` removido; nova `toBarePrototypeArray`; envelope e listas de saída construídos com protótipo `null`; comentários atualizados) |
+| `tests/serialize-finalized-agent-cycles-summary.test.ts` | alterado (regressão pré-existente de `length` forjado via trap `get` migrada para trap `getOwnPropertyDescriptor`; regressão pré-existente de `length` lançando via trap `get` migrada para trap `getOwnPropertyDescriptor`; 5 novos testes) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado (este registro) |
+
+## Testes adicionados ou ajustados
+
+- `rejects a Proxy array whose getOwnPropertyDescriptor trap forges a huge length, without
+  allocating proportional to it` — substitui o teste pré-existente que forjava `length` via trap
+  `get` (agora inofensivo, pois `get` nunca é chamado); a mesma proteção contra alocação
+  desproporcional é reprovada com a trap real usada hoje (`getOwnPropertyDescriptor`);
+- `never invokes a get trap for length, even one forging a huge value, so the underlying real
+  array is read safely instead` — prova que uma trap `get` que forja um `length` gigante nunca é
+  chamada e que a lista real (`["a1"]`) é lida corretamente por baixo dela;
+- `fails closed when an itemId list's length descriptor lookup throws a forged
+  ContractValidationError` — substitui o teste pré-existente equivalente que lançava via trap `get`
+  (não mais invocada) pela trap `getOwnPropertyDescriptor`, mantendo a cobertura de sanitização de
+  erro/segredo no caminho de leitura real;
+- `never invokes an itemId list's length getter that throws a forged ContractValidationError via a
+  get trap` — prova que uma trap `get` que lançaria um erro forjado com segredo nunca é chamada;
+- `never invokes an itemId list's length get trap to poison Array.prototype.toJSON, even though
+  the trap returns the correct length` — o teste explicitamente pedido na revisão: uma trap `get`
+  para `length` que devolve o valor correto mas tenta envenenar `Array.prototype.toJSON` como
+  efeito colateral nunca é chamada, e a saída é a mesma do resumo válido, sem contaminação;
+- `never picks up a toJSON already poisoned onto Object.prototype/Array.prototype ahead of the
+  call, unrelated to the input` — prova a defesa de protótipo `null`: com `Object.prototype.toJSON`
+  e `Array.prototype.toJSON` já envenenados antes da chamada (por código alheio ao módulo), a saída
+  permanece o JSON canônico esperado, byte a byte.
+
+Toda a suíte de testes anterior continua passando, com duas exceções que foram atualizadas por
+descreverem exatamente o comportamento que esta correção muda intencionalmente (ver acima), e não
+por regressão: o teste que forjava `length` via trap `get` (agora inofensivo por não ser mais
+chamado) e o teste que lançava via trap `get` no `length` (idem).
+
+## Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **1057 testes, 1057 passaram, 0 falharam** (1053 anteriores, 2 ajustados, 5 novos) |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+## Limitações conhecidas
+
+Mesma limitação de rede já registrada nas entregas anteriores: `git fetch origin` exigiu aprovação
+indisponível neste ambiente não interativo. `git status`/`git log`/`git branch -vv` locais
+confirmaram que a branch `claude/issue-68-20260921-1638` já estava sincronizada com o commit mais
+recente conhecido antes desta correção, sem alterações remotas pendentes a incorporar.
+
+## Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+## Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
