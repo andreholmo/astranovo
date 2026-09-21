@@ -343,6 +343,65 @@ describe("decideAgentAttemptProgress: forged or structurally invalid results fai
     assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
   });
 
+  it("fails closed on a REJECTED entry carrying an own `proposal` property set to undefined", () => {
+    const real = rejected("r1", "INVALID_JSON");
+    const forged = {
+      status: "REJECTED",
+      capture: real.capture,
+      code: real.code,
+      proposal: undefined
+    } as unknown as AgentResponseEvaluation;
+
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
+
+  it("fails closed on an ACCEPTED entry carrying an own `code` property set to undefined", () => {
+    const real = accepted("r1");
+    const forged = {
+      status: "ACCEPTED",
+      capture: real.capture,
+      proposal: real.proposal,
+      code: undefined
+    } as unknown as AgentResponseEvaluation;
+
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
+
+  it("fails closed on a REJECTED entry carrying an injected extra property", () => {
+    const real = rejected("r1", "INVALID_JSON");
+    const forged = {
+      status: "REJECTED",
+      capture: real.capture,
+      code: real.code,
+      injected: "unexpected"
+    } as unknown as AgentResponseEvaluation;
+
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
+
+  it("fails closed on an ACCEPTED entry carrying an injected extra property", () => {
+    const real = accepted("r1");
+    const forged = {
+      status: "ACCEPTED",
+      capture: real.capture,
+      proposal: real.proposal,
+      injected: "unexpected"
+    } as unknown as AgentResponseEvaluation;
+
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
+
+  it("fails closed on an ACCEPTED entry whose proposal carries an injected extra property", () => {
+    const real = accepted("r1");
+    const forged = {
+      status: "ACCEPTED",
+      capture: real.capture,
+      proposal: { ...real.proposal, injected: "unexpected" }
+    } as unknown as AgentResponseEvaluation;
+
+    assert.throws(() => decideAgentAttemptProgress(policy(1), [forged]), ContractValidationError);
+  });
+
   it("does not leak the tampered proposal's content in the thrown error", () => {
     const real = accepted("r1");
     const secret = "TAMPERED_PROPOSAL_SECRET";

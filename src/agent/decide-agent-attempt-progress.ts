@@ -52,6 +52,27 @@ export { ContractValidationError } from "../domain/errors.js";
 const AGENT_ATTEMPT_RESULTS = "AgentAttemptResults";
 const AGENT_ATTEMPT_PROVENANCE = "AgentAttemptProvenance";
 
+/** Exact own keys a declared result entry may have for each discriminant. Nothing more, nothing less. */
+const REJECTED_RESULT_KEYS = ["status", "capture", "code"] as const;
+const ACCEPTED_RESULT_KEYS = ["status", "capture", "proposal"] as const;
+
+/** Exact own keys a declared proposal may have — matches {@link AgentProposal} field for field. */
+const ACCEPTED_PROPOSAL_KEYS = [
+  "schemaVersion",
+  "proposalId",
+  "cycleId",
+  "agentId",
+  "action",
+  "asset",
+  "confidence",
+  "positionPct",
+  "reason",
+  "veto",
+  "evidenceIds",
+  "promptVersion",
+  "model"
+] as const;
+
 function requireObject(value: unknown, contract: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     rejectContract(contract, "value", "must be a JSON object");
@@ -60,13 +81,38 @@ function requireObject(value: unknown, contract: string): Record<string, unknown
 }
 
 /**
+ * Fails closed unless `value`'s own enumerable keys are exactly
+ * `expectedKeys` — no missing key and no extra one (including a key present
+ * only with an `undefined` value, which `in`/`!==` checks would miss).
+ */
+function requireExactOwnKeys(
+  value: Record<string, unknown>,
+  expectedKeys: readonly string[],
+  contract: string,
+  field: string
+): void {
+  const actualKeys = Object.keys(value);
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some((key) => !expectedKeys.includes(key))) {
+    rejectContract(contract, field, "must have exactly the expected properties");
+  }
+}
+
+/**
  * Structurally compares a caller-declared proposal against the recomputed,
  * trustworthy one, field for field. Never trusts the declared value's shape:
- * a non-object, a wrong-length `evidenceIds` or any differing field fails.
+ * a non-object, an extra injected property, a wrong-length `evidenceIds` or
+ * any differing field fails.
  */
 function proposalMatchesRecomputed(declared: unknown, recomputed: AgentProposal): boolean {
   if (typeof declared !== "object" || declared === null || Array.isArray(declared)) return false;
   const candidate = declared as Record<string, unknown>;
+  const candidateKeys = Object.keys(candidate);
+  if (
+    candidateKeys.length !== ACCEPTED_PROPOSAL_KEYS.length ||
+    candidateKeys.some((key) => !(ACCEPTED_PROPOSAL_KEYS as readonly string[]).includes(key))
+  ) {
+    return false;
+  }
   if (
     candidate.schemaVersion !== recomputed.schemaVersion ||
     candidate.proposalId !== recomputed.proposalId ||
@@ -94,8 +140,11 @@ function proposalMatchesRecomputed(declared: unknown, recomputed: AgentProposal)
  * `proposal` are exactly consistent with the recomputed, trustworthy
  * evaluation: same discriminant, same safe code (for `REJECTED`), same
  * proposal (for `ACCEPTED`), and no payload that belongs to the other
- * outcome. Never includes the declared or recomputed values in the thrown
- * error.
+ * outcome. Presence of a forbidden field is detected by own-property
+ * existence, not by its value — a `proposal: undefined` on a `REJECTED`
+ * entry, or a `code: undefined` on an `ACCEPTED` one, still fails closed,
+ * and so does any other injected property, via an exact own-key check.
+ * Never includes the declared or recomputed values in the thrown error.
  */
 function requireDeclaredResultMatchesRecomputed(
   source: Record<string, unknown>,
@@ -105,17 +154,13 @@ function requireDeclaredResultMatchesRecomputed(
     rejectContract(AGENT_ATTEMPT_RESULTS, "status", "must match the recomputed evaluation");
   }
   if (recomputed.status === "REJECTED") {
+    requireExactOwnKeys(source, REJECTED_RESULT_KEYS, AGENT_ATTEMPT_RESULTS, "result");
     if (source.code !== recomputed.code) {
       rejectContract(AGENT_ATTEMPT_RESULTS, "code", "must match the recomputed rejection code");
     }
-    if (source.proposal !== undefined) {
-      rejectContract(AGENT_ATTEMPT_RESULTS, "proposal", "must not be present on a REJECTED result");
-    }
     return;
   }
-  if (source.code !== undefined) {
-    rejectContract(AGENT_ATTEMPT_RESULTS, "code", "must not be present on an ACCEPTED result");
-  }
+  requireExactOwnKeys(source, ACCEPTED_RESULT_KEYS, AGENT_ATTEMPT_RESULTS, "result");
   if (!proposalMatchesRecomputed(source.proposal, recomputed.proposal)) {
     rejectContract(AGENT_ATTEMPT_RESULTS, "proposal", "must match the recomputed proposal");
   }

@@ -4387,3 +4387,82 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-028 — Correção do ciclo 2 de revisão (mudanças solicitadas por André)
+
+- **ID da tarefa:** TASK-028
+- **Motivo:** revisão de André no PR #53 sobre o SHA `ca81f6230d0c4af3ed42f8dc50683488d38f0897`
+  pediu `CHANGES_REQUESTED` (ciclo 2 de no máximo 3).
+- **Status reportado:** correção executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e nova
+  revisão de André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Bloqueio apontado
+
+A correção do ciclo 1 exigia discriminante, código e proposta consistentes, mas a checagem
+ainda não era fechada quanto à forma:
+
+1. `if (source.proposal !== undefined)` em `REJECTED` aceitava uma propriedade `proposal`
+   presente com valor `undefined` — presença detectada pelo valor, não pela propriedade;
+2. `if (source.code !== undefined)` em `ACCEPTED` tinha o mesmo problema para `code`;
+3. `proposalMatchesRecomputed` comparava os campos conhecidos mas não validava o conjunto de
+   chaves do objeto declarado, então uma proposta forjada como `{ ...proposal, injected: "..." }`
+   ainda passava na comparação campo a campo.
+
+### Correção aplicada
+
+`src/agent/decide-agent-attempt-progress.ts`:
+
+- nova função `requireExactOwnKeys(value, expectedKeys, contract, field)`, que compara
+  `Object.keys(value)` contra um conjunto de chaves esperado exato — sem chave faltando, sem
+  chave extra, incluindo uma chave presente só com valor `undefined`;
+- `requireDeclaredResultMatchesRecomputed` agora chama `requireExactOwnKeys` com
+  `REJECTED_RESULT_KEYS = ["status", "capture", "code"]` para entradas `REJECTED` e
+  `ACCEPTED_RESULT_KEYS = ["status", "capture", "proposal"]` para `ACCEPTED`, antes de validar
+  `code`/`proposal` por valor — isso substitui as checagens antigas por valor (`!== undefined`)
+  e fecha os dois bypasses de presença;
+- `proposalMatchesRecomputed` agora valida primeiro que `Object.keys(declared)` é exatamente
+  `ACCEPTED_PROPOSAL_KEYS` (os 12 campos de `AgentProposal`, sem mais nem menos) antes de
+  comparar campo a campo — uma propriedade injetada na proposta declarada agora falha fechado;
+- nenhuma classe de erro nova, nenhuma mudança de assinatura pública, nenhuma dependência nova;
+  erros continuam sanitizados via `rejectContract` (só contrato/campo/requisito).
+
+`tests/decide-agent-attempt-progress.test.ts`:
+
+- adicionados 5 testes de regressão: `proposal: undefined` presente numa entrada `REJECTED`;
+  `code: undefined` presente numa entrada `ACCEPTED`; propriedade extra injetada numa entrada
+  `REJECTED`; propriedade extra injetada numa entrada `ACCEPTED`; propriedade extra injetada na
+  `proposal` de uma entrada `ACCEPTED`.
+
+Nenhum outro arquivo de produção foi alterado. Escopo estritamente offline preservado: nenhuma
+dependência, rede, timer, relógio ou aleatoriedade foi introduzida.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **739 testes, 739 passaram, 0 falharam** (734 anteriores + 5 novos) |
+
+### Limitações conhecidas
+
+As mesmas já registradas na entrega original da TASK-028 permanecem válidas; nenhuma nova
+limitação foi introduzida por esta correção.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova. A pendência sobre `snapshotId` fora da proveniência exigida, registrada na
+entrega original, continua em aberto para confirmação.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: valida forma fechada de resultado e proposta declarados`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.

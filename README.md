@@ -894,8 +894,13 @@ desvio possível:
    `capture` aninhada, via `evaluateAgentResponseCapture` (`./evaluate-agent-response-capture.ts`)
    — uma captura forjada ou estruturalmente inválida lança `ContractValidationError` aqui — e
    então exige que o `status`, `code` e `proposal` que a entrada alegava sejam exatamente
-   consistentes com essa avaliação recomputada; qualquer divergência (discriminante, código,
-   proposta ou payload incompatível com o outro desfecho) também lança
+   consistentes com essa avaliação recomputada; a entrada declarada deve ter exatamente o
+   conjunto de chaves próprias da variante recomputada (`{status, capture, code}` para
+   `REJECTED`, `{status, capture, proposal}` para `ACCEPTED`) — uma propriedade incompatível
+   presente mesmo com valor `undefined` já viola esse conjunto e falha fechado — e a `proposal`
+   declarada, quando presente, deve ter exatamente o conjunto de chaves de `AgentProposal`, sem
+   propriedade injetada, antes da comparação campo a campo; qualquer divergência (discriminante,
+   código, proposta, forma ou payload incompatível com o outro desfecho) também lança
    `ContractValidationError`, fail-closed, em vez de ser silenciosamente substituída pelo valor
    recomputado;
 3. rejeita fail-closed uma lista com mais entradas que `policy.maxAttempts`;
