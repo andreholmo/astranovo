@@ -1,82 +1,62 @@
 # Tarefa atual
 
-- **ID:** TASK-030
-- **Milestone:** M4 — retry auditável e estritamente limitado
+- **ID:** TASK-031
+- **Milestone:** M4 — resultado final seguro após retries
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_029.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_030.md`
 
 ## Objetivo
 
-Criar a menor composição offline que execute tentativas auditáveis em sequência, somente enquanto a política permitir:
+Criar a menor transformação pura que converta o resultado auditável de `runBoundedAgentAttempts` em um resultado final seguro do agente:
 
 ```text
-AgentRetryPolicy + ids explícitos
-→ runAuditableAgentAttempt (uma chamada por tentativa)
-→ ACCEPTED | próxima tentativa | ATTEMPTS_EXHAUSTED
+ACCEPTED → proposta aceita preservada
+ATTEMPTS_EXHAUSTED → HOLD explícito e auditável
 ```
 
-O fluxo deve parar imediatamente no primeiro `ACCEPTED` ou ao atingir `maxAttempts`. Somente uma resposta capturada e avaliada como `REJECTED` autoriza a tentativa seguinte. Falha anterior à captura continua falhando fechado e não pode provocar retry.
-
-Não adicionar espera, backoff, timeout, relógio, geração de ID, persistência, HOLD, rede ou integração real.
+Esta tarefa apenas representa a decisão final após o retry já executado. Não chama agente, não executa retry, não chama Risk Manager ou broker e não altera carteira.
 
 ## Leitura obrigatória
 
-Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_029.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/agent-adapter.ts`, `src/agent/retry-policy.ts`, `src/agent/decide-agent-attempt-progress.ts`, `src/agent/run-auditable-agent-attempt.ts`, `src/agent/evaluate-agent-response-capture.ts` e esta tarefa.
+Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_030.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/run-bounded-agent-attempts.ts`, `src/agent/evaluate-agent-response-capture.ts`, `src/domain/contracts.ts` e esta tarefa.
 
 ## Escopo exato
 
-Crie `src/agent/run-bounded-agent-attempts.ts`.
+Crie `src/agent/finalize-bounded-agent-attempts.ts`.
 
-Defina `runBoundedAgentAttempts`, assíncrona, que recebe explicitamente:
+Defina `finalizeBoundedAgentAttempts`, síncrona e pura, que recebe um `BoundedAgentAttemptsResult` e devolve uma união fechada e imutável:
 
-- `adapter`;
-- `request`;
-- `policy`;
-- `responseIds`, uma lista ordenada de IDs fornecidos pelo chamador;
-- `promptVersion`;
-- `model`.
+- `ACCEPTED`:
+  - preserva todas as avaliações na ordem;
+  - preserva a avaliação aceita e a proposta aceita sem alteração;
+  - não cria uma segunda proposta nem altera ação, confiança, tamanho ou evidências;
+- `HOLD`:
+  - existe somente para entrada `ATTEMPTS_EXHAUSTED`;
+  - usa razão fechada `ATTEMPTS_EXHAUSTED`;
+  - preserva todas as avaliações rejeitadas e os códigos na ordem;
+  - não fabrica `AgentProposal`, preço, posição, confiança, evidência ou texto livre.
 
-Antes da primeira chamada ao adaptador:
+A função deve revalidar fail-closed a estrutura recebida em runtime, inclusive entradas forjadas. Deve provar consistência entre `status`, avaliações, resultado aceito e códigos, rejeitando propriedades extras ou incompatíveis quando isso for necessário para manter a união fechada. Exceções arbitrárias de getters/`Proxy` não podem vazar mensagens, stack, causa ou segredo.
 
-1. valide fail-closed o objeto de entrada, `policy`, `request`, metadados e a lista inteira de `responseIds`;
-2. exija que `responseIds.length === policy.maxAttempts`;
-3. exija IDs válidos, distintos e na ordem fornecida; não gere, normalize ou deduza IDs;
-4. rejeite entradas forjadas com `ContractValidationError` sanitizado, sem tocar o adaptador.
-
-Na execução:
-
-1. use `runAuditableAgentAttempt` como única fronteira de chamada e avaliação;
-2. use `decideAgentAttemptProgress` para decidir, após cada avaliação, entre continuar, aceitar ou encerrar;
-3. faça no máximo `policy.maxAttempts` chamadas e exatamente uma chamada por tentativa;
-4. execute nova tentativa somente após uma avaliação `REJECTED`;
-5. pare imediatamente no primeiro `ACCEPTED`;
-6. se `runAuditableAgentAttempt` lançar por falha anterior à captura, propague somente o erro sanitizado e não tente novamente;
-7. devolva um resultado imutável e fechado:
-   - `ACCEPTED`: todas as avaliações realizadas, mais a avaliação aceita;
-   - `ATTEMPTS_EXHAUSTED`: todas as avaliações rejeitadas e os códigos fechados na ordem;
-8. preserve cada captura bruta byte a byte nas avaliações retornadas.
-
-Não altere o contrato público de `runAuditableAgentAttempt`, `runSingleAgentAttempt`, `decideAgentAttemptProgress` ou `AgentRetryPolicy`.
+Reutilize validadores e tipos existentes quando aplicável. Não duplique materialmente a lógica de `runBoundedAgentAttempts` ou `evaluateAgentResponseCapture`.
 
 ## Testes obrigatórios
 
-- aceita na primeira tentativa e não consome as demais respostas/IDs;
-- rejeita uma vez e aceita na segunda, com exatamente duas chamadas;
-- esgota políticas de 1, 2 e 3 tentativas sem exceder o limite;
-- preserva avaliações, capturas brutas, ordem, IDs e códigos;
-- jamais tenta novamente após exceção do adaptador ou resposta não-string;
-- toda a entrada, inclusive todos os `responseIds`, é validada antes da primeira chamada;
-- IDs ausentes, extras, duplicados, inválidos ou forjados falham fechado;
-- política, request, adaptador, metadados e objeto de entrada forjados falham fechado quando aplicável;
-- resultados, lista de avaliações e listas de códigos são congelados; entradas não são mutadas;
-- mesmo adaptador sequencial determinístico e mesma entrada produzem resultado campo a campo idêntico;
-- nenhuma chamada após `ACCEPTED` e nenhuma quarta chamada sob qualquer entrada;
-- ausência de timer, delay, backoff, timeout, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência e I/O;
+- converte `ACCEPTED` preservando proposta, captura, histórico e ordem;
+- converte `ATTEMPTS_EXHAUSTED` em `HOLD` com razão fechada e códigos alinhados;
+- resultado e listas retornadas são congelados;
+- entrada não é mutada;
+- não fabrica proposta no ramo `HOLD`;
+- rejeita união adulterada: status inválido, resultado aceito divergente, avaliação aceita no ramo esgotado, código divergente, listas vazias ou acima do limite de três;
+- rejeita propriedades incompatíveis e extras, inclusive quando presentes com valor `undefined`;
+- getters/`Proxy` forjados falham com `ContractValidationError` sanitizado;
+- mesmos dados válidos produzem resultado campo a campo idêntico;
+- nenhuma chamada a adaptador, retry, timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência ou I/O;
 - toda a suíte anterior continua verde.
 
-Use nos testes um adaptador sequencial local e determinístico. Não amplie `StubAgentAdapter` nesta tarefa.
+Use fixtures locais e determinísticas. Não altere `StubAgentAdapter`.
 
 ## Documentação
 
@@ -84,22 +64,20 @@ Atualize o README apenas no necessário e registre a entrega em `docs/coordinati
 
 ## Fora do escopo
 
-Não implementar backoff, espera, timeout, agendamento, concorrência, retry infinito, HOLD final, coordenador multiagente, persistência, logs externos, provider de mercado, integração Astra real, ordem, fill, Risk Manager, PaperBroker, ledger, banco, dashboard ou cloud.
+Não executar tentativas, não criar coordenador multiagente, Risk Manager, PaperBroker, fill, carteira, ledger, persistência, logs externos, provider de mercado, integração Astra real, timeout, backoff ou agendamento.
 
 Não usar HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora ou dinheiro real.
 
 ## Critérios de aceite
 
-- retry somente após `REJECTED` auditável;
-- parada imediata em `ACCEPTED` ou `ATTEMPTS_EXHAUSTED`;
-- no máximo três chamadas, conforme política validada;
-- nenhuma nova tentativa após falha sem captura;
-- histórico completo e imutável das avaliações realizadas;
-- nenhuma geração implícita de ID e nenhuma duplicação material da lógica existente;
+- esgotamento das tentativas sempre resulta em `HOLD` explícito, fechado e auditável;
+- aceitação preserva integralmente a proposta já validada;
+- nenhuma entrada adulterada pode transformar rejeição/esgotamento em aceitação;
+- nenhuma geração implícita de dado e nenhuma duplicação material;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
 - nenhuma rede, credencial ou rota financeira real.
 
 ## Entrega
 
-Faça um único commit com a mensagem `feat: executa tentativas auditaveis limitadas`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
+Faça um único commit com a mensagem `feat: finaliza tentativas com hold seguro`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
