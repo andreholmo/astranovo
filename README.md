@@ -22,8 +22,10 @@ comparações, a seleção/série de snapshots sem look-ahead para replay, e o r
 multiagente offline que consolida esses resumos para N agentes**, e **M4 — o
 adaptador de agente stub determinístico, o registro imutável de resposta bruta, a política
 de retry controlado, a execução determinística de uma tentativa única de agente, a execução
-limitada e auditável de até três tentativas sequenciais, e a finalização pura e fail-closed
-do resultado final: proposta aceita preservada ou `HOLD` explícito após esgotamento**.
+limitada e auditável de até três tentativas sequenciais, a finalização pura e fail-closed
+do resultado final: proposta aceita preservada ou `HOLD` explícito após esgotamento, e a
+composição offline que fecha o ciclo de um agente encadeando essa execução limitada com
+essa finalização**.
 
 - `src/domain/contracts.ts` — contratos centrais (`AgentConfig`, `MarketSnapshot`,
   `AgentProposal`, `OrderIntent`, `ExecutionPolicy`) com validação em runtime;
@@ -95,6 +97,10 @@ do resultado final: proposta aceita preservada ou `HOLD` explícito após esgota
   transformação pura e offline que converte o `BoundedAgentAttemptsResult` já auditado no
   resultado final seguro do agente: `ACCEPTED` preserva a proposta aceita sem alteração,
   `ATTEMPTS_EXHAUSTED` vira `HOLD` explícito com razão fechada, nunca fabricando proposta;
+- `src/agent/run-finalized-agent-cycle.ts` — `runFinalizedAgentCycle`, a menor composição
+  offline que chama `runBoundedAgentAttempts` exatamente uma vez e entrega o resultado
+  diretamente a `finalizeBoundedAgentAttempts` exatamente uma vez, fechando o ciclo offline
+  de um agente sem duplicar validação, retry ou finalização;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -1001,6 +1007,32 @@ Nunca faz uma quarta chamada, nunca chama o adapter depois de `ACCEPTED`, e nunc
 contrato público de `runAuditableAgentAttempt`, `runSingleAgentAttempt`,
 `decideAgentAttemptProgress` ou `AgentRetryPolicy`. Sem timer, backoff, timeout, relógio,
 geração de id, persistência, HOLD, rede ou I/O.
+
+## Ciclo offline finalizado de um agente
+
+`src/agent/run-finalized-agent-cycle.ts` define `runFinalizedAgentCycle`, a menor composição
+offline que fecha o ciclo de exatamente um agente encadeando a execução limitada já existente
+com a finalização segura já existente:
+
+```text
+RunBoundedAgentAttemptsRequest
+→ runBoundedAgentAttempts (uma chamada)
+→ finalizeBoundedAgentAttempts (uma chamada)
+→ ACCEPTED | HOLD
+```
+
+Recebe exatamente o mesmo contrato de `runBoundedAgentAttempts` (`RunBoundedAgentAttemptsRequest`,
+reexportado sem alteração), chama `runBoundedAgentAttempts` exatamente uma vez e entrega o
+`BoundedAgentAttemptsResult` retornado, sem remodelar, copiar ou reinterpretar, diretamente a
+`finalizeBoundedAgentAttempts`, também exatamente uma vez, devolvendo o
+`FinalizedBoundedAgentAttemptsResult` resultante sem alteração.
+
+Não duplica validação, captura, decisão de progresso, retry nem finalização — cada uma dessas
+responsabilidades continua existindo em exatamente um módulo. Se `runBoundedAgentAttempts`
+lançar — uma falha anterior a qualquer captura válida —, o erro sanitizado se propaga
+imediatamente e `finalizeBoundedAgentAttempts` nunca é chamado; nenhuma nova tentativa é feita.
+Não gera id, timestamp, mensagem, proposta ou qualquer outro dado implícito. Sem relógio, timer,
+aleatoriedade, rede, SDK, variável de ambiente ou persistência.
 
 ## Relatório multiagente offline
 
