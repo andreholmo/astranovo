@@ -3941,3 +3941,182 @@ do achado apontado na revisão.
 
 Nenhum bloqueio remanescente é conhecido para este achado. A aprovação desta tarefa cabe ao
 ChatGPT/GPT-5.6 Sol, após revisão do novo diff. Não aprovo nem mesclo o próprio trabalho.
+
+## TASK-027 — resultado auditável de captura de agente (M4)
+
+- **ID da tarefa:** TASK-027
+- **Milestone:** M4 — resultado auditável de tentativa
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-20
+
+### Resumo da entrega
+
+Menor avaliação pura do M4: `evaluateAgentResponseCapture` transforma uma `AgentResponseCapture`
+já capturada em um resultado auditável — `ACCEPTED(AgentProposal)` ou `REJECTED(código seguro)` —
+preservando a captura original mesmo quando o conteúdo do agente é inválido, para que uma
+rejeição nunca desapareça da trilha de auditoria. Não implementa retry, backoff, timeout ou HOLD
+final; prepara apenas o terreno para essas fatias futuras. Reutiliza integralmente
+`captureAgentResponse` (`src/agent/capture-agent-response.ts`) para a revalidação estrutural
+fail-closed e `parseAgentProposal` (`src/domain/contracts.ts`) para a validação de conteúdo;
+nenhuma regra de validação foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_026.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/agent/capture-agent-response.ts`,
+`src/agent/run-single-agent-attempt.ts`, `src/agent/retry-policy.ts`, `src/domain/contracts.ts` e
+`TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/evaluate-agent-response-capture.ts` | criado — `evaluateAgentResponseCapture`, `AgentResponseEvaluation`, `AcceptedAgentResponseEvaluation`, `RejectedAgentResponseEvaluation`, `AgentResponseRejectionCode`, `AGENT_RESPONSE_REJECTION_CODES` |
+| `src/agent/run-single-agent-attempt.ts` | refatorado — reutiliza `evaluateAgentResponseCapture`, preservando o contrato público |
+| `tests/evaluate-agent-response-capture.test.ts` | criado |
+| `README.md` | atualizado (nova seção "Avaliação auditável de captura de agente"; seção "Tentativa única de agente stub" ajustada ao refactor) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `evaluateAgentResponseCapture`
+
+Recebe `value: unknown` — nunca confia que o chamador já passou uma `AgentResponseCapture`
+válida — e segue uma sequência sem desvio possível:
+
+1. **revalidação estrutural fail-closed**, delegada inteiramente a `captureAgentResponse(value)`:
+   uma captura forjada ou estruturalmente inválida (tipo errado, campo ausente, `request` aninhado
+   inválido, limites de tamanho violados) lança `ContractValidationError` aqui, antes de qualquer
+   avaliação de conteúdo. `rawResponse` não é alterado por essa revalidação — apenas verificado
+   quanto a tipo, não-vazio e limite de tamanho, exatamente como `captureAgentResponse` já fazia;
+2. `rawResponse` é interpretado como JSON dentro de um `try/catch` local — falha de parse produz
+   `REJECTED` com `INVALID_JSON`, nunca uma exceção;
+3. o valor decodificado é validado com `parseAgentProposal`; qualquer `ContractValidationError`
+   lançada por ele é convertida em `REJECTED` com `INVALID_PROPOSAL` — genérico, sem carregar o
+   campo/requisito específico que `parseAgentProposal` teria relatado, para não vazar estrutura
+   detalhada da proposta rejeitada através de um "código seguro". Uma exceção de qualquer outro
+   tipo (que não deveria ocorrer, dado que `parseAgentProposal` só lança
+   `ContractValidationError`) não é engolida: propaga para o chamador;
+4. alinhamento de identidade e proveniência, verificado nessa ordem fixa e parando no primeiro
+   desvio: `proposal.agentId` contra `capture.request.agentId` (`AGENT_ID_MISMATCH`),
+   `proposal.cycleId` contra `capture.request.cycleId` (`CYCLE_ID_MISMATCH`),
+   `proposal.promptVersion` contra `capture.promptVersion` (`PROMPT_VERSION_MISMATCH`),
+   `proposal.model` contra `capture.model` (`MODEL_MISMATCH`);
+5. sem nenhuma divergência, devolve `{ status: "ACCEPTED", capture, proposal }`, congelado.
+
+Em todo caminho — `ACCEPTED` ou `REJECTED` — o campo `capture` do resultado é exatamente a cópia
+revalidada e congelada produzida no passo 1, nunca o objeto de entrada por referência; como
+strings são imutáveis, isso já garante preservação byte a byte de `rawResponse` sem qualquer
+cópia manual adicional.
+
+### Códigos de rejeição fechados
+
+`AGENT_RESPONSE_REJECTION_CODES` é uma tupla `as const` com exatamente os seis códigos exigidos
+pela tarefa: `INVALID_JSON`, `INVALID_PROPOSAL`, `AGENT_ID_MISMATCH`, `CYCLE_ID_MISMATCH`,
+`PROMPT_VERSION_MISMATCH`, `MODEL_MISMATCH`. Nenhum deles carrega mensagem, stack, `cause`, valor
+recebido ou qualquer conteúdo arbitrário do agente — são literais de string fixos, então um
+código é sempre seguro para logar ou exibir, exatamente como a tarefa exige.
+
+### Refactor de `runSingleAgentAttempt`
+
+`src/agent/run-single-agent-attempt.ts` manteve sua assinatura, seu comportamento observável e
+sua sequência de validações prévias (`adapter`, `request`, `responseId`, `promptVersion`,
+`model`, chamada única ao adapter com exceção sanitizada, checagem de que a resposta é uma
+`string`). A partir daí, em vez de capturar, interpretar JSON, validar a proposta e checar
+alinhamento inline, ele monta `{ request, responseId, rawResponse, promptVersion, model }` e
+delega tudo isso a `evaluateAgentResponseCapture`. Um resultado `REJECTED` é convertido, por um
+novo helper local `rejectForCode`, exatamente na mesma `ContractValidationError` — mesmo
+contrato, campo e requisito — que a versão anterior já lançava para cada uma das seis falhas;
+um resultado `ACCEPTED` devolve `{ capture: evaluation.capture, proposal: evaluation.proposal }`,
+congelado, como antes. Nenhum teste pré-existente em `tests/run-single-agent-attempt.test.ts` foi
+alterado — os testes já cobriam exatamente o contrato público que a tarefa exige preservar
+("chamada única, comportamento atual e erros sanitizados"), e todos continuam passando sem
+modificação, o que é a própria prova de que o refactor é internamente transparente.
+
+### Testes cobertos em `tests/evaluate-agent-response-capture.test.ts`
+
+`ACCEPTED` para proposta válida e alinhada; cada um dos seis códigos `REJECTED` isoladamente, mais
+um teste de tabela que percorre os seis cenários e confirma que o código devolvido pertence a
+`AGENT_RESPONSE_REJECTION_CODES`; preservação byte a byte de `rawResponse` em `ACCEPTED` (incluindo
+formatação/indentação) e em `REJECTED` (incluindo texto malformado com caractere de controle) e de
+conteúdo unicode; ausência de segredo/token/valor arbitrário no código de um `REJECTED` (resposta
+malformada contendo um "token" e proposta com um `agentId` forjado) e na mensagem de erro de uma
+captura forjada (`ContractValidationError` para uma string qualquer no lugar da captura); captura
+forjada ou estruturalmente inválida falhando fechado antes de qualquer avaliação de conteúdo —
+valor não-objeto, `rawResponse` ausente, `request` aninhado inválido, `promptVersion` em branco,
+`responseId` não-string; congelamento do resultado, de `capture` e — quando `ACCEPTED` — de
+`proposal`, incluindo tentativa de reatribuição lançando `TypeError`; ausência de mutação do
+objeto de entrada e da instância de `AgentRequest` passada como `request`; determinismo campo a
+campo para o mesmo input canônico, tanto em `ACCEPTED` quanto em `REJECTED`; prova offline de
+ausência de relógio (resultado idêntico independentemente do instante de chamada) e de que a
+função é síncrona (não devolve uma `Promise`).
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **691 testes, 691 passaram, 0 falharam** (664 preexistentes + 27 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum uso de
+`random`, nenhum I/O.
+
+### Decisões técnicas tomadas
+
+1. **`evaluateAgentResponseCapture` recebe `value: unknown`, não um `AgentResponseCapture` já
+   tipado.** A tarefa exige revalidação fail-closed da estrutura completa antes de avaliar
+   conteúdo — um parâmetro tipado não impede um chamador de passar em runtime um objeto forjado
+   ou um `AgentResponseCapture` obtido de fora deste módulo. Aceitar `unknown` e revalidar com
+   `captureAgentResponse` torna essa garantia estrutural, não apenas nominal — o mesmo padrão já
+   usado por `shouldRetryAgentAttempt`, que revalida `policy` mesmo tipado.
+2. **A revalidação estrutural do passo 1 é delegada inteiramente a `captureAgentResponse`, sem
+   nenhuma checagem duplicada local.** `captureAgentResponse` já é exatamente "a estrutura
+   completa de `AgentResponseCapture`, sem alterar `rawResponse`"; duplicar essas checagens aqui
+   violaria a instrução explícita da tarefa de reutilizar avaliação em vez de reimplementar
+   validação já existente.
+3. **`INVALID_PROPOSAL` é um código genérico, sem propagar o campo/requisito que
+   `parseAgentProposal` teria relatado.** A tarefa fecha a lista de códigos em seis nomes fixos e
+   exige que "nenhuma informação arbitrária apareça em erros ou códigos" — carregar o campo
+   específico da proposta que falhou seria vazar estrutura de conteúdo do agente através de um
+   canal que a tarefa define como seguro por ser fechado.
+4. **`runSingleAgentAttempt` converte cada código `REJECTED` de volta no mesmo par
+   contrato/campo/requisito que já lançava antes do refactor**, via um `switch` exaustivo
+   (`rejectForCode`) sobre os seis literais de `AgentResponseRejectionCode`. O refactor é
+   observável apenas como uma reorganização interna: nenhum teste pré-existente precisou mudar, e
+   o contrato público documentado pela tarefa permanece válido byte a byte nas mensagens de erro.
+5. **A checagem `typeof rawResponse !== "string"` permaneceu em `runSingleAgentAttempt`**, em vez
+   de ser removida e delegada só a `captureAgentResponse` dentro da avaliação, preservando
+   exatamente o contrato/campo relatado nesse caso (`RawAgentResponse`/`rawResponse`) — o refactor
+   mais conservador possível, "apenas no necessário para reutilizar essa avaliação".
+6. **Nenhuma classe de erro nova.** Toda revalidação estrutural usa
+   `ContractValidationError`/`rejectContract`; os seis códigos de rejeição de conteúdo são
+   literais de string simples, não uma nova hierarquia de exceção, porque a tarefa pede uma união
+   discriminada de dados, não um novo tipo de erro lançável.
+
+### Limitações conhecidas
+
+- Não implementa retry, backoff, timeout, coordenador multiagente ou HOLD final — essas
+  permanecem fatias futuras de M4, explicitamente fora do escopo exato desta tarefa.
+- Não persiste nada em arquivo, fila ou log externo: o resultado da avaliação vive apenas em
+  memória, como todas as milestones anteriores.
+- `evaluateAgentResponseCapture` avalia uma única captura por chamada; não há composição de
+  múltiplas tentativas nem agregação — isso é trabalho de uma fatia de coordenação futura.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma decisão técnica ambígua ficou pendente; as seis decisões acima têm alternativa única e
+mais simples descartada por motivo explícito.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: avalia captura de agente com resultado auditavel`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit. Não aprovo nem
+mesclo o próprio trabalho.
