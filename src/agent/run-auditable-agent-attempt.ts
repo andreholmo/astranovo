@@ -37,6 +37,12 @@
  * message raised through them is unchanged from what this module has always
  * thrown.
  *
+ * Every property this module reads off the caller-supplied input object —
+ * `adapter`, `request`, `responseId`, `promptVersion` and `model` — goes
+ * through `readProperty` (same shared module), which treats a throwing
+ * getter or `Proxy` trap exactly like the property being absent rather than
+ * letting whatever it throws escape unsanitized.
+ *
  * The validate-then-call-once sequence itself lives only in
  * {@link runAuditableAgentAttemptAs}, parameterized by the contract name used
  * in every sanitized validation failure it raises before the adapter is
@@ -58,6 +64,7 @@ import {
   type AgentResponseEvaluation
 } from "./evaluate-agent-response-capture.js";
 import {
+  readProperty,
   requireAdapter,
   requireBoundedText,
   requireInputObject
@@ -124,16 +131,21 @@ export async function runAuditableAgentAttemptAs(
 ): Promise<AgentResponseEvaluation> {
   const source = requireInputObject(value, contract);
 
-  const adapter = requireAdapter(source.adapter, contract);
-  const request = parseAgentRequest(source.request);
-  const responseId = requireBoundedText(source.responseId, contract, "responseId", MAX_RESPONSE_ID_LENGTH);
+  const adapter = requireAdapter(readProperty(source, "adapter"), contract);
+  const request = parseAgentRequest(readProperty(source, "request"));
+  const responseId = requireBoundedText(
+    readProperty(source, "responseId"),
+    contract,
+    "responseId",
+    MAX_RESPONSE_ID_LENGTH
+  );
   const promptVersion = requireBoundedText(
-    source.promptVersion,
+    readProperty(source, "promptVersion"),
     contract,
     "promptVersion",
     MAX_PROMPT_VERSION_LENGTH
   );
-  const model = requireBoundedText(source.model, contract, "model", MAX_MODEL_LENGTH);
+  const model = requireBoundedText(readProperty(source, "model"), contract, "model", MAX_MODEL_LENGTH);
 
   let rawResponse: unknown;
   try {

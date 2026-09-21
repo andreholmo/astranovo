@@ -12,6 +12,7 @@
  */
 
 import { rejectContract } from "../domain/errors.js";
+import { readProperty } from "./internal/attempt-input-validation.js";
 
 export { ContractValidationError } from "../domain/errors.js";
 
@@ -68,11 +69,17 @@ export interface AgentRetryPolicy {
  * Fails closed with `ContractValidationError` unless `maxAttempts` is a safe
  * integer between {@link MIN_AGENT_RETRY_ATTEMPTS} and
  * {@link MAX_AGENT_RETRY_ATTEMPTS}, inclusive.
+ *
+ * `maxAttempts` is read through {@link readProperty}
+ * (`./internal/attempt-input-validation.js`) rather than direct property
+ * access, so a forged `value` — a `Proxy`, or a plain object with a throwing
+ * `maxAttempts` getter — fails the same way a missing field would, never by
+ * letting whatever the getter throws escape unsanitized.
  */
 export function parseAgentRetryPolicy(value: unknown): AgentRetryPolicy {
   const source = requireObject(value, AGENT_RETRY_POLICY);
   const parsed: AgentRetryPolicy = {
-    maxAttempts: requireMaxAttempts(source.maxAttempts)
+    maxAttempts: requireMaxAttempts(readProperty(source, "maxAttempts"))
   };
   return Object.freeze(parsed);
 }

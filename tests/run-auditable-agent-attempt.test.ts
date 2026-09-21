@@ -492,3 +492,31 @@ describe("runAuditableAgentAttempt sanitizes a forged adapter whose call getter/
     assert.equal(trapReads, 1);
   });
 });
+
+describe("runAuditableAgentAttempt sanitizes a forged field of the input object", () => {
+  it("fails closed without leaking a secret thrown by a getter for responseId, and never calls the adapter", async () => {
+    const secret = "SECRET_FROM_RESPONSE_ID_GETTER";
+    let getterReads = 0;
+    const adapter = new CountingAdapter(VALID_RAW_RESPONSE);
+    const forgedInput: Record<string, unknown> = {
+      adapter,
+      request: REQUEST,
+      promptVersion: "prompt-v1",
+      model: "stub-model"
+    };
+    Object.defineProperty(forgedInput, "responseId", {
+      enumerable: true,
+      configurable: true,
+      get(): never {
+        getterReads += 1;
+        throw new Error(secret);
+      }
+    });
+
+    const error = await expectRejection(runAuditableAgentAttempt(forgedInput as never));
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(getterReads, 1);
+    assert.equal(adapter.callCount, 0);
+  });
+});

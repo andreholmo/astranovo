@@ -429,6 +429,56 @@ describe("runBoundedAgentAttempts: policy, request, adapter, metadata and input 
     assert.equal(adapter.callCount, 0);
   });
 
+  it("fails closed without leaking a secret thrown by a getter for request.agentId, and never calls the adapter", async () => {
+    const secret = "SECRET_FROM_REQUEST_AGENT_ID_GETTER";
+    let getterReads = 0;
+    const adapter = new SequentialAdapter([ACCEPTED_RESPONSE]);
+    const forgedRequest: Record<string, unknown> = {
+      schemaVersion: 1,
+      cycleId: "cycle-1",
+      snapshotId: "snapshot-1"
+    };
+    Object.defineProperty(forgedRequest, "agentId", {
+      enumerable: true,
+      configurable: true,
+      get(): never {
+        getterReads += 1;
+        throw new Error(secret);
+      }
+    });
+
+    const error = await expectRejection(
+      runBoundedAgentAttempts(baseInput({ adapter, request: forgedRequest as unknown as AgentRequest }))
+    );
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(getterReads, 1);
+    assert.equal(adapter.callCount, 0);
+  });
+
+  it("fails closed without leaking a secret thrown by a getter for policy.maxAttempts, and never calls the adapter", async () => {
+    const secret = "SECRET_FROM_POLICY_MAX_ATTEMPTS_GETTER";
+    let getterReads = 0;
+    const adapter = new SequentialAdapter([ACCEPTED_RESPONSE]);
+    const forgedPolicy: Record<string, unknown> = {};
+    Object.defineProperty(forgedPolicy, "maxAttempts", {
+      enumerable: true,
+      configurable: true,
+      get(): never {
+        getterReads += 1;
+        throw new Error(secret);
+      }
+    });
+
+    const error = await expectRejection(
+      runBoundedAgentAttempts(baseInput({ adapter, policy: forgedPolicy as unknown as AgentRetryPolicy }))
+    );
+
+    assert.ok(!error.message.includes(secret));
+    assert.equal(getterReads, 1);
+    assert.equal(adapter.callCount, 0);
+  });
+
   it("rejects a blank promptVersion without calling the adapter", async () => {
     const adapter = new SequentialAdapter([ACCEPTED_RESPONSE]);
 

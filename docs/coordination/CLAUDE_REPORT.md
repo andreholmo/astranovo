@@ -4863,3 +4863,102 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-030 — correção 2/3 da revisão `REQUEST_CHANGES` (PR #57, SHA `2788699`)
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Corrigida a rota equivalente de fail-closed apontada na revisão `REQUEST_CHANGES` de André no PR
+#57 sobre o SHA `27886994c1e2678e59f2b4fa8faaa4e801a5d6cb`, sem ampliar o escopo de TASK-030 e sem
+alterar nenhuma mensagem pública já existente:
+
+1. **`request` e `policy` forjados agora falham fechado também nas próprias leituras internas.**
+   `runBoundedAgentAttempts` já protegia a leitura de `source.request`/`source.policy` no objeto de
+   entrada externo com `readProperty`, mas entregava o valor lido diretamente a `parseAgentRequest`
+   e `parseAgentRetryPolicy`, que liam `schemaVersion`/`agentId`/`cycleId`/`snapshotId` e
+   `maxAttempts` por acesso direto de propriedade. Um `Proxy`/getter forjado dentro de `request` ou
+   `policy` conseguia lançar um segredo que escapava bruto antes de qualquer chamada ao adapter.
+   `parseAgentRequest` (`src/agent/agent-adapter.ts`) e `parseAgentRetryPolicy`
+   (`src/agent/retry-policy.ts`) agora leem cada um desses campos por `readProperty`
+   (`src/agent/internal/attempt-input-validation.ts`, já compartilhado pelas duas fronteiras de
+   tentativa), então uma exceção do getter é tratada exatamente como campo ausente — a mesma
+   mensagem `ContractValidationError` que já existia para um campo ausente/ inválido, nunca o
+   segredo lançado.
+2. **`runAuditableAgentAttemptAs` agora protege as leituras do seu próprio objeto público.** As
+   leituras de `source.adapter`, `source.request`, `source.responseId`, `source.promptVersion` e
+   `source.model` passaram de acesso direto para `readProperty`, fechando o mesmo vetor de fuga
+   quando `runAuditableAgentAttempt`/`runSingleAgentAttempt` é chamado diretamente com um objeto de
+   entrada forjado, e não só através de `runBoundedAgentAttempts`.
+
+Nenhuma mensagem de erro pública mudou: um campo ausente ou forjado continua produzindo
+exatamente o `ContractValidationError` que o campo ausente já produzia antes desta correção.
+
+### Arquivos alterados
+
+- `src/agent/agent-adapter.ts` (`parseAgentRequest` lê `schemaVersion`/`agentId`/`cycleId`/
+  `snapshotId` via `readProperty` compartilhado)
+- `src/agent/retry-policy.ts` (`parseAgentRetryPolicy` lê `maxAttempts` via `readProperty`
+  compartilhado)
+- `src/agent/run-auditable-agent-attempt.ts` (`runAuditableAgentAttemptAs` lê `adapter`, `request`,
+  `responseId`, `promptVersion` e `model` via `readProperty`)
+- `src/agent/internal/attempt-input-validation.ts` (docstring atualizada: `readProperty` agora
+  também é usado por `agent-adapter.ts` e `retry-policy.ts`; nenhuma mudança de comportamento)
+- `tests/run-bounded-agent-attempts.test.ts` (dois novos testes de regressão)
+- `tests/run-auditable-agent-attempt.test.ts` (um novo teste de regressão)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- getter forjado em `request.agentId`, lançando um segredo: `runBoundedAgentAttempts` falha com
+  `ContractValidationError` sanitizado, o getter é lido exatamente uma vez e o adapter nunca é
+  chamado;
+- getter forjado em `policy.maxAttempts`, lançando um segredo: `runBoundedAgentAttempts` falha com
+  `ContractValidationError` sanitizado, o getter é lido exatamente uma vez e o adapter nunca é
+  chamado;
+- getter forjado em `responseId`, campo do objeto de entrada público de `runAuditableAgentAttempt`,
+  lançando um segredo: a chamada falha com `ContractValidationError` sanitizado, o getter é lido
+  exatamente uma vez e o adapter nunca é chamado.
+
+Os três reproduzem exatamente os três cenários apontados na revisão de André.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **823 testes, 823 passaram, 0 falharam**, ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas na entrega original de TASK-030 e na correção 1/3. Esta correção
+não altera o contrato público de `runAuditableAgentAttempt`, `runSingleAgentAttempt`,
+`decideAgentAttemptProgress`, `AgentRetryPolicy` ou `parseAgentRequest`/`parseAgentRetryPolicy`, não
+amplia `StubAgentAdapter` e não introduz rede, persistência, credencial ou rota financeira. A
+sugestão adicional da revisão ("considere ainda `Array.isArray` sobre proxy revogado") não foi
+implementada nesta correção: o comentário de acionamento de André listou explicitamente apenas os
+três itens acima e pediu para não ampliar o escopo.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova, exceto confirmar se a consideração sobre `Array.isArray`/proxy revogado (mencionada
+na revisão, mas não incluída no pedido de correção) deve virar uma futura tarefa própria.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** conforme instrução do comentário `@claude` no PR #57.
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.

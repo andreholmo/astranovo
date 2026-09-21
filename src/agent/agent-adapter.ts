@@ -19,6 +19,7 @@
  */
 
 import { rejectContract } from "../domain/errors.js";
+import { readProperty } from "./internal/attempt-input-validation.js";
 
 export { ContractValidationError } from "../domain/errors.js";
 
@@ -78,17 +79,26 @@ export interface AgentRequest {
   readonly snapshotId: string;
 }
 
-/** Validates an agent request and returns a frozen copy. Input is not mutated. */
+/**
+ * Validates an agent request and returns a frozen copy. Input is not mutated.
+ *
+ * Every field is read through {@link readProperty}
+ * (`./internal/attempt-input-validation.js`) rather than direct property
+ * access: a forged `value` — a `Proxy`, or a plain object with a throwing
+ * getter on `schemaVersion`/`agentId`/`cycleId`/`snapshotId` — must fail this
+ * validation the same way a genuinely missing field would, never by letting
+ * whatever the getter throws escape unsanitized.
+ */
 export function parseAgentRequest(value: unknown): AgentRequest {
   const source = requireObject(value, AGENT_REQUEST);
-  if (source.schemaVersion !== 1) {
+  if (readProperty(source, "schemaVersion") !== 1) {
     rejectContract(AGENT_REQUEST, "schemaVersion", "must be exactly 1");
   }
   const parsed: AgentRequest = {
     schemaVersion: 1,
-    agentId: requireSlug(source.agentId, AGENT_REQUEST, "agentId"),
-    cycleId: requireIdentifier(source.cycleId, AGENT_REQUEST, "cycleId"),
-    snapshotId: requireIdentifier(source.snapshotId, AGENT_REQUEST, "snapshotId")
+    agentId: requireSlug(readProperty(source, "agentId"), AGENT_REQUEST, "agentId"),
+    cycleId: requireIdentifier(readProperty(source, "cycleId"), AGENT_REQUEST, "cycleId"),
+    snapshotId: requireIdentifier(readProperty(source, "snapshotId"), AGENT_REQUEST, "snapshotId")
   };
   return Object.freeze(parsed);
 }

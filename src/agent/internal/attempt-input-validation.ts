@@ -16,7 +16,11 @@
  * throw an arbitrary value, including a secret. Any read of an untrusted
  * object's property in this module goes through it, so a throwing read is
  * treated exactly like an absent property (`undefined`) and is never
- * rethrown.
+ * rethrown. `../agent-adapter.js` (`parseAgentRequest`) and
+ * `../retry-policy.js` (`parseAgentRetryPolicy`) also import it, so a forged
+ * `request` or `policy` passed through either attempt boundary is sanitized
+ * at the point each of its own fields is read, not only at the outer
+ * `source.request`/`source.policy` read one level up.
  */
 
 import { rejectContract } from "../../domain/errors.js";
