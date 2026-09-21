@@ -5805,3 +5805,97 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-034 — correção solicitada na revisão (ciclo 1/3) do PR #65
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+André (`andreholmo`) solicitou, na revisão do PR #65 sobre o commit `f358bc3`, correção porque a
+revalidação do `result` aninhado em `classifyCompletedResult` (`src/agent/summarize-finalized-agent-cycles.ts`)
+verificava apenas o discriminante `status` e o conjunto fechado de chaves de primeiro nível, mas
+aceitava valores incompatíveis dentro de cada braço da união — três casos citados explicitamente
+na revisão eram aceitos e contados indevidamente antes desta correção:
+
+- `HOLD` com `reason: "QUALQUER_COISA"` em vez do único valor fechado `ATTEMPTS_EXHAUSTED`;
+- `HOLD` com `evaluations: null` e `rejectionCodes: null` em vez de arrays;
+- `ACCEPTED` com `evaluations: null` e `result: null` em vez de array/objeto JSON.
+
+A correção acrescenta, em `classifyCompletedResult`, checagens rasas adicionais depois da
+checagem de chaves exatas já existente — sem recomputar tentativas, evaluations ou proposta, e
+sem inspecionar o conteúdo interno de `evaluations`/`rejectionCodes`/`result`, exatamente como a
+tarefa original exige:
+
+- para `HOLD`: `reason` deve ser exatamente `"ATTEMPTS_EXHAUSTED"`; `evaluations` e
+  `rejectionCodes` devem ser arrays (`Array.isArray`, nunca `null` ou outro tipo);
+- para `ACCEPTED`: `evaluations` deve ser um array; `result` deve ser um objeto JSON não nulo e
+  não array.
+
+Duas funções auxiliares novas foram adicionadas: `safeIsArray` (envolve `Array.isArray` em
+`try/catch`, porque a checagem pode lançar sobre um `Proxy` revogado — tratada exatamente como
+"não é array", nunca relançada) e `isJsonObject` (objeto não nulo e não array). Ambas seguem o
+mesmo padrão fail-closed de `safeOwnKeys`/`hasExactOwnKeys` já presentes no módulo. Nenhuma outra
+função foi alterada; a sanitização de getters/`Proxy` via `readProperty` já existente cobre as
+novas leituras sem necessidade de mudança.
+
+### Arquivos alterados
+
+- `src/agent/summarize-finalized-agent-cycles.ts` (`classifyCompletedResult` reforçado com
+  checagens de tipo/valor para `reason`, `evaluations`, `rejectionCodes` e `result`; novas funções
+  `safeIsArray` e `isJsonObject`; constante `HOLD_RESULT_REASON`; comentários atualizados)
+- `tests/summarize-finalized-agent-cycles.test.ts` (5 novos testes de regressão cobrindo
+  exatamente os três casos citados na revisão, mais duas variações correlatas)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- rejeita item `COMPLETED/HOLD` cujo `reason` não é o valor fechado `ATTEMPTS_EXHAUSTED`;
+- rejeita item `COMPLETED/HOLD` cujos `evaluations`/`rejectionCodes` são `null` em vez de arrays;
+- rejeita item `COMPLETED/ACCEPTED` cujos `evaluations`/`result` são `null`;
+- rejeita item `COMPLETED/ACCEPTED` cujo `result` é um array em vez de objeto JSON;
+- rejeita item `COMPLETED/ACCEPTED` cujo `evaluations` é um objeto em vez de array.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **966 testes, 966 passaram, 0 falharam** (961 anteriores + 5 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR — estava em `action_required`
+no momento da revisão, conforme observado por André.
+
+### Limitações conhecidas
+
+Escopo permanece totalmente offline e sem recomputação: as checagens acrescentadas são
+estritamente mais rasas que a revalidação de `finalizeBoundedAgentAttempts` — nunca inspecionam o
+conteúdo de `evaluations`, `rejectionCodes` ou de `result`, apenas confirmam que cada campo
+obrigatório tem o tipo/valor básico que seu próprio braço fechado da união exige. Nenhuma
+propriedade adicional, ranking, Risk Manager, `PaperBroker`, rede, credencial ou rota financeira
+real foi introduzida.
+
+Este sandbox de execução não teve acesso de rede para `git fetch origin main` (o comando exigiu
+aprovação indisponível neste ambiente não interativo); a branch de trabalho
+(`claude/issue-64-20260921-1441`) já estava com a árvore de trabalho limpa no checkout inicial
+fornecido pela automação, sem alterações remotas pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: revalida tipos dos campos do result no resumo de ciclos finalizados`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.

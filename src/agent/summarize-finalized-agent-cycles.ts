@@ -24,10 +24,13 @@
  * discriminant allows — `COMPLETED` entries exactly `itemId`/`status`/`result`,
  * `FAILED` entries exactly `itemId`/`status`/`code` with `code` equal to the
  * single closed value `AGENT_CYCLE_FAILED`. A `COMPLETED` entry's nested
- * `result` is read only far enough to discriminate `ACCEPTED` from `HOLD` and
- * to confirm it carries exactly the closed set of properties that outcome
- * allows — never recomputed, and never copied into the summary. This module
- * never recalculates an attempt or a result and never duplicates
+ * `result` is read only far enough to discriminate `ACCEPTED` from `HOLD`,
+ * confirm it carries exactly the closed set of properties that outcome
+ * allows, and confirm each required property has the basic shape/value its
+ * own closed union demands — `HOLD`'s `reason` equal to the single closed
+ * value `ATTEMPTS_EXHAUSTED`, `evaluations`/`rejectionCodes` each an array —
+ * never recomputed, and never copied into the summary. This module never
+ * recalculates an attempt or a result and never duplicates
  * `finalizeBoundedAgentAttempts`'s own structural revalidation of evaluations
  * or proposals; exactly like `runFinalizedAgentCycles` intentionally leaves
  * each item's `request` unvalidated at its own boundary, this module
@@ -71,6 +74,9 @@ const FAILED_ITEM_KEYS = ["itemId", "status", "code"] as const;
 /** Exact own keys a `COMPLETED` entry's nested `result` may have for each discriminant. Mirrors `finalize-bounded-agent-attempts.ts`'s closed shapes without importing its private constants. */
 const ACCEPTED_RESULT_KEYS = ["status", "evaluations", "result"] as const;
 const HOLD_RESULT_KEYS = ["status", "reason", "evaluations", "rejectionCodes"] as const;
+
+/** Closed set of reasons a `HOLD` result may declare. Mirrors `finalize-bounded-agent-attempts.ts`'s `AGENT_ATTEMPTS_HOLD_REASONS` without importing it. */
+const HOLD_RESULT_REASON = "ATTEMPTS_EXHAUSTED";
 
 /** Immutable, closed, frozen summary of a finalized batch: counts plus ordered `itemId` lists per category. Observability/audit only. */
 export interface FinalizedAgentCyclesSummary {
@@ -149,6 +155,24 @@ function hasExactDenseArrayKeys(value: object, length: number): boolean {
   return sawLength && seenIndices.size === length;
 }
 
+/**
+ * Whether `value` is a real array, without ever throwing: `Array.isArray`
+ * itself can throw on a revoked `Proxy`, and a throwing check here must be
+ * treated exactly like "not an array" rather than escaping unsanitized.
+ */
+function safeIsArray(value: unknown): boolean {
+  try {
+    return Array.isArray(value);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether `value` is a non-null, non-array JSON object — never `null`, an array or a primitive. */
+function isJsonObject(value: unknown): value is object {
+  return typeof value === "object" && value !== null && !safeIsArray(value);
+}
+
 type FinalizedAgentCycleCategory = "ACCEPTED" | "HOLD" | "FAILED";
 
 interface ValidatedSummaryItem {
@@ -160,10 +184,20 @@ interface ValidatedSummaryItem {
  * Reads and classifies one `COMPLETED` entry's nested `result`, without
  * recomputing or trusting anything about it beyond its own closed shape: this
  * module never recalculates an attempt or a result, so `result` is read only
- * far enough to discriminate `ACCEPTED` from `HOLD` and to confirm it carries
- * exactly the closed set of properties that discriminant allows — never its
- * nested `evaluations`, `rejectionCodes` or proposal content, and never
- * copied into the summary.
+ * far enough to discriminate `ACCEPTED` from `HOLD`, to confirm it carries
+ * exactly the closed set of properties that discriminant allows, and to
+ * confirm each of those required properties has the basic shape/value its
+ * own closed union demands — never its nested `evaluations`,
+ * `rejectionCodes` or proposal *content*, and never copied into the summary.
+ *
+ * A closed union member is not "revalidated" by checking only its key set:
+ * `evaluations`/`rejectionCodes` must at least be arrays (not `null` or some
+ * other type standing in for one), `result` must at least be a JSON object,
+ * and `HOLD`'s `reason` must be the single closed value
+ * `ATTEMPTS_EXHAUSTED` — never arbitrary free text. Checking this remains
+ * strictly shallower than `finalize-bounded-agent-attempts.ts`'s own
+ * recomputation: it never inspects what is inside `evaluations`,
+ * `rejectionCodes` or `result`.
  */
 function classifyCompletedResult(value: unknown): "ACCEPTED" | "HOLD" {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -174,11 +208,26 @@ function classifyCompletedResult(value: unknown): "ACCEPTED" | "HOLD" {
     if (!hasExactOwnKeys(value, ACCEPTED_RESULT_KEYS)) {
       rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "must have exactly the expected ACCEPTED properties");
     }
+    if (!safeIsArray(readProperty(value, "evaluations"))) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "evaluations must be an array");
+    }
+    if (!isJsonObject(readProperty(value, "result"))) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "result must be a JSON object");
+    }
     return "ACCEPTED";
   }
   if (status === "HOLD") {
     if (!hasExactOwnKeys(value, HOLD_RESULT_KEYS)) {
       rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "must have exactly the expected HOLD properties");
+    }
+    if (readProperty(value, "reason") !== HOLD_RESULT_REASON) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "reason must be ATTEMPTS_EXHAUSTED");
+    }
+    if (!safeIsArray(readProperty(value, "evaluations"))) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "evaluations must be an array");
+    }
+    if (!safeIsArray(readProperty(value, "rejectionCodes"))) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "rejectionCodes must be an array");
     }
     return "HOLD";
   }

@@ -1109,8 +1109,11 @@ classificação: o lote deve ser um array real, não vazio e denso, sem propried
 enumerável ou `Symbol` em si mesmo; cada item deve ter exatamente `itemId`/`status`/`result`
 (quando `COMPLETED`) ou `itemId`/`status`/`code` (quando `FAILED`, e `code` deve ser exatamente
 `AGENT_CYCLE_FAILED`); cada `itemId` deve ser não vazio, limitado e único no lote. O `result`
-de um item `COMPLETED` é lido só o suficiente para distinguir `ACCEPTED` de `HOLD` e confirmar
-seu próprio conjunto fechado de propriedades — nunca recalculado, nunca copiado para o resumo:
+de um item `COMPLETED` é lido só o suficiente para distinguir `ACCEPTED` de `HOLD`, confirmar
+seu próprio conjunto fechado de propriedades e confirmar o tipo/valor básico de cada uma delas
+(`reason` de `HOLD` deve ser o valor fechado `ATTEMPTS_EXHAUSTED`; `evaluations`/`rejectionCodes`
+devem ser arrays; `result` de `ACCEPTED` deve ser um objeto JSON) — nunca recalculado, nunca
+copiado para o resumo:
 exatamente como `runFinalizedAgentCycles` deixa `request` sem validação nesse limite, este
 módulo deixa `evaluations`/`rejectionCodes`/proposta dentro de `result` sem validação, porque
 esse conteúdo nunca é lido, copiado ou exposto aqui.

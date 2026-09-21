@@ -374,6 +374,51 @@ describe("summarizeFinalizedAgentCycles: invalid or forged batch structure fails
     expectRejection(() => summarizeFinalizedAgentCycles([forged]));
   });
 
+  it("rejects a COMPLETED/HOLD item whose reason is not the closed ATTEMPTS_EXHAUSTED value", () => {
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "HOLD", reason: "QUALQUER_COISA", evaluations: [], rejectionCodes: [] }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/HOLD item whose evaluations and rejectionCodes are null instead of arrays", () => {
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "HOLD", reason: "ATTEMPTS_EXHAUSTED", evaluations: null, rejectionCodes: null }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose evaluations and result are null", () => {
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations: null, result: null }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose result is an array instead of a JSON object", () => {
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations: [], result: [] }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose evaluations is an object instead of an array", () => {
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations: {}, result: {} }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
   it("rejects an empty or blank itemId", () => {
     expectRejection(() => summarizeFinalizedAgentCycles([completedAccepted("")]));
   });
