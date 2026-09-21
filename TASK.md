@@ -1,75 +1,75 @@
 # Tarefa atual
 
-- **ID:** TASK-033
-- **Milestone:** M4 — lote offline de ciclos independentes finalizados
+- **ID:** TASK-034
+- **Milestone:** M4 — resumo offline do lote finalizado
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_032.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_033.md`
 
 ## Objetivo
 
-Criar a menor composição assíncrona, determinística e offline que execute uma lista não vazia de ciclos de agente já finalizados, em ordem, isolando a falha de um item para que os demais continuem:
+Criar uma transformação pura, determinística e offline que resuma o resultado já finalizado de N ciclos independentes em contagens e listas ordenadas de `itemId`:
 
 ```text
-readonly FinalizedAgentCycleBatchItem[]
-→ runFinalizedAgentCycle (uma vez por item, em ordem)
-→ COMPLETED | FAILED por item
-→ readonly FinalizedAgentCycleBatchResult[]
+FinalizedAgentCycleBatchResults
+→ summarizeFinalizedAgentCycles
+→ total + ACCEPTED + HOLD + FAILED
 ```
 
-Esta tarefa somente compõe ciclos individuais já revisados. Não agrega propostas, não vota, não escolhe vencedor, não chama Risk Manager ou broker e não compartilha carteira ou estado entre agentes.
+O resumo serve somente para observabilidade e auditoria. Não classifica agentes, não compara desempenho, não vota, não escolhe proposta e não altera qualquer resultado.
 
 ## Leitura obrigatória
 
-Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_032.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/run-finalized-agent-cycle.ts`, `src/agent/run-bounded-agent-attempts.ts` e esta tarefa.
+Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_033.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/run-finalized-agent-cycles.ts`, `src/agent/finalize-bounded-agent-attempts.ts` e esta tarefa.
 
 ## Escopo exato
 
-Crie `src/agent/run-finalized-agent-cycles.ts`.
+Crie `src/agent/summarize-finalized-agent-cycles.ts`.
 
-Defina contratos fechados e congelados:
+Defina `FinalizedAgentCyclesSummary`, fechado e congelado, com exatamente:
 
-- `FinalizedAgentCycleBatchItem`: `itemId` explícito e `request` no contrato existente de `runFinalizedAgentCycle`;
-- resultado `COMPLETED`: preserva `itemId` e o resultado final do ciclo sem remodelá-lo;
-- resultado `FAILED`: preserva somente `itemId` e o código fechado `AGENT_CYCLE_FAILED`, sem mensagem, stack, payload ou objeto de erro;
-- `FinalizedAgentCycleBatchResults`: lista readonly, congelada e na mesma ordem da entrada.
+- `total`;
+- `acceptedCount`;
+- `holdCount`;
+- `failedCount`;
+- `acceptedItemIds`;
+- `holdItemIds`;
+- `failedItemIds`.
 
-Defina `runFinalizedAgentCycles`, assíncrona, que:
+Defina `summarizeFinalizedAgentCycles`, síncrona e pura, que:
 
-- valida toda a estrutura do lote antes da primeira chamada a qualquer adapter;
-- exige array não vazio, denso, sem propriedades extras, não enumeráveis ou `Symbol`;
-- exige `itemId` string não vazia e única, sem gerar ou normalizar IDs;
-- rejeita itens com propriedades extras, ausentes ou incompatíveis;
-- executa os itens sequencialmente, na ordem recebida;
-- chama `runFinalizedAgentCycle` exatamente uma vez por item;
-- converte qualquer rejeição do ciclo em `FAILED/AGENT_CYCLE_FAILED` sem inspecionar, interpolar ou propagar o erro;
-- continua para os itens seguintes após uma falha;
-- nunca transforma falha em `COMPLETED`, `ACCEPTED` ou `HOLD`;
-- preserva diretamente o resultado `ACCEPTED | HOLD` retornado em cada item `COMPLETED`;
-- não muta entrada, requests, resultados nem listas;
-- devolve objeto e lista congelados.
+- recebe a lista não vazia retornada por `runFinalizedAgentCycles`;
+- revalida defensivamente a estrutura pública em runtime;
+- classifica `COMPLETED/ACCEPTED`, `COMPLETED/HOLD` e `FAILED/AGENT_CYCLE_FAILED`;
+- conta cada item exatamente uma vez;
+- preserva a ordem original dentro de cada lista de IDs;
+- garante `acceptedCount + holdCount + failedCount === total`;
+- preserva `itemId` sem normalizar, gerar ou deduplicar silenciosamente;
+- rejeita IDs duplicados, itens incompatíveis, uniões adulteradas, arrays esparsos e propriedades extras;
+- rejeita propriedades próprias extras, inclusive não enumeráveis e `Symbol`;
+- trata getters e `Proxy` de modo fail-closed, sem vazar mensagem, stack, payload ou segredo;
+- não copia proposta, captura, avaliação ou texto livre para o resumo;
+- congela o resumo e todas as listas;
+- não muta a entrada.
 
-A validação estrutural do lote deve ser defensiva contra getters e `Proxy`: qualquer exceção originada por entrada não confiável vira `ContractValidationError` com mensagem constante e sem segredo. Reutilize contratos existentes; não duplique validação interna do request, retry ou finalização.
+Reutilize contratos e primitivas defensivas existentes onde forem adequados. Não recalcule tentativas nem resultados e não chame adapter ou finalizador.
 
 ## Testes obrigatórios
 
-- lote com um item aceito devolve um `COMPLETED/ACCEPTED`;
-- lote com um item esgotado devolve um `COMPLETED/HOLD`;
-- lote com três itens preserva ordem, `itemId` e resultados;
-- cada ciclo e cada adapter são chamados exatamente o necessário, sem duplicação;
-- falha sanitizada ou hostil em um item produz `FAILED/AGENT_CYCLE_FAILED` e os itens seguintes ainda executam;
-- nenhuma mensagem, stack, segredo ou payload do erro aparece no resultado;
-- entrada nula, array vazio, esparso, item inválido, `itemId` duplicado e propriedades extras falham antes da primeira chamada a adapter;
-- propriedades extras não enumeráveis e `Symbol` falham fechadas;
-- getters e `Proxy` que lançam, inclusive `ContractValidationError` malicioso, não vazam segredo;
-- resultados, lista e itens ficam congelados;
-- entradas não são mutadas;
-- mesmos stubs e dados produzem resultado campo a campo idêntico;
-- nenhuma chamada a timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência, Risk Manager, broker ou I/O;
+- lote misto com `ACCEPTED`, `HOLD` e `FAILED` produz contagens exatas;
+- listas de IDs preservam a ordem da entrada;
+- cada item aparece em exatamente uma lista e a soma das contagens é `total`;
+- lotes contendo somente uma das três categorias funcionam;
+- IDs duplicados, status/código incompatível, item adulterado, array vazio ou esparso falham fechados;
+- propriedades extras enumeráveis, não enumeráveis e `Symbol` falham;
+- getter/`Proxy` hostil, inclusive lançando `ContractValidationError` com segredo, não vaza conteúdo;
+- array esparso com comprimento enorme é rejeitado sem alocação ou iteração proporcional ao comprimento declarado;
+- saída e listas ficam congeladas;
+- entrada não é mutada;
+- mesmos dados produzem resultado campo a campo idêntico;
+- nenhuma chamada a adapter, retry, finalizador, timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência, Risk Manager, broker ou I/O;
 - toda a suíte anterior continua verde.
-
-Use somente adapters stub locais e determinísticos. Não altere `StubAgentAdapter` nem contratos públicos existentes.
 
 ## Documentação
 
@@ -77,21 +77,21 @@ Atualize o README apenas no necessário e registre a entrega em `docs/coordinati
 
 ## Fora do escopo
 
-Não criar agregação, votação, consenso, handoff, seleção de proposta, compartilhamento de contexto, concorrência/paralelismo, Risk Manager, PaperBroker, fill, carteira, ledger, persistência, provider de mercado, integração Astra real, timeout, backoff ou agendamento.
+Não criar ranking, pontuação, comparação de desempenho, agregação de propostas, votação, consenso, handoff, seleção de vencedor, retry, Risk Manager, PaperBroker, fill, carteira, ledger, persistência, provider de mercado ou integração Astra real.
 
 Não usar HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora ou dinheiro real.
 
 ## Critérios de aceite
 
-- cada item executa exatamente um ciclo individual já existente;
-- ordem e identidade explícita são preservadas;
-- falha de um item é sanitizada, auditável por código fechado e não impede os demais;
-- entrada estrutural inválida bloqueia o lote inteiro antes de qualquer chamada externa;
-- nenhuma geração implícita de dado e nenhuma duplicação material;
+- resumo representa cada item exatamente uma vez;
+- contagens e listas são coerentes e determinísticas;
+- nenhuma proposta, captura, erro ou texto livre é propagado;
+- entrada forjada falha fechada e sem vazamento;
+- nenhuma geração implícita, ranking ou decisão;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
 - nenhuma rede, credencial ou rota financeira real.
 
 ## Entrega
 
-Faça um único commit com a mensagem `feat: executa lote offline de ciclos finalizados`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
+Faça um único commit com a mensagem `feat: resume lote offline de ciclos finalizados`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
