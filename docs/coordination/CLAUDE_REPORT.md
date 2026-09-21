@@ -5895,7 +5895,7 @@ Nenhum bloqueio.
 ### Commit
 
 - **Mensagem:** `fix: revalida tipos dos campos do result no resumo de ciclos finalizados`
-- **Hash:** informado a André na resposta após o push.
+- **Hash:** `8db34537eba453951dc75ef461e4e0713d73146c`
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
