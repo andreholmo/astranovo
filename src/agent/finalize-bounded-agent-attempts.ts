@@ -19,9 +19,13 @@
  * `value` is never trusted as an already-valid `BoundedAgentAttemptsResult`
  * just because of its declared TypeScript type: every field this module
  * reads is revalidated fail-closed at runtime, including a fully forged
- * union. Every evaluation entry's `capture` is recomputed from scratch with
+ * union. Every evaluation entry's `capture` has its own top-level fields
+ * (`request`, `responseId`, `rawResponse`, `promptVersion`, `model`) read
+ * defensively before being recomputed from scratch with
  * `evaluateAgentResponseCapture` (`./evaluate-agent-response-capture.js`),
- * and the entry's own declared `status`/`code`/`proposal` — and, for
+ * since that module (and `captureAgentResponse` beneath it) reads those five
+ * fields by direct property access rather than a defensive read. And the
+ * entry's own declared `status`/`code`/`proposal` — and, for
  * `ACCEPTED`, the top-level `result` — must match that recomputation
  * exactly, field for field, with no extra or missing own property (including
  * one present only with an `undefined` value). A declared `ATTEMPTS_EXHAUSTED`
@@ -259,6 +263,36 @@ function proposalMatches(declared: unknown, expected: AgentProposal): boolean {
 }
 
 /**
+ * `evaluateAgentResponseCapture` (via `captureAgentResponse`) reads
+ * `request`, `responseId`, `rawResponse`, `promptVersion` and `model` off its
+ * argument by direct property access, not through a defensive read — by
+ * design, since that boundary already trusts its immediate caller. This
+ * module's caller is untrusted, so a declared `capture` that is itself a
+ * `Proxy` (or carries a throwing getter on any of those five keys) must not
+ * be handed to it as-is: a `get` trap throwing a forged, already
+ * `ContractValidationError` value with a secret would otherwise reach this
+ * module's outer boundary unsanitized. Reading each field through
+ * {@link readSafe} first — into a fresh plain object this module fully
+ * controls — turns any such throw into a plain `undefined`, which
+ * `captureAgentResponse` already rejects the same way it rejects a genuinely
+ * missing field. `request`'s own nested fields need no extra protection here:
+ * `parseAgentRequest` already reads every one of them through `readProperty`.
+ * A non-object (or array) `value` is passed through unchanged so
+ * `captureAgentResponse`'s own "must be a JSON object" check still applies to
+ * it exactly as before.
+ */
+function sanitizeCaptureCandidate(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  return {
+    request: readSafe(value, "request"),
+    responseId: readSafe(value, "responseId"),
+    rawResponse: readSafe(value, "rawResponse"),
+    promptVersion: readSafe(value, "promptVersion"),
+    model: readSafe(value, "model")
+  };
+}
+
+/**
  * Recomputes one declared evaluation entry from scratch, using only its
  * nested `capture`, then requires the entry's own declared `status`, `code`
  * and `proposal` to be exactly consistent with that recomputed evaluation —
@@ -268,7 +302,7 @@ function proposalMatches(declared: unknown, expected: AgentProposal): boolean {
  * replaced by the recomputed value.
  */
 function recomputeDeclaredEvaluation(entry: unknown): AgentResponseEvaluation {
-  const recomputed = evaluateAgentResponseCapture(readSafe(entry, "capture"));
+  const recomputed = evaluateAgentResponseCapture(sanitizeCaptureCandidate(readSafe(entry, "capture")));
   if (readSafe(entry, "status") !== recomputed.status) {
     rejectContract(FINALIZE_BOUNDED_AGENT_ATTEMPTS, "status", "must match the recomputed evaluation");
   }

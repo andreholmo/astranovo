@@ -583,6 +583,55 @@ describe("finalizeBoundedAgentAttempts: closed-union hardening against hostile P
     assert.ok(!error.message.includes(secret));
   });
 
+  it("does not leak a secret carried by a ContractValidationError thrown from a hostile capture.responseId getter", () => {
+    const secret = "SECRET_FROM_RESPONSE_ID_GETTER";
+    const input = exhaustedResult(1);
+    const [first] = input.evaluations;
+    assert.ok(first);
+    const forgedCapture: Record<string, unknown> = { ...first.capture };
+    Object.defineProperty(forgedCapture, "responseId", {
+      enumerable: true,
+      configurable: true,
+      get(): never {
+        throw new ContractValidationError("Forged", "responseId", secret);
+      }
+    });
+    const forged = {
+      ...input,
+      evaluations: [{ ...first, capture: forgedCapture }]
+    } as unknown as BoundedAgentAttemptsResult;
+
+    const error = expectRejection(() => finalizeBoundedAgentAttempts(forged));
+    assert.ok(!error.message.includes(secret));
+  });
+
+  it("does not leak a secret carried by a ContractValidationError thrown from a hostile capture.request getter", () => {
+    const secret = "SECRET_FROM_REQUEST_GETTER";
+    const input = exhaustedResult(1);
+    const [first] = input.evaluations;
+    assert.ok(first);
+    const forgedCapture: Record<string, unknown> = {
+      responseId: first.capture.responseId,
+      rawResponse: first.capture.rawResponse,
+      promptVersion: first.capture.promptVersion,
+      model: first.capture.model
+    };
+    Object.defineProperty(forgedCapture, "request", {
+      enumerable: true,
+      configurable: true,
+      get(): never {
+        throw new ContractValidationError("Forged", "request", secret);
+      }
+    });
+    const forged = {
+      ...input,
+      evaluations: [{ ...first, capture: forgedCapture }]
+    } as unknown as BoundedAgentAttemptsResult;
+
+    const error = expectRejection(() => finalizeBoundedAgentAttempts(forged));
+    assert.ok(!error.message.includes(secret));
+  });
+
   it("rejects a top-level union carrying a non-enumerable extra property", () => {
     const input = acceptedResult(0);
     const forged: Record<string, unknown> = { ...input };

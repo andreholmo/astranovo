@@ -5192,3 +5192,94 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI.
+
+## TASK-031 — correção 2/3 da revisão `REQUEST_CHANGES` (PR #59, SHA `5f917e6`)
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+Corrigido o bloqueio 2/3 apontado por André na revisão `REQUEST_CHANGES` do PR #59 sobre o SHA
+`5f917e6175791e8aa6f577e523c765ad4e5a54f9`, em `src/agent/finalize-bounded-agent-attempts.ts`,
+sem ampliar o escopo de TASK-031, sem alterar `captureAgentResponse` e sem alterar nenhuma
+mensagem pública já existente para estruturas genuinamente inválidas (não forjadas).
+
+**A rota profunda de vazamento:** `recomputeDeclaredEvaluation` entregava a `capture` declarada
+diretamente a `evaluateAgentResponseCapture`, que a repassa a `captureAgentResponse`
+(`src/agent/capture-agent-response.ts`). Esse módulo lê `source.request`, `source.responseId`,
+`source.rawResponse`, `source.promptVersion` e `source.model` por acesso direto de propriedade —
+por design, já que sua própria fronteira confia no chamador imediato. Como o chamador de
+`finalizeBoundedAgentAttempts` não é confiável, uma `capture` declarada com um getter/`Proxy`
+lançando deliberadamente `new ContractValidationError(...)` com um segredo em qualquer um desses
+cinco campos chegava ao `catch` externo de `finalizeBoundedAgentAttempts`, era reconhecida por
+`instanceof ContractValidationError` e era relançada sem sanitização — vazando o segredo pela
+borda pública da função.
+
+**Correção:** nova função `sanitizeCaptureCandidate`, chamada em `recomputeDeclaredEvaluation`
+antes de `evaluateAgentResponseCapture`. Para um `value` que seja objeto (não array, não nulo),
+ela lê cada um dos cinco campos de nível superior (`request`, `responseId`, `rawResponse`,
+`promptVersion`, `model`) através de `readSafe` — que já existia neste módulo e nunca relança o
+que uma leitura lançar — e monta um objeto simples novo, totalmente controlado por este módulo,
+com esses cinco valores. Uma leitura que lance qualquer coisa (incluindo um
+`ContractValidationError` forjado com segredo) vira `undefined` nesse objeto simples, que
+`captureAgentResponse` já rejeita do mesmo jeito que rejeitaria o campo genuinamente ausente — com
+a mesma mensagem específica de sempre, sem nada do valor original lançado. Um `value` que não seja
+objeto (ou que seja array) passa inalterado, preservando exatamente a checagem "deve ser um objeto
+JSON" que `captureAgentResponse` já fazia. Os campos próprios de `request` não precisam de proteção
+adicional aqui: `parseAgentRequest` já lê cada um deles via `readProperty`
+(`src/agent/agent-adapter.ts`), que tem a mesma garantia de não relançar.
+
+### Arquivos alterados
+
+- `src/agent/finalize-bounded-agent-attempts.ts` (`sanitizeCaptureCandidate` novo;
+  `recomputeDeclaredEvaluation` passa a sanitizar a `capture` declarada antes de recomputar)
+- `tests/finalize-bounded-agent-attempts.test.ts` (dois novos testes de regressão)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- getter profundo em `capture.responseId` lançando `ContractValidationError` contendo um segredo:
+  sanitizado (mensagem final sem o segredo);
+- getter profundo em `capture.request` lançando `ContractValidationError` contendo um segredo:
+  sanitizado.
+
+Ambos falham na versão anterior do código (SHA `5f917e6`) — verifiquei revertendo localmente só a
+lógica de `sanitizeCaptureCandidate` para um passthrough antes de rodar a suíte, confirmando que os
+dois novos testes falham exatamente como o bloqueio 2/3 descreve, e voltam a passar com a correção
+restaurada — e passam após a correção.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **873 testes, 873 passaram, 0 falharam** (871 anteriores + 2 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+Nenhuma além das já documentadas nas entregas anteriores de TASK-031. Esta correção não altera o
+contrato público de `finalizeBoundedAgentAttempts`, `evaluateAgentResponseCapture` ou
+`captureAgentResponse` (não modificado, conforme pedido pela própria revisão), não amplia
+`StubAgentAdapter` e não introduz rede, persistência, credencial ou rota financeira.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** conforme instrução do comentário `@claude` no PR #59.
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
