@@ -1,62 +1,82 @@
 # Tarefa atual
 
-- **ID:** TASK-029
-- **Milestone:** M4 — execução de uma tentativa auditável
+- **ID:** TASK-030
+- **Milestone:** M4 — retry auditável e estritamente limitado
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_028.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_029.md`
 
 ## Objetivo
 
-Criar a menor composição que execute exatamente uma chamada ao `AgentAdapter` e devolva a avaliação auditável completa da resposta:
+Criar a menor composição offline que execute tentativas auditáveis em sequência, somente enquanto a política permitir:
 
 ```text
-AgentRequest → AgentAdapter.call (uma vez)
-→ AgentResponseCapture
-→ ACCEPTED(AgentProposal) | REJECTED(código seguro)
+AgentRetryPolicy + ids explícitos
+→ runAuditableAgentAttempt (uma chamada por tentativa)
+→ ACCEPTED | próxima tentativa | ATTEMPTS_EXHAUSTED
 ```
 
-Uma resposta do agente inválida deve permanecer como `REJECTED` com sua captura auditável, em vez de ser convertida em exceção. Falhas anteriores à existência de uma captura válida continuam falhando fechado com erro sanitizado.
+O fluxo deve parar imediatamente no primeiro `ACCEPTED` ou ao atingir `maxAttempts`. Somente uma resposta capturada e avaliada como `REJECTED` autoriza a tentativa seguinte. Falha anterior à captura continua falhando fechado e não pode provocar retry.
 
-Não executar retry, loop, backoff, timeout, HOLD, persistência ou integração real.
+Não adicionar espera, backoff, timeout, relógio, geração de ID, persistência, HOLD, rede ou integração real.
 
 ## Leitura obrigatória
 
-Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_028.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/agent-adapter.ts`, `src/agent/capture-agent-response.ts`, `src/agent/evaluate-agent-response-capture.ts`, `src/agent/run-single-agent-attempt.ts`, `src/agent/retry-policy.ts`, `src/agent/decide-agent-attempt-progress.ts` e esta tarefa.
+Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_029.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/agent-adapter.ts`, `src/agent/retry-policy.ts`, `src/agent/decide-agent-attempt-progress.ts`, `src/agent/run-auditable-agent-attempt.ts`, `src/agent/evaluate-agent-response-capture.ts` e esta tarefa.
 
 ## Escopo exato
 
-Crie `src/agent/run-auditable-agent-attempt.ts`.
+Crie `src/agent/run-bounded-agent-attempts.ts`.
 
-Defina `runAuditableAgentAttempt`, assíncrona apenas para manter compatibilidade com a fronteira existente, que recebe o mesmo conjunto de dados de `RunSingleAgentAttemptRequest` e:
+Defina `runBoundedAgentAttempts`, assíncrona, que recebe explicitamente:
 
-1. valida fail-closed o objeto de entrada, o adaptador, o `AgentRequest`, `responseId`, `promptVersion` e `model` antes de chamar o adaptador;
-2. chama `adapter.call(request)` exatamente uma vez;
-3. converte qualquer valor lançado pelo adaptador em `ContractValidationError` com mensagem fixa e sanitizada, sem `message`, `stack`, `cause` ou conteúdo original;
-4. exige que o retorno bruto seja `string`; retorno de outro tipo falha fechado antes de criar captura;
-5. entrega a resposta bruta, sem normalização, a `evaluateAgentResponseCapture`;
-6. devolve diretamente a união imutável `AgentResponseEvaluation`, preservando a captura tanto em `ACCEPTED` quanto em `REJECTED`.
+- `adapter`;
+- `request`;
+- `policy`;
+- `responseIds`, uma lista ordenada de IDs fornecidos pelo chamador;
+- `promptVersion`;
+- `model`.
 
-Refatore `runSingleAgentAttempt` somente no necessário para delegar a execução a `runAuditableAgentAttempt`:
+Antes da primeira chamada ao adaptador:
 
-- assinatura e comportamento público atuais devem permanecer idênticos;
-- `ACCEPTED` continua retornando `{ capture, proposal }`;
-- `REJECTED` continua sendo convertido nos mesmos `ContractValidationError` sanitizados já existentes;
-- nenhuma chamada adicional ao adaptador.
+1. valide fail-closed o objeto de entrada, `policy`, `request`, metadados e a lista inteira de `responseIds`;
+2. exija que `responseIds.length === policy.maxAttempts`;
+3. exija IDs válidos, distintos e na ordem fornecida; não gere, normalize ou deduza IDs;
+4. rejeite entradas forjadas com `ContractValidationError` sanitizado, sem tocar o adaptador.
 
-Extraia/reutilize validações comuns; não mantenha duas implementações independentes da mesma chamada.
+Na execução:
+
+1. use `runAuditableAgentAttempt` como única fronteira de chamada e avaliação;
+2. use `decideAgentAttemptProgress` para decidir, após cada avaliação, entre continuar, aceitar ou encerrar;
+3. faça no máximo `policy.maxAttempts` chamadas e exatamente uma chamada por tentativa;
+4. execute nova tentativa somente após uma avaliação `REJECTED`;
+5. pare imediatamente no primeiro `ACCEPTED`;
+6. se `runAuditableAgentAttempt` lançar por falha anterior à captura, propague somente o erro sanitizado e não tente novamente;
+7. devolva um resultado imutável e fechado:
+   - `ACCEPTED`: todas as avaliações realizadas, mais a avaliação aceita;
+   - `ATTEMPTS_EXHAUSTED`: todas as avaliações rejeitadas e os códigos fechados na ordem;
+8. preserve cada captura bruta byte a byte nas avaliações retornadas.
+
+Não altere o contrato público de `runAuditableAgentAttempt`, `runSingleAgentAttempt`, `decideAgentAttemptProgress` ou `AgentRetryPolicy`.
 
 ## Testes obrigatórios
 
-- `ACCEPTED` chama o adaptador exatamente uma vez e preserva captura/proposta;
-- cada um dos seis códigos `REJECTED` é devolvido como dado, com captura bruta byte a byte;
-- resposta não-string e exceção do adaptador falham fechado, sem segunda chamada;
-- mensagem, stack, cause, token, segredo ou valor arbitrário lançado pelo adaptador não aparecem no erro;
-- metadados, request, adaptador e objeto de entrada forjados falham antes da chamada quando aplicável;
-- `runSingleAgentAttempt` mantém todos os testes e mensagens públicas anteriores após delegar;
-- resultados congelados, ausência de mutação e determinismo para o mesmo adaptador stub;
-- prova de ausência de retry, timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência ou I/O.
+- aceita na primeira tentativa e não consome as demais respostas/IDs;
+- rejeita uma vez e aceita na segunda, com exatamente duas chamadas;
+- esgota políticas de 1, 2 e 3 tentativas sem exceder o limite;
+- preserva avaliações, capturas brutas, ordem, IDs e códigos;
+- jamais tenta novamente após exceção do adaptador ou resposta não-string;
+- toda a entrada, inclusive todos os `responseIds`, é validada antes da primeira chamada;
+- IDs ausentes, extras, duplicados, inválidos ou forjados falham fechado;
+- política, request, adaptador, metadados e objeto de entrada forjados falham fechado quando aplicável;
+- resultados, lista de avaliações e listas de códigos são congelados; entradas não são mutadas;
+- mesmo adaptador sequencial determinístico e mesma entrada produzem resultado campo a campo idêntico;
+- nenhuma chamada após `ACCEPTED` e nenhuma quarta chamada sob qualquer entrada;
+- ausência de timer, delay, backoff, timeout, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência e I/O;
+- toda a suíte anterior continua verde.
+
+Use nos testes um adaptador sequencial local e determinístico. Não amplie `StubAgentAdapter` nesta tarefa.
 
 ## Documentação
 
@@ -64,21 +84,22 @@ Atualize o README apenas no necessário e registre a entrega em `docs/coordinati
 
 ## Fora do escopo
 
-Não implementar segunda tentativa, loop de retry, backoff, timeout, HOLD final, coordenador multiagente, persistência, logs externos, provider de mercado, integração Astra real, ordem, fill, Risk Manager, PaperBroker, ledger, banco, dashboard ou cloud.
+Não implementar backoff, espera, timeout, agendamento, concorrência, retry infinito, HOLD final, coordenador multiagente, persistência, logs externos, provider de mercado, integração Astra real, ordem, fill, Risk Manager, PaperBroker, ledger, banco, dashboard ou cloud.
 
-Não usar HTTP, SDK externo, fila, concorrência, timer, delay, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora ou dinheiro real.
+Não usar HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora ou dinheiro real.
 
 ## Critérios de aceite
 
-- exatamente uma chamada ao adaptador;
-- respostas inválidas do agente retornam `REJECTED` auditável, não exceção;
-- falhas sem captura válida produzem somente erro sanitizado;
-- `runSingleAgentAttempt` preserva integralmente o contrato anterior;
-- nenhuma duplicação material do fluxo de chamada/validação;
+- retry somente após `REJECTED` auditável;
+- parada imediata em `ACCEPTED` ou `ATTEMPTS_EXHAUSTED`;
+- no máximo três chamadas, conforme política validada;
+- nenhuma nova tentativa após falha sem captura;
+- histórico completo e imutável das avaliações realizadas;
+- nenhuma geração implícita de ID e nenhuma duplicação material da lógica existente;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
 - nenhuma rede, credencial ou rota financeira real.
 
 ## Entrega
 
-Faça um único commit com a mensagem `feat: executa tentativa auditavel de agente`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
+Faça um único commit com a mensagem `feat: executa tentativas auditaveis limitadas`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
