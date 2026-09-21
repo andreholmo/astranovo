@@ -1,62 +1,62 @@
 # Tarefa atual
 
-- **ID:** TASK-031
-- **Milestone:** M4 — resultado final seguro após retries
+- **ID:** TASK-032
+- **Milestone:** M4 — ciclo offline finalizado de um agente
 - **Status:** READY
 - **Responsável:** Claude Code
 - **Revisor:** ChatGPT/GPT-5.6 Sol
-- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_030.md`
+- **Base:** `main` após `docs/coordination/CHATGPT_REVIEW_TASK_031.md`
 
 ## Objetivo
 
-Criar a menor transformação pura que converta o resultado auditável de `runBoundedAgentAttempts` em um resultado final seguro do agente:
+Criar a menor composição assíncrona que execute as tentativas auditáveis limitadas já existentes e devolva diretamente o resultado final seguro já existente:
 
 ```text
-ACCEPTED → proposta aceita preservada
-ATTEMPTS_EXHAUSTED → HOLD explícito e auditável
+RunBoundedAgentAttemptsRequest
+→ runBoundedAgentAttempts
+→ finalizeBoundedAgentAttempts
+→ ACCEPTED | HOLD
 ```
 
-Esta tarefa apenas representa a decisão final após o retry já executado. Não chama agente, não executa retry, não chama Risk Manager ou broker e não altera carteira.
+Esta tarefa fecha o ciclo offline de exatamente um agente. Não cria nova lógica de retry ou validação, não coordena múltiplos agentes e não chama Risk Manager ou broker.
 
 ## Leitura obrigatória
 
-Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_030.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/run-bounded-agent-attempts.ts`, `src/agent/evaluate-agent-response-capture.ts`, `src/domain/contracts.ts` e esta tarefa.
+Leia integralmente `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/ROADMAP.md`, `docs/coordination/CHATGPT_REVIEW_TASK_031.md`, `docs/coordination/CLAUDE_REPORT.md`, `src/agent/run-bounded-agent-attempts.ts`, `src/agent/finalize-bounded-agent-attempts.ts`, `src/agent/run-auditable-agent-attempt.ts` e esta tarefa.
 
 ## Escopo exato
 
-Crie `src/agent/finalize-bounded-agent-attempts.ts`.
+Crie `src/agent/run-finalized-agent-cycle.ts`.
 
-Defina `finalizeBoundedAgentAttempts`, síncrona e pura, que recebe um `BoundedAgentAttemptsResult` e devolve uma união fechada e imutável:
+Defina `runFinalizedAgentCycle`, assíncrona, que:
 
-- `ACCEPTED`:
-  - preserva todas as avaliações na ordem;
-  - preserva a avaliação aceita e a proposta aceita sem alteração;
-  - não cria uma segunda proposta nem altera ação, confiança, tamanho ou evidências;
-- `HOLD`:
-  - existe somente para entrada `ATTEMPTS_EXHAUSTED`;
-  - usa razão fechada `ATTEMPTS_EXHAUSTED`;
-  - preserva todas as avaliações rejeitadas e os códigos na ordem;
-  - não fabrica `AgentProposal`, preço, posição, confiança, evidência ou texto livre.
+- recebe exatamente o mesmo contrato de entrada de `runBoundedAgentAttempts`, reutilizando o tipo existente;
+- chama `runBoundedAgentAttempts` exatamente uma vez;
+- entrega o resultado retornado diretamente a `finalizeBoundedAgentAttempts`, exatamente uma vez;
+- devolve a união `FinalizedBoundedAgentAttemptsResult` sem remodelar, copiar, reinterpretar ou enriquecer campos;
+- preserva `ACCEPTED` integralmente;
+- converte esgotamento somente em `HOLD` por meio do finalizador existente;
+- propaga falhas contratuais sanitizadas e interrompe imediatamente, sem tentativa adicional;
+- não gera IDs, timestamps, mensagens, propostas ou qualquer dado implícito.
 
-A função deve revalidar fail-closed a estrutura recebida em runtime, inclusive entradas forjadas. Deve provar consistência entre `status`, avaliações, resultado aceito e códigos, rejeitando propriedades extras ou incompatíveis quando isso for necessário para manter a união fechada. Exceções arbitrárias de getters/`Proxy` não podem vazar mensagens, stack, causa ou segredo.
-
-Reutilize validadores e tipos existentes quando aplicável. Não duplique materialmente a lógica de `runBoundedAgentAttempts` ou `evaluateAgentResponseCapture`.
+Não duplique validadores, retry, decisões de progresso nem lógica de finalização. Não altere contratos públicos dos módulos existentes.
 
 ## Testes obrigatórios
 
-- converte `ACCEPTED` preservando proposta, captura, histórico e ordem;
-- converte `ATTEMPTS_EXHAUSTED` em `HOLD` com razão fechada e códigos alinhados;
-- resultado e listas retornadas são congelados;
+- rejeição seguida de aceitação devolve `ACCEPTED`, preservando capturas, proposta, ordem e IDs;
+- esgotamento com 1, 2 e 3 tentativas devolve `HOLD` com razão e códigos fechados na ordem;
+- o adapter é chamado exatamente o número necessário e nunca após aceitação ou falha;
+- cada `responseId` explícito é usado uma vez e na ordem;
+- entrada inválida ou forjada falha antes da primeira chamada ao adapter;
+- exceção do adapter permanece sanitizada e não inicia nova tentativa;
+- resultado e listas permanecem congelados;
 - entrada não é mutada;
-- não fabrica proposta no ramo `HOLD`;
-- rejeita união adulterada: status inválido, resultado aceito divergente, avaliação aceita no ramo esgotado, código divergente, listas vazias ou acima do limite de três;
-- rejeita propriedades incompatíveis e extras, inclusive quando presentes com valor `undefined`;
-- getters/`Proxy` forjados falham com `ContractValidationError` sanitizado;
-- mesmos dados válidos produzem resultado campo a campo idêntico;
-- nenhuma chamada a adaptador, retry, timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência ou I/O;
+- mesmos dados determinísticos produzem resultado campo a campo idêntico;
+- nenhuma duplicação de proposta, captura, validação, retry ou finalização;
+- nenhuma chamada a timer, relógio, aleatoriedade, HTTP, SDK, ambiente, persistência, Risk Manager, broker ou I/O;
 - toda a suíte anterior continua verde.
 
-Use fixtures locais e determinísticas. Não altere `StubAgentAdapter`.
+Use apenas adapters stub locais e determinísticos. Não altere `StubAgentAdapter`.
 
 ## Documentação
 
@@ -64,15 +64,15 @@ Atualize o README apenas no necessário e registre a entrega em `docs/coordinati
 
 ## Fora do escopo
 
-Não executar tentativas, não criar coordenador multiagente, Risk Manager, PaperBroker, fill, carteira, ledger, persistência, logs externos, provider de mercado, integração Astra real, timeout, backoff ou agendamento.
+Não criar coordenador multiagente, agregação, votação, handoff, Risk Manager, PaperBroker, fill, carteira, ledger, persistência, provider de mercado, integração Astra real, timeout, backoff ou agendamento.
 
 Não usar HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial, wallet, blockchain, testnet, corretora ou dinheiro real.
 
 ## Critérios de aceite
 
-- esgotamento das tentativas sempre resulta em `HOLD` explícito, fechado e auditável;
-- aceitação preserva integralmente a proposta já validada;
-- nenhuma entrada adulterada pode transformar rejeição/esgotamento em aceitação;
+- a composição usa uma única execução limitada e uma única finalização;
+- aceitação e esgotamento preservam exatamente as garantias dos módulos existentes;
+- nenhuma falha pode disparar tentativa adicional ou produzir aceitação;
 - nenhuma geração implícita de dado e nenhuma duplicação material;
 - `npm ci`, typecheck, build e testes passam;
 - CI verde em Node.js 20 e 22;
@@ -80,4 +80,4 @@ Não usar HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de 
 
 ## Entrega
 
-Faça um único commit com a mensagem `feat: finaliza tentativas com hold seguro`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
+Faça um único commit com a mensagem `feat: compõe ciclo offline finalizado de agente`, push em branch própria e deixe a automação abrir o PR para `main`. Inclua resumo, testes e referência à issue. Não aprove nem mescle o próprio trabalho e não altere o status desta tarefa.
