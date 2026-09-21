@@ -126,6 +126,48 @@ function hasExactOwnKeys(value: object, expectedKeys: readonly string[]): boolea
   );
 }
 
+/** Whether `key` is the canonical string form of an integer index in `[0, length)`, e.g. `"0"`, never `"00"` or `"-0"`. */
+function isCanonicalArrayIndex(key: PropertyKey, length: number): boolean {
+  if (typeof key !== "string" || key === "length") return false;
+  const index = Number(key);
+  return Number.isInteger(index) && index >= 0 && index < length && String(index) === key;
+}
+
+/**
+ * Whether `value`'s own keys — enumerable or not, string or symbol — are
+ * exactly a dense array of `length` own keys: `"length"` plus each canonical
+ * index `"0"..String(length - 1)`, nothing more, nothing missing.
+ *
+ * Deliberately never builds an expected-keys list sized off the untrusted
+ * `length` (e.g. via `Array.from({ length }, ...)`): a real sparse array or a
+ * `Proxy` can report a huge `length` while owning only a handful of actual
+ * keys, and allocating or iterating a structure proportional to that
+ * declared `length` before checking cardinality is itself a memory/CPU
+ * exhaustion vector. Instead, {@link safeOwnKeys} is read once — its cost is
+ * bounded by the *actual* number of own keys the target reports, not by the
+ * declared `length` — and rejected immediately when that count doesn't match
+ * `length + 1`. Only once cardinality is confirmed does this walk the
+ * (now-bounded) key list to confirm every non-`"length"` key is a distinct
+ * canonical index; since own keys are always unique, `length` such distinct
+ * indices in `[0, length)` can only be exactly `0..length-1`.
+ */
+function hasExactDenseArrayKeys(value: object, length: number): boolean {
+  const actualKeys = safeOwnKeys(value);
+  if (actualKeys.length !== length + 1) return false;
+
+  let sawLength = false;
+  const seenIndices = new Set<number>();
+  for (const key of actualKeys) {
+    if (key === "length") {
+      sawLength = true;
+      continue;
+    }
+    if (!isCanonicalArrayIndex(key, length)) return false;
+    seenIndices.add(Number(key));
+  }
+  return sawLength && seenIndices.size === length;
+}
+
 interface ValidatedBatchItem {
   readonly itemId: string;
   readonly request: unknown;
@@ -173,8 +215,7 @@ function requireBatchItems(value: unknown): readonly ValidatedBatchItem[] {
   if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 1) {
     rejectContract(RUN_FINALIZED_AGENT_CYCLES, "value", "must be a non-empty array");
   }
-  const expectedKeys = ["length", ...Array.from({ length }, (_unused, index) => String(index))];
-  if (!hasExactOwnKeys(value, expectedKeys)) {
+  if (!hasExactDenseArrayKeys(value, length)) {
     rejectContract(RUN_FINALIZED_AGENT_CYCLES, "value", "must be a dense array with no extra properties");
   }
 

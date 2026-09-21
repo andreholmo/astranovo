@@ -5554,3 +5554,107 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-033 — correção 1/3 da revisão `CHANGES_REQUESTED` (PR #63, SHA `2b1257c1bf33bc1671880f9ed96c78933c2e5c9d`)
+
+- **Status reportado:** correção executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e de André
+  (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+A revisão de André apontou um risco de exaustão de memória/CPU em `requireBatchItems`
+(`src/agent/run-finalized-agent-cycles.ts`) antes da rejeição fail-closed: a checagem de
+"array denso sem propriedades extras" construía `expectedKeys` com
+`Array.from({ length }, (_unused, index) => String(index))`, alocando e iterando uma lista
+proporcional ao `length` declarado pela entrada não confiável — lido de `value.length` — antes
+de examinar as chaves reais do array via `Reflect.ownKeys`. Um array real esparso com `.length`
+grande (dentro do limite de `2^32 - 1` de um array real) ou um `Proxy` de array cujo trap `get`
+reporte um `length` grande faziam essa alocação ocorrer mesmo quando o array possuía, na
+prática, poucas chaves próprias — um vetor de negação de serviço.
+
+Corrigido substituindo `Array.from({ length }, ...)` + `hasExactOwnKeys` por uma nova função
+dedicada, `hasExactDenseArrayKeys(value, length)`:
+
+1. lê `Reflect.ownKeys(value)` uma única vez (via `safeOwnKeys`, já existente, que trata
+   qualquer exceção do trap `ownKeys` — incluindo um `ContractValidationError` forjado
+   carregando segredo — exatamente como lista vazia, sem nunca relançar);
+2. rejeita imediatamente quando a cardinalidade dessa lista não é `length + 1` — sem alocar
+   nem iterar nada proporcional ao `length` declarado, apenas ao número real de chaves
+   próprias que o alvo relatou;
+3. somente depois de confirmada a cardinalidade — quando `length` já está limitado pelo número
+   real de chaves — percorre essa mesma lista (agora de tamanho `length + 1`) verificando que
+   cada chave que não é `"length"` é o índice canônico de um inteiro em `[0, length)`
+   (`isCanonicalArrayIndex`, nova função auxiliar) e acumulando os índices vistos em um
+   `Set`. Como chaves próprias são sempre distintas, `length` índices canônicos distintos em
+   `[0, length)` só podem ser exatamente `0..length-1` — não é necessária uma segunda lista de
+   índices esperados para provar isso.
+
+Nenhum limite de segurança fixo foi introduzido: a validação continua aceitando qualquer
+`length` seguro (`Number.isSafeInteger`) cuja cardinalidade real de chaves bata exatamente, e
+rejeita fechado qualquer coisa fora disso — sem depender de um teto arbitrário que pudesse ser
+confundido com a quantidade funcional de agentes do lote. `hasExactOwnKeys` (conjunto fixo de
+duas chaves, `itemId`/`request`) permanece intocada e é usada apenas na validação por item, onde
+nunca houve alocação proporcional a uma entrada não confiável.
+
+### Arquivos alterados
+
+- `src/agent/run-finalized-agent-cycles.ts` (`hasExactDenseArrayKeys` e `isCanonicalArrayIndex`
+  substituem a construção de `expectedKeys` proporcional a `length`; `requireBatchItems` passa a
+  chamar `hasExactDenseArrayKeys`)
+- `tests/run-finalized-agent-cycles.test.ts` (três novos testes de regressão)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes obrigatórios cobertos
+
+- lote com um array real esparso cujo `.length` é ajustado para `4_000_000_000` (dentro do
+  limite de um array real) mas cujas chaves próprias reais continuam sendo apenas `"0"` e
+  `"length"`: rejeitado antes de qualquer chamada a adapter, e em menos de 500ms — prova de que
+  a rejeição não escala com o `length` declarado;
+- lote com um `Proxy` de array cujo trap `get` reporta `length: 4_000_000_000` (sem lançar) mas
+  cujas chaves próprias reais (via `Reflect.ownKeys` no alvo real) continuam pequenas: mesma
+  rejeição, mesmo adapter nunca chamado, mesmo limite de tempo;
+- `Reflect.ownKeys` no próprio array do lote (não apenas em um item) lançando um
+  `ContractValidationError` forjado carregando segredo: rejeição sanitizada, sem o segredo na
+  mensagem — cobertura nova para o caminho que este `hasExactDenseArrayKeys` agora percorre;
+- toda a suíte de testes obrigatória de TASK-033 listada no relatório original continua
+  passando sem alteração de comportamento (mesmos `COMPLETED`/`FAILED`, ordem, `itemId`,
+  congelamento, ausência de mutação, ausência de vazamento de segredo);
+- suíte completa permanece verde: `npm run typecheck` sem erros; `npm test` **925 testes, 925
+  passaram, 0 falharam** (922 anteriores + 3 novos), ambiente local Node.js 22.23.2.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **925 testes, 925 passaram, 0 falharam** |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR (estava `action_required` no
+momento da revisão).
+
+### Limitações conhecidas
+
+Mesmas da entrega original de TASK-033; nenhuma nova introduzida por esta correção. Como antes,
+este sandbox de execução não teve acesso de rede para `git fetch origin main`; a branch de
+trabalho já estava sincronizada com o `main` local fornecido no checkout inicial, sem alterações
+remotas pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** ajuste solicitado via comentário do PR #63 (correção 1/3 da revisão
+  `CHANGES_REQUESTED`), sem alterar `TASK.md` nem o status de TASK-033.
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.

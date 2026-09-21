@@ -356,6 +356,40 @@ describe("runFinalizedAgentCycles: invalid or forged batch structure fails befor
 
     assert.equal(adapter.callCount, 0);
   });
+
+  it("rejects a real sparse array with a huge declared length without allocating proportional to it", async () => {
+    const adapter = new SequentialAdapter([acceptedResponse("cycle-a")]);
+    const sparse: unknown[] = [item("a", acceptedRequest("cycle-a", adapter))];
+    // A real array's own keys stay just {"0", "length"} no matter how large `length` is set to;
+    // a validator that builds an expected-keys list sized off `length` before checking cardinality
+    // would allocate/iterate billions of entries here.
+    sparse.length = 4_000_000_000;
+
+    const startedAt = Date.now();
+    await expectRejection(runFinalizedAgentCycles(sparse as unknown as FinalizedAgentCycleBatchItems));
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.equal(adapter.callCount, 0);
+    assert.ok(elapsedMs < 500, `rejection must not scale with the declared length (took ${elapsedMs}ms)`);
+  });
+
+  it("rejects a Proxy array reporting a huge length without allocating proportional to it", async () => {
+    const adapter = new SequentialAdapter([acceptedResponse("cycle-a")]);
+    const target = [item("a", acceptedRequest("cycle-a", adapter))];
+    const forged = new Proxy(target, {
+      get(t, prop, receiver): unknown {
+        if (prop === "length") return 4_000_000_000;
+        return Reflect.get(t, prop, receiver);
+      }
+    });
+
+    const startedAt = Date.now();
+    await expectRejection(runFinalizedAgentCycles(forged as unknown as FinalizedAgentCycleBatchItems));
+    const elapsedMs = Date.now() - startedAt;
+
+    assert.equal(adapter.callCount, 0);
+    assert.ok(elapsedMs < 500, `rejection must not scale with the reported length (took ${elapsedMs}ms)`);
+  });
 });
 
 describe("runFinalizedAgentCycles: hostile getters and Proxy traps fail closed without leaking a secret", () => {
@@ -397,6 +431,19 @@ describe("runFinalizedAgentCycles: hostile getters and Proxy traps fail closed w
     };
 
     const error = await expectRejection(runFinalizedAgentCycles([forgedItem as unknown as FinalizedAgentCycleBatchItem]));
+
+    assert.ok(!error.message.includes(secret));
+  });
+
+  it("fails closed when Reflect.ownKeys on the batch array itself throws a forged value", async () => {
+    const secret = "SECRET_FROM_BATCH_OWN_KEYS_TRAP";
+    const forged = new Proxy([item("a", acceptedRequest("cycle-a")), item("b", acceptedRequest("cycle-b"))], {
+      ownKeys(): never {
+        throw new ContractValidationError("Forged", "ownKeys", secret);
+      }
+    });
+
+    const error = await expectRejection(runFinalizedAgentCycles(forged as unknown as FinalizedAgentCycleBatchItems));
 
     assert.ok(!error.message.includes(secret));
   });
