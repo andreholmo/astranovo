@@ -872,6 +872,57 @@ não implementa retry, delay, timeout ou fallback: uma rejeição em qualquer pa
 exceção lançada pelo próprio adapter — encerra a tentativa, cabendo a `src/agent/retry-policy.ts`
 e ao chamador decidir e executar uma nova tentativa, se houver.
 
+## Decisão pura de progresso de tentativas auditáveis
+
+`src/agent/decide-agent-attempt-progress.ts` define `decideAgentAttemptProgress`, a menor
+máquina de estados pura que decide, a partir de uma política de retry e do histórico de
+avaliações já auditadas de um agente, qual dos três estados permitidos vale a seguir:
+
+```text
+[]                → ATTEMPT_AVAILABLE
+[REJECTED...]     → ATTEMPT_AVAILABLE | ATTEMPTS_EXHAUSTED
+[..., ACCEPTED]   → ACCEPTED
+```
+
+Recebe `policy` (`AgentRetryPolicy`) e `results`, uma lista `readonly` de resultados de
+`evaluateAgentResponseCapture` — mas nunca confia neles como já validados. Sequência sem
+desvio possível:
+
+1. revalida `policy` fail-closed via `parseAgentRetryPolicy` (`./retry-policy.ts`), mesmo já
+   tipada, exatamente como `shouldRetryAgentAttempt` já faz;
+2. exige que `results` seja um array e **recomputa** cada entrada a partir apenas de sua
+   `capture` aninhada, via `evaluateAgentResponseCapture` (`./evaluate-agent-response-capture.ts`)
+   — uma captura forjada ou estruturalmente inválida lança `ContractValidationError` aqui — e
+   então exige que o `status`, `code` e `proposal` que a entrada alegava sejam exatamente
+   consistentes com essa avaliação recomputada; a entrada declarada deve ter exatamente o
+   conjunto de chaves próprias da variante recomputada (`{status, capture, code}` para
+   `REJECTED`, `{status, capture, proposal}` para `ACCEPTED`) — uma propriedade incompatível
+   presente mesmo com valor `undefined` já viola esse conjunto e falha fechado — e a `proposal`
+   declarada, quando presente, deve ter exatamente o conjunto de chaves de `AgentProposal`, sem
+   propriedade injetada, antes da comparação campo a campo; qualquer divergência (discriminante,
+   código, proposta, forma ou payload incompatível com o outro desfecho) também lança
+   `ContractValidationError`, fail-closed, em vez de ser silenciosamente substituída pelo valor
+   recomputado;
+3. rejeita fail-closed uma lista com mais entradas que `policy.maxAttempts`;
+4. rejeita fail-closed qualquer entrada diferente da última que seja `ACCEPTED`;
+5. rejeita fail-closed quando as capturas recomputadas não compartilham exatamente o mesmo
+   `agentId`, `cycleId`, `promptVersion` e `model`;
+6. devolve `ACCEPTED` quando a última entrada (e somente ela) foi aceita; caso contrário
+   `ATTEMPTS_EXHAUSTED` quando `results.length` alcançou `policy.maxAttempts`, ou
+   `ATTEMPT_AVAILABLE` quando ainda resta margem.
+
+Uma lista vazia significa nenhuma tentativa executada e sempre devolve `ATTEMPT_AVAILABLE` com
+`completedAttempts: 0`. `ATTEMPT_AVAILABLE` carrega `completedAttempts`, `maxAttempts` e,
+quando já houve ao menos uma rejeição, o código seguro da mais recente
+(`lastRejectionCode`). `ATTEMPTS_EXHAUSTED` carrega `completedAttempts`, `maxAttempts` e a
+lista fechada `rejectionCodes` de todas as tentativas, na ordem em que ocorreram — nunca a
+resposta bruta. Somente `ACCEPTED` preserva a captura auditável e a proposta validada, em
+`result`, além de `completedAttempts`.
+
+Não chama `AgentAdapter`, não executa retry, não produz `HOLD`, não persiste e não aciona
+nenhuma integração — apenas decide, de forma pura e determinística, qual transição é
+permitida. Sem relógio, aleatoriedade, I/O ou persistência.
+
 ## Relatório multiagente offline
 
 `src/metrics/build-multi-agent-performance-report.ts` define `buildMultiAgentPerformanceReport`:

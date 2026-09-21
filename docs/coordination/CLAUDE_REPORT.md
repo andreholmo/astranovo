@@ -4120,3 +4120,349 @@ Nenhum bloqueio.
 
 A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit. Não aprovo nem
 mesclo o próprio trabalho.
+
+## TASK-028 — Decisão pura de progresso de tentativas auditáveis (M4)
+
+- **ID da tarefa:** TASK-028
+- **Milestone:** M4 — decisão pura de progresso de tentativas
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo da entrega
+
+Menor máquina de estados pura do M4: `decideAgentAttemptProgress` recebe uma
+`AgentRetryPolicy` e o histórico `readonly` de resultados de
+`evaluateAgentResponseCapture` de um agente/ciclo/prompt/modelo, e decide qual dos três
+estados fechados vale a seguir — `ATTEMPT_AVAILABLE`, `ACCEPTED` ou `ATTEMPTS_EXHAUSTED` —
+sem jamais chamar um `AgentAdapter`, executar uma tentativa, fazer retry, produzir `HOLD`,
+persistir ou acionar qualquer integração. Reutiliza integralmente `parseAgentRetryPolicy`
+(`src/agent/retry-policy.ts`) e `evaluateAgentResponseCapture`
+(`src/agent/evaluate-agent-response-capture.ts`); nenhuma regra de validação de política ou
+de captura foi duplicada.
+
+Leitura obrigatória cumprida: `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/ARCHITECTURE.md`,
+`docs/DECISIONS.md`, `docs/coordination/CHATGPT_REVIEW_TASK_027.md`,
+`docs/coordination/CLAUDE_REPORT.md`, `src/agent/evaluate-agent-response-capture.ts`,
+`src/agent/retry-policy.ts`, `src/agent/capture-agent-response.ts`, `src/domain/contracts.ts`
+e `TASK.md`.
+
+### Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/decide-agent-attempt-progress.ts` | criado — `decideAgentAttemptProgress`, `AgentAttemptProgress`, `AttemptAvailableProgress`, `AcceptedAttemptProgress`, `AttemptsExhaustedProgress` |
+| `tests/decide-agent-attempt-progress.test.ts` | criado |
+| `README.md` | atualizado (seção "Decisão pura de progresso de tentativas auditáveis") |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado |
+
+`TASK.md` não foi alterado. Nenhuma dependência foi adicionada — o projeto continua com zero
+dependências de runtime.
+
+### Design de `decideAgentAttemptProgress`
+
+Não confia em `results` como já validado, mesmo que o parâmetro seja tipado
+`readonly AgentResponseEvaluation[]` — o mesmo princípio que `shouldRetryAgentAttempt` já
+aplica a `policy` tipada. Sequência, sem desvio possível:
+
+1. `policy` é revalidada fail-closed via `parseAgentRetryPolicy`;
+2. `results` precisa ser um array; cada entrada é **recomputada do zero** — nunca confiada —
+   extraindo apenas sua `capture` aninhada e entregando-a de novo a
+   `evaluateAgentResponseCapture`. Isso descarta por completo qualquer `status`, `proposal`
+   ou `code` que a entrada alegasse: uma entrada forjada que afirma `ACCEPTED` sobre uma
+   captura que na verdade falha é recomputada como `REJECTED`, e vice-versa. Uma captura
+   estruturalmente inválida (campo ausente, tipo errado, objeto forjado) lança
+   `ContractValidationError` nesse ponto, antes de qualquer outra regra rodar;
+3. lista com mais entradas que `policy.maxAttempts` falha fechado;
+4. qualquer entrada recomputada como `ACCEPTED` que não seja a última falha fechado —
+   cobre tanto "mais uma tentativa depois de aceita" quanto "duas aceitações", já que a
+   segunda nunca pode ser a única na posição final se a primeira também é `ACCEPTED` e não é
+   a última;
+5. proveniência: todas as capturas recomputadas precisam compartilhar exatamente
+   `agentId`, `cycleId` (ambos de `capture.request`), `promptVersion` e `model` da primeira
+   — qualquer divergência falha fechado;
+6. resultado: se a última entrada é `ACCEPTED`, devolve `{ status: "ACCEPTED", result, completedAttempts }`
+   com `result` sendo a avaliação aceita completa (captura e proposta validadas, preservadas
+   apenas neste ramo); caso contrário, todas as entradas são `REJECTED` — se
+   `results.length === policy.maxAttempts`, devolve `ATTEMPTS_EXHAUSTED` com todos os códigos
+   na ordem em que ocorreram; senão devolve `ATTEMPT_AVAILABLE` com o código da rejeição mais
+   recente, quando houver alguma.
+
+Uma lista vazia é o caso base: nenhuma captura para recomputar, nenhuma proveniência para
+comparar, `completedAttempts: 0`, sempre `ATTEMPT_AVAILABLE`.
+
+### Por que nenhuma resposta bruta escapa de um estado não aceito
+
+`ATTEMPT_AVAILABLE` e `ATTEMPTS_EXHAUSTED` só carregam contagens e
+`AgentResponseRejectionCode` — a mesma união fechada de seis literais de string que
+`evaluateAgentResponseCapture` já garante nunca carregar mensagem, stack, `cause`, token ou
+qualquer conteúdo do agente. Nenhum dos dois estados referencia `capture` ou `proposal`.
+Somente `ACCEPTED.result` preserva a captura auditável — exatamente o que a tarefa autoriza
+("o resultado aceito pode preservar sua captura auditável apenas no payload `ACCEPTED`").
+Todo erro lançado usa `ContractValidationError`/`rejectContract`, que nomeia apenas
+contrato/campo/requisito, nunca o valor recebido.
+
+### Testes cobertos em `tests/decide-agent-attempt-progress.test.ts`
+
+Lista vazia devolvendo `ATTEMPT_AVAILABLE` com `completedAttempts: 0` para toda política
+válida (1 a 3); rejeições abaixo do limite com contagem e último código corretos; rejeições
+exatamente no limite devolvendo `ATTEMPTS_EXHAUSTED` com todos os códigos na ordem certa,
+para toda política válida; rejeições acima do limite falhando fechado; aceitação na primeira
+tentativa, após rejeições e no último slot permitido (não confundida com esgotamento);
+tentativa após `ACCEPTED` falhando fechado nos três arranjos (rejeição depois, segunda
+aceitação depois, aceitação entre duas rejeições); política inválida — forjada acima do
+limite, zero, fracionária, não-objeto — falhando fechado; `results` não-array, entrada que
+não é objeto, entrada sem `capture` e captura aninhada estruturalmente inválida (sem
+`rawResponse`) falhando fechado; um `status`/`code` forjado sendo ignorado e recomputado
+corretamente em ambas as direções (forjar `ACCEPTED` sobre captura que rejeita vira
+`ATTEMPTS_EXHAUSTED`; forjar `REJECTED` sobre captura que aceita vira `ACCEPTED`);
+proveniência divergente em `agentId`, `cycleId`, `promptVersion` e `model`, cada uma falhando
+fechado; ausência de segredo embutido numa resposta bruta rejeitada em `ATTEMPT_AVAILABLE` e
+em `ATTEMPTS_EXHAUSTED`, e na mensagem de erro de uma divergência de proveniência;
+preservação da captura/proposta somente em `ACCEPTED`; congelamento do resultado e do array
+`rejectionCodes`, com tentativa de reatribuição lançando `TypeError`; ausência de mutação da
+política e da lista de resultados recebidas; determinismo campo a campo para o mesmo input
+canônico em `ATTEMPT_AVAILABLE` e `ACCEPTED`; prova offline de ausência de relógio,
+`Math.random`, `setTimeout` e `fetch`, de que a função é síncrona, e de que nenhuma chamada a
+adaptador é sequer possível (a função não recebe um).
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` (após `rm -rf node_modules dist`) | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm run build` | sem erros |
+| `npm test` | **729 testes, 729 passaram, 0 falharam** (691 preexistentes + 38 novos) |
+
+Suíte offline e determinística: nenhum acesso de rede, nenhuma leitura de relógio, nenhum uso
+de `random`, nenhum I/O.
+
+### Decisões técnicas tomadas
+
+1. **Cada entrada de `results` é recomputada do zero a partir de sua `capture` aninhada, em
+   vez de ter seu `status`/`proposal`/`code` validados e então aceitos.** A tarefa exige
+   "revalida... e reavalia/valida cada captura; não confia em objetos estruturalmente
+   forjados". Recomputar via `evaluateAgentResponseCapture(entry.capture)` é a leitura mais
+   literal de "reavalia": qualquer discriminante que a entrada alegasse é descartado e
+   substituído pelo resultado verdadeiro, o que neutraliza uma forgery em vez de apenas
+   detectá-la quando ela é estruturalmente válida mas semanticamente mentirosa (dois testes
+   cobrem essa neutralização nos dois sentidos).
+2. **Uma captura estruturalmente inválida ainda lança `ContractValidationError`, nunca vira
+   uma variante de dado.** Isso vem de graça de `evaluateAgentResponseCapture`, que já separa
+   "captura forjada" (lança) de "conteúdo do agente inválido" (devolve `REJECTED`) — este
+   módulo não precisou duplicar essa distinção.
+3. **A regra "nenhuma entrada após `ACCEPTED`" é verificada por posição (`index !==
+   results.length - 1`), não por contagem de quantos `ACCEPTED` existem.** Isso cobre o caso
+   de duas aceitações (a primeira nunca pode estar na posição final se a lista tem mais de
+   uma entrada) sem precisar de uma regra separada para "não mais que um `ACCEPTED`".
+4. **`lastRejectionCode` é um campo opcional, omitido (não `undefined`) quando não há
+   nenhuma rejeição ainda.** O `tsconfig.json` do projeto liga
+   `exactOptionalPropertyTypes`; a chave é adicionada só condicionalmente via spread, para que
+   `"lastRejectionCode" in progress` seja `false` na lista vazia, em vez de `true` com valor
+   `undefined`.
+5. **`ACCEPTED.result` é a `AcceptedAgentResponseEvaluation` inteira (capture + proposal)**,
+   não um subconjunto de campos escolhidos a dedo. A tarefa pede "o resultado aceito
+   validado"; reaproveitar o tipo que `evaluateAgentResponseCapture` já exporta evita
+   inventar uma quarta forma para o mesmo dado.
+6. **Nenhuma classe de erro nova.** Toda falha fechada usa `ContractValidationError`/
+   `rejectContract`, com dois nomes de contrato locais (`AgentAttemptResults`,
+   `AgentAttemptProvenance`) só para identificar qual regra disparou — nunca um código ou
+   union de erro novo, porque a tarefa define uma união discriminada de *dados* de sucesso,
+   não uma nova hierarquia de exceção.
+
+### Limitações conhecidas
+
+- Não implementa execução de tentativa, loop de retry, backoff, timeout, `HOLD` final,
+  coordenador multiagente, persistência ou logs externos — todos explicitamente fora do
+  escopo exato desta tarefa e adiados para fatias futuras de M4.
+- `decideAgentAttemptProgress` decide um único agente/ciclo/prompt/modelo por chamada; não há
+  agregação entre agentes ou entre ciclos — isso permanece trabalho de uma composição futura.
+- A proveniência exigida (`agentId`, `cycleId`, `promptVersion`, `model`) não inclui
+  `snapshotId`: a tarefa não pede essa dimensão, e `AgentRequest.snapshotId` pode
+  legitimamente mudar entre tentativas de retry do mesmo ciclo (uma nova tentativa pode ler
+  um snapshot mais recente). Se o arquiteto pretendia incluir `snapshotId` na proveniência
+  exigida, é uma adição contida a `requireSharedProvenance`.
+
+### Decisões pendentes para André / revisor
+
+1. **`snapshotId` fora da proveniência exigida** — decisão técnica implícita acima; a leitura
+   mais literal do escopo exato da tarefa ("mesmo `agentId`, `cycleId`, `promptVersion` e
+   `model`") não o inclui, mas fica registrado para confirmação.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `feat: decide progresso de tentativas de agente`
+- **Hash:** informado a André na resposta após o push.
+
+A aprovação desta tarefa cabe ao ChatGPT/GPT-5.6 Sol, após revisão do commit. Não aprovo nem
+mesclo o próprio trabalho.
+
+## TASK-028 — Correção do ciclo 1 de revisão (mudanças solicitadas por André)
+
+- **ID da tarefa:** TASK-028
+- **Motivo:** revisão de André no PR #53 sobre o SHA `500017df03e200edc5e7eb0492574f7d9c713f1f`
+  pediu `CHANGES_REQUESTED` (ciclo 1 de no máximo 3).
+- **Status reportado:** correção executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e nova
+  revisão de André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Bloqueio apontado
+
+`reevaluateResult` recomputava a avaliação de cada entrada a partir de sua `capture` aninhada,
+mas descartava silenciosamente o `status`, `code` e `proposal` que a entrada original
+declarava, confiando só no resultado recomputado. Uma entrada forjada/inconsistente — por
+exemplo, declarada `REJECTED` cuja captura na verdade produz uma proposta válida — era então
+"corrigida" silenciosamente para `ACCEPTED`, em vez de falhar fechado. Os dois testes
+existentes ("recomputes a forged ACCEPTED/REJECTED status...") comprovavam esse comportamento
+como intencional, o que violava o critério de aceite "entrada forjada, inconsistente ...
+falha fechada" e enfraquecia a trilha auditável.
+
+### Correção aplicada
+
+`src/agent/decide-agent-attempt-progress.ts`:
+
+- `reevaluateResult` continua recomputando a avaliação verdadeira a partir da `capture`
+  aninhada via `evaluateAgentResponseCapture`, mas agora chama a nova função
+  `requireDeclaredResultMatchesRecomputed(source, recomputed)` antes de devolver o resultado;
+- essa função exige, fail-closed, que `source.status` seja idêntico ao `recomputed.status`;
+  para `REJECTED`, exige o mesmo `code` e ausência de campo `proposal`; para `ACCEPTED`, exige
+  ausência de campo `code` e que `source.proposal` seja estruturalmente igual, campo a campo
+  (`proposalMatchesRecomputed`), ao `proposal` recomputado — incluindo `evidenceIds` em ordem;
+- qualquer divergência de discriminante, código, proposta ou forma lança
+  `ContractValidationError` via `rejectContract`, que nomeia só contrato/campo/requisito,
+  nunca o valor declarado nem o recomputado — nenhum vazamento;
+- nenhuma classe de erro nova, nenhuma mudança de assinatura pública, nenhuma dependência
+  nova.
+
+`tests/decide-agent-attempt-progress.test.ts`:
+
+- os dois testes que antes comprovavam a aceitação de discriminantes forjados foram
+  **substituídos** por testes que comprovam falha fechada nos mesmos dois cenários (entrada
+  `ACCEPTED` cuja captura rejeita; entrada `REJECTED` cuja captura aceita);
+- adicionados: código de rejeição adulterado; payload `proposal` incompatível presente numa
+  entrada `REJECTED`; campo `proposal` adulterado numa entrada `ACCEPTED`; payload `code`
+  incompatível presente numa entrada `ACCEPTED`; e um teste específico de ausência de
+  vazamento, confirmando que um valor adulterado inserido em `proposal.reason` não aparece na
+  mensagem do `ContractValidationError` lançado.
+
+Nenhum outro arquivo de produção foi alterado. Escopo estritamente offline preservado: nenhuma
+dependência, rede, timer, relógio ou aleatoriedade foi introduzida.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **734 testes, 734 passaram, 0 falharam** (729 preexistentes − 2 substituídos + 7 novos) |
+
+Confirmação específica: os 7 testes novos/substituídos de
+`decideAgentAttemptProgress: forged or structurally invalid results fail closed` passam
+(`fails closed on an entry declared ACCEPTED...`, `...declared REJECTED...`, `...tampered
+rejection code`, `...incompatible proposal payload`, `...tampered proposal field`,
+`...incompatible rejection code payload`, `does not leak the tampered proposal's content...`).
+
+### Limitações conhecidas
+
+As mesmas já registradas na entrega original da TASK-028 permanecem válidas; nenhuma nova
+limitação foi introduzida por esta correção.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova. A pendência sobre `snapshotId` fora da proveniência exigida, registrada na
+entrega original, continua em aberto para confirmação.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: falha fechada em avaliacao forjada de tentativa de agente`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
+
+## TASK-028 — Correção do ciclo 2 de revisão (mudanças solicitadas por André)
+
+- **ID da tarefa:** TASK-028
+- **Motivo:** revisão de André no PR #53 sobre o SHA `ca81f6230d0c4af3ed42f8dc50683488d38f0897`
+  pediu `CHANGES_REQUESTED` (ciclo 2 de no máximo 3).
+- **Status reportado:** correção executada, aguardando revisão do ChatGPT/GPT-5.6 Sol e nova
+  revisão de André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Bloqueio apontado
+
+A correção do ciclo 1 exigia discriminante, código e proposta consistentes, mas a checagem
+ainda não era fechada quanto à forma:
+
+1. `if (source.proposal !== undefined)` em `REJECTED` aceitava uma propriedade `proposal`
+   presente com valor `undefined` — presença detectada pelo valor, não pela propriedade;
+2. `if (source.code !== undefined)` em `ACCEPTED` tinha o mesmo problema para `code`;
+3. `proposalMatchesRecomputed` comparava os campos conhecidos mas não validava o conjunto de
+   chaves do objeto declarado, então uma proposta forjada como `{ ...proposal, injected: "..." }`
+   ainda passava na comparação campo a campo.
+
+### Correção aplicada
+
+`src/agent/decide-agent-attempt-progress.ts`:
+
+- nova função `requireExactOwnKeys(value, expectedKeys, contract, field)`, que compara
+  `Object.keys(value)` contra um conjunto de chaves esperado exato — sem chave faltando, sem
+  chave extra, incluindo uma chave presente só com valor `undefined`;
+- `requireDeclaredResultMatchesRecomputed` agora chama `requireExactOwnKeys` com
+  `REJECTED_RESULT_KEYS = ["status", "capture", "code"]` para entradas `REJECTED` e
+  `ACCEPTED_RESULT_KEYS = ["status", "capture", "proposal"]` para `ACCEPTED`, antes de validar
+  `code`/`proposal` por valor — isso substitui as checagens antigas por valor (`!== undefined`)
+  e fecha os dois bypasses de presença;
+- `proposalMatchesRecomputed` agora valida primeiro que `Object.keys(declared)` é exatamente
+  `ACCEPTED_PROPOSAL_KEYS` (os 12 campos de `AgentProposal`, sem mais nem menos) antes de
+  comparar campo a campo — uma propriedade injetada na proposta declarada agora falha fechado;
+- nenhuma classe de erro nova, nenhuma mudança de assinatura pública, nenhuma dependência nova;
+  erros continuam sanitizados via `rejectContract` (só contrato/campo/requisito).
+
+`tests/decide-agent-attempt-progress.test.ts`:
+
+- adicionados 5 testes de regressão: `proposal: undefined` presente numa entrada `REJECTED`;
+  `code: undefined` presente numa entrada `ACCEPTED`; propriedade extra injetada numa entrada
+  `REJECTED`; propriedade extra injetada numa entrada `ACCEPTED`; propriedade extra injetada na
+  `proposal` de uma entrada `ACCEPTED`.
+
+Nenhum outro arquivo de produção foi alterado. Escopo estritamente offline preservado: nenhuma
+dependência, rede, timer, relógio ou aleatoriedade foi introduzida.
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **739 testes, 739 passaram, 0 falharam** (734 anteriores + 5 novos) |
+
+### Limitações conhecidas
+
+As mesmas já registradas na entrega original da TASK-028 permanecem válidas; nenhuma nova
+limitação foi introduzida por esta correção.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova. A pendência sobre `snapshotId` fora da proveniência exigida, registrada na
+entrega original, continua em aberto para confirmação.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: valida forma fechada de resultado e proposta declarados`
+- **Hash:** informado a André na resposta após o push.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI.
