@@ -112,6 +112,10 @@ por `ACCEPTED`, `HOLD` e `FAILED`**.
   transformação pura e offline que resume um lote finalizado em `total` mais contagens e
   listas ordenadas de `itemId` por `ACCEPTED`, `HOLD` e `FAILED`, só para observabilidade e
   auditoria — sem ranking, votação, seleção de proposta ou rota financeira;
+- `src/agent/run-finalized-agent-cycles-with-summary.ts` — `runFinalizedAgentCyclesWithSummary`,
+  a menor composição offline que chama `runFinalizedAgentCycles` exatamente uma vez e entrega
+  o resultado diretamente a `summarizeFinalizedAgentCycles` exatamente uma vez, retornando
+  `{ results, summary }` congelado, sem ranking, votação, decisão ou execução repetida de agente;
 - `src/config/load-agents.ts` — carregamento e validação da configuração de N agentes;
 - `config/agents.json` — seis perfis de demonstração, cada um com US$100 fictícios;
 - `tests/` — testes offline e determinísticos.
@@ -1138,6 +1142,37 @@ consenso, handoff, seleção de vencedor, retry, Risk Manager, `PaperBroker`, fi
 ledger, persistência, provider de mercado ou integração Astra real. Sem HTTP, SDK externo,
 fila, timer, relógio, aleatoriedade, variável de ambiente, token, segredo, credencial, wallet,
 blockchain, testnet, corretora ou dinheiro real.
+
+## Composição offline do lote finalizado com resumo
+
+`src/agent/run-finalized-agent-cycles-with-summary.ts` define
+`runFinalizedAgentCyclesWithSummary`, a menor composição offline que encadeia os dois módulos
+acima em uma única chamada, sem criar lógica própria:
+
+```text
+FinalizedAgentCycleBatchItems
+→ runFinalizedAgentCycles (uma chamada)
+→ summarizeFinalizedAgentCycles (uma chamada)
+→ { results, summary }
+```
+
+Recebe exatamente o mesmo contrato de entrada de `runFinalizedAgentCycles`
+(`FinalizedAgentCycleBatchItems`, reexportado sem alteração), chama `runFinalizedAgentCycles`
+exatamente uma vez e entrega o `FinalizedAgentCycleBatchResults` retornado, sem remodelar, copiar
+ou reinterpretar, diretamente a `summarizeFinalizedAgentCycles`, também exatamente uma vez,
+retornando `{ results, summary }` em um único objeto congelado — `results` e `summary` mantêm os
+próprios congelamentos internos já produzidos por cada módulo.
+
+Não duplica validação, execução de ciclo ou classificação — cada uma dessas responsabilidades
+continua existindo em exatamente um módulo, e nenhum adapter é chamado uma segunda vez pelo
+resumo. Se `runFinalizedAgentCycles` lançar — uma falha na própria estrutura do lote, antes de
+qualquer item rodar —, o erro sanitizado se propaga imediatamente e `summarizeFinalizedAgentCycles`
+nunca é chamado; o mesmo vale para uma rejeição de `summarizeFinalizedAgentCycles`. Nenhuma delas
+é capturada, inspecionada ou convertida em sucesso. Não cria ranking, pontuação, comparação de
+desempenho, votação, consenso, seleção de proposta, retry, concorrência, Risk Manager,
+`PaperBroker`, fill, carteira, ledger, persistência, provider de mercado ou integração Astra
+real. Sem HTTP, SDK externo, fila, timer, relógio, aleatoriedade, variável de ambiente, token,
+segredo, credencial, wallet, blockchain, testnet, corretora ou dinheiro real.
 
 ## Relatório multiagente offline
 
