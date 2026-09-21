@@ -6393,3 +6393,96 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-036 — correção 1/3: rejeitar propriedades acessoras sem invocar getters (revisão de PR #69)
+
+- **ID da tarefa:** TASK-036 (correção solicitada em revisão de PR, não uma nova tarefa em `TASK.md`)
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-21
+- **Origem:** revisão `CHANGES_REQUESTED` de @andreholmo no PR #69 — bloqueador de segurança 1/3
+
+## Resumo da correção
+
+A validação anterior usava `readProperty` (leitura via `source[key]`) para os sete campos públicos
+do resumo e para cada índice das listas de `itemId`. Isso invocava qualquer getter presente —
+inclusive um que retornasse um valor aparentemente válido (por exemplo `total` retornando `0`) mas
+com efeito colateral, como envenenar `Object.prototype.toJSON`/`Array.prototype.toJSON` antes do
+`JSON.stringify` final. `hasExactOwnKeys` só verificava a lista de chaves, não se cada uma era uma
+data property ou uma accessor property, então uma propriedade acessora hostil passava pela checagem
+de forma estrutural e, em seguida, tinha seu getter executado.
+
+A correção troca essa leitura, apenas para os sete campos do resumo e para cada índice das listas
+de `itemId`, por uma nova função local `readDataProperty`, que lê exclusivamente via
+`Object.getOwnPropertyDescriptor` e aceita somente `data property` (`"value" in descriptor`); uma
+`accessor property` — por mais plausível que seja o valor que seu getter retornaria — é tratada
+exatamente como propriedade ausente, sem que o getter chegue a ser chamado. Uma falha ao obter o
+descritor (por exemplo, uma trap `getOwnPropertyDescriptor` de `Proxy` que lança) também é tratada
+como ausência, com o mesmo erro público e estável já existente (`ContractValidationError` sem
+valor, mensagem, stack ou segredo da entrada).
+
+A leitura de `length` de cada lista permanece com a primitiva compartilhada `readProperty` (acesso
+por colchete) e não foi movida para `readDataProperty`: em um `Array` real, `length` é uma data
+property não configurável — nunca pode virar accessor —, então não há getter hostil a bloquear ali;
+migrar essa leitura específica para `Object.getOwnPropertyDescriptor` teria o efeito colateral de
+ignorar uma `Proxy` cuja trap `get` (não `getOwnPropertyDescriptor`) forja um `length` enorme, o que
+teria quebrado o teste de regressão pré-existente que exige rejeitar exatamente esse `Proxy`.
+
+Nenhum contrato público mudou: `serializeFinalizedAgentCyclesSummary` continua com a mesma
+assinatura, a mesma saída canônica para entradas válidas e as mesmas mensagens de erro públicas.
+
+## Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/serialize-finalized-agent-cycles-summary.ts` | alterado (nova `readDataProperty`; leitura dos sete campos e de cada índice de `itemId` migrada para ela; `length` permanece em `readProperty`; comentários atualizados) |
+| `tests/serialize-finalized-agent-cycles-summary.test.ts` | alterado (4 novos testes de regressão) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado (este registro) |
+
+## Testes adicionados
+
+Nova seção `serializeFinalizedAgentCyclesSummary: valid-looking accessor properties are never invoked`
+em `tests/serialize-finalized-agent-cycles-summary.test.ts`, cobrindo exatamente o cenário apontado
+na revisão — um getter que retorna um valor válido mas nunca deve ser chamado:
+
+- um getter de `total` que retorna `3` (contagem coerente com o resto do resumo) nunca é invocado —
+  a serialização falha fechado e uma flag local de "getter invocado" permanece `false`;
+- um getter de uma entrada de `acceptedItemIds[0]` que retorna `"a1"` nunca é invocado, pela mesma
+  checagem;
+- um getter de `total` que tentaria envenenar `Object.prototype.toJSON` antes da serialização nunca
+  é invocado — a serialização falha fechado e `Object.prototype.toJSON` permanece `undefined` depois
+  da chamada (limpo em `finally` por segurança do restante da suíte);
+- um getter de uma entrada de `acceptedItemIds[0]` que tentaria envenenar `Array.prototype.toJSON`
+  nunca é invocado, pela mesma checagem.
+
+Toda a suíte de testes anterior — incluindo o teste pré-existente de `Proxy` forjando um `length`
+enorme e os testes de getter/`Proxy` que lançam um `ContractValidationError` forjado com segredo —
+continua passando sem alteração de comportamento observável.
+
+## Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **1053 testes, 1053 passaram, 0 falharam** (1049 anteriores + 4 novos) |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+## Limitações conhecidas
+
+Mesma limitação de rede já registrada acima: `git fetch origin main` exigiu aprovação indisponível
+neste ambiente não interativo. `git status`/`git log`/`git branch -vv` locais confirmaram que a
+branch `claude/issue-68-20260921-1638` já estava sincronizada com o commit mais recente conhecido
+antes desta correção, sem alterações remotas pendentes a incorporar.
+
+## Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+## Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.

@@ -29,12 +29,19 @@
  * declares it.
  *
  * Every read of the untrusted value — its own keys, each field, each list's
- * `length` and each index — goes through the same defensive primitives
- * (`readProperty`, a local `Reflect.ownKeys`-based exact-key check) already
- * used across `src/agent`, so a throwing getter or `Proxy` trap anywhere —
- * including one that throws an already-forged `ContractValidationError`
- * carrying a secret — can never escape this validation unsanitized; it is
- * treated exactly like the value being absent.
+ * `length` and each index — goes through {@link readDataProperty}, a local
+ * `Object.getOwnPropertyDescriptor`-based reader, and a local
+ * `Reflect.ownKeys`-based exact-key check. `readDataProperty` accepts only a
+ * genuine own data property: an accessor (a getter, however plausible its
+ * return value) is rejected exactly like an absent property *without ever
+ * calling it*, so a getter that returns a valid-looking value as a side
+ * channel — for example to poison `Object.prototype.toJSON` or
+ * `Array.prototype.toJSON` before `JSON.stringify` runs — can never execute.
+ * A throwing getter, `Proxy` trap or descriptor lookup — including one that
+ * throws an already-forged `ContractValidationError` carrying a secret — is
+ * likewise never invoked or, if invocation is unavoidable (e.g. an `ownKeys`
+ * trap), never rethrown: it can never escape this validation unsanitized and
+ * is treated exactly like the value being absent.
  *
  * The canonical output is built from freshly extracted primitives — never
  * from the input object or its nested arrays directly — so a hostile
@@ -93,6 +100,28 @@ function safeOwnKeys(value: object): readonly PropertyKey[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Reads `source[key]` as a genuine own data property only, via
+ * `Object.getOwnPropertyDescriptor`, never through a `[]`/`.` access that
+ * would invoke a getter or `Proxy` `get` trap. An accessor property (has
+ * `get`/`set`, no `value`), a missing property, or a descriptor lookup that
+ * itself throws (a `Proxy` `getOwnPropertyDescriptor` trap) are all treated
+ * exactly like an absent property (`undefined`) — never rethrown, and the
+ * accessor's getter is never called, so it cannot return a plausible value as
+ * a side channel for mutating shared state (e.g. `Object.prototype.toJSON`)
+ * before serialization runs.
+ */
+function readDataProperty(source: object, key: string): unknown {
+  let descriptor: PropertyDescriptor | undefined;
+  try {
+    descriptor = Object.getOwnPropertyDescriptor(source, key);
+  } catch {
+    return undefined;
+  }
+  if (descriptor === undefined || !("value" in descriptor)) return undefined;
+  return descriptor.value;
 }
 
 /** Whether `value`'s own keys — enumerable or not, string or symbol — are exactly `expectedKeys`. */
@@ -168,9 +197,16 @@ function requireSafeNonNegativeInteger(value: unknown, field: string): number {
  * Reads `value` as a dense array of bounded, non-blank `itemId` strings, the
  * same declared-length-agnostic, `Proxy`/getter-safe way
  * {@link hasExactDenseArrayKeys} already checks cardinality before any
- * per-index read happens. Every entry goes through {@link readProperty} and
- * {@link requireBoundedText}, so a throwing getter or `Proxy` trap on any
- * index is treated exactly like a missing entry rather than escaping
+ * per-index read happens. `length` is read through {@link readProperty} (a
+ * bracket-style read), same as before: on a genuine `Array`, `length` is a
+ * non-configurable data property that can never become an accessor, so
+ * nothing is gained by reading it through {@link readDataProperty} — and
+ * doing so would let a `Proxy`'s `get` trap forging a huge `length` slip past
+ * undetected, since only a `getOwnPropertyDescriptor` trap (not a `get`
+ * trap) can intercept a descriptor-based read. Every entry, in contrast,
+ * goes through {@link readDataProperty} and {@link requireBoundedText}, so an
+ * accessor property, a throwing getter or a `Proxy` trap on any index is
+ * treated exactly like a missing entry — never invoked, never escaping
  * unsanitized.
  */
 function requireItemIdList(value: unknown, field: string): readonly string[] {
@@ -189,7 +225,7 @@ function requireItemIdList(value: unknown, field: string): readonly string[] {
   for (let index = 0; index < length; index += 1) {
     entries.push(
       requireBoundedText(
-        readProperty(arrayValue, String(index)),
+        readDataProperty(arrayValue, String(index)),
         SERIALIZE_FINALIZED_AGENT_CYCLES_SUMMARY,
         field,
         MAX_ITEM_ID_LENGTH
@@ -227,14 +263,14 @@ function requireClosedSummaryShape(value: unknown): ValidatedSummaryFields {
     rejectContract(SERIALIZE_FINALIZED_AGENT_CYCLES_SUMMARY, "value", "must have exactly the expected summary properties");
   }
 
-  const total = requireSafeNonNegativeInteger(readProperty(value, "total"), "total");
-  const acceptedCount = requireSafeNonNegativeInteger(readProperty(value, "acceptedCount"), "acceptedCount");
-  const holdCount = requireSafeNonNegativeInteger(readProperty(value, "holdCount"), "holdCount");
-  const failedCount = requireSafeNonNegativeInteger(readProperty(value, "failedCount"), "failedCount");
+  const total = requireSafeNonNegativeInteger(readDataProperty(value, "total"), "total");
+  const acceptedCount = requireSafeNonNegativeInteger(readDataProperty(value, "acceptedCount"), "acceptedCount");
+  const holdCount = requireSafeNonNegativeInteger(readDataProperty(value, "holdCount"), "holdCount");
+  const failedCount = requireSafeNonNegativeInteger(readDataProperty(value, "failedCount"), "failedCount");
 
-  const acceptedItemIds = requireItemIdList(readProperty(value, "acceptedItemIds"), "acceptedItemIds");
-  const holdItemIds = requireItemIdList(readProperty(value, "holdItemIds"), "holdItemIds");
-  const failedItemIds = requireItemIdList(readProperty(value, "failedItemIds"), "failedItemIds");
+  const acceptedItemIds = requireItemIdList(readDataProperty(value, "acceptedItemIds"), "acceptedItemIds");
+  const holdItemIds = requireItemIdList(readDataProperty(value, "holdItemIds"), "holdItemIds");
+  const failedItemIds = requireItemIdList(readDataProperty(value, "failedItemIds"), "failedItemIds");
 
   if (acceptedCount !== acceptedItemIds.length) {
     rejectContract(SERIALIZE_FINALIZED_AGENT_CYCLES_SUMMARY, "acceptedCount", "must equal acceptedItemIds length");
@@ -266,7 +302,7 @@ function requireClosedSummaryShape(value: unknown): ValidatedSummaryFields {
  * unexpected — into a single sanitized `ContractValidationError` with a
  * constant message. Every untrusted read inside
  * {@link requireClosedSummaryShape}/{@link requireItemIdList} already goes
- * through {@link readProperty}/{@link safeOwnKeys}, so a malicious throw
+ * through {@link readDataProperty}/{@link safeOwnKeys}, so a malicious throw
  * (including a forged `ContractValidationError`) never reaches this boundary
  * as a raw exception in the first place; this catch is defense in depth, not
  * the primary sanitization.

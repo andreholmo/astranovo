@@ -365,6 +365,90 @@ describe("serializeFinalizedAgentCyclesSummary: hostile getters and Proxy traps 
   });
 });
 
+describe("serializeFinalizedAgentCyclesSummary: valid-looking accessor properties are never invoked", () => {
+  it("rejects a total accessor without ever calling its getter, even though it returns a plausible value", () => {
+    let invoked = false;
+    const forged = {
+      acceptedCount: 1,
+      holdCount: 1,
+      failedCount: 1,
+      acceptedItemIds: ["a1"],
+      holdItemIds: ["h1"],
+      failedItemIds: ["f1"],
+      get total(): number {
+        invoked = true;
+        return 3;
+      }
+    };
+
+    expectRejection(() => serializeFinalizedAgentCyclesSummary(forged as unknown as FinalizedAgentCyclesSummary));
+
+    assert.equal(invoked, false);
+  });
+
+  it("rejects an itemId entry accessor without ever calling its getter, even though it returns a plausible value", () => {
+    let invoked = false;
+    const forgedList: unknown[] = [];
+    Object.defineProperty(forgedList, "0", {
+      enumerable: true,
+      configurable: true,
+      get(): string {
+        invoked = true;
+        return "a1";
+      }
+    });
+    Object.defineProperty(forgedList, "length", { value: 1, enumerable: false });
+    const forged = { ...summary(), acceptedItemIds: forgedList };
+
+    expectRejection(() => serializeFinalizedAgentCyclesSummary(forged as unknown as FinalizedAgentCyclesSummary));
+
+    assert.equal(invoked, false);
+  });
+
+  it("never invokes a total getter that attempts to poison Object.prototype.toJSON before serialization runs", () => {
+    const forged = {
+      acceptedCount: 1,
+      holdCount: 1,
+      failedCount: 1,
+      acceptedItemIds: ["a1"],
+      holdItemIds: ["h1"],
+      failedItemIds: ["f1"],
+      get total(): number {
+        (Object.prototype as unknown as Record<string, unknown>).toJSON = () => ({ poisoned: true });
+        return 3;
+      }
+    };
+
+    try {
+      expectRejection(() => serializeFinalizedAgentCyclesSummary(forged as unknown as FinalizedAgentCyclesSummary));
+      assert.equal((Object.prototype as unknown as Record<string, unknown>).toJSON, undefined);
+    } finally {
+      delete (Object.prototype as unknown as Record<string, unknown>).toJSON;
+    }
+  });
+
+  it("never invokes an itemId entry getter that attempts to poison Array.prototype.toJSON before serialization runs", () => {
+    const forgedList: unknown[] = [];
+    Object.defineProperty(forgedList, "0", {
+      enumerable: true,
+      configurable: true,
+      get(): string {
+        (Array.prototype as unknown as Record<string, unknown>).toJSON = () => ["poisoned"];
+        return "a1";
+      }
+    });
+    Object.defineProperty(forgedList, "length", { value: 1, enumerable: false });
+    const forged = { ...summary(), acceptedItemIds: forgedList };
+
+    try {
+      expectRejection(() => serializeFinalizedAgentCyclesSummary(forged as unknown as FinalizedAgentCyclesSummary));
+      assert.equal((Array.prototype as unknown as Record<string, unknown>).toJSON, undefined);
+    } finally {
+      delete (Array.prototype as unknown as Record<string, unknown>).toJSON;
+    }
+  });
+});
+
 describe("serializeFinalizedAgentCyclesSummary: no mutation of the input", () => {
   it("does not mutate a plain, unfrozen input summary or its itemId lists", () => {
     const value = summary({
