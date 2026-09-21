@@ -157,21 +157,59 @@ function expectRejection(action: () => unknown): ContractValidationError {
 
 // --- synthetic fixtures for isolated, adversarial unit tests: valid enough shape-wise,
 // without needing a real adapter run, since summarizeFinalizedAgentCycles never recomputes
-// nested evaluations/proposals — only their closed key set.
+// nested evaluations/proposals/captures — only their closed key set and closed values.
+// A genuinely possible finalized result always carries between one and
+// MAX_AGENT_RETRY_ATTEMPTS closed-shaped evaluation entries, so these fixtures do too —
+// an empty or all-omitted `evaluations`/`result` is not a structure the real finalizer
+// could ever have produced.
+
+interface SyntheticAcceptedEvaluation {
+  readonly status: "ACCEPTED";
+  readonly capture: Record<string, unknown>;
+  readonly proposal: Record<string, unknown>;
+}
+
+interface SyntheticRejectedEvaluation {
+  readonly status: "REJECTED";
+  readonly capture: Record<string, unknown>;
+  readonly code: string;
+}
+
+function syntheticCapture(): Record<string, unknown> {
+  return { note: "synthetic-capture-fixture" };
+}
+
+function syntheticProposalValue(): Record<string, unknown> {
+  return { note: "synthetic-proposal-fixture" };
+}
+
+function acceptedEvaluationEntry(): SyntheticAcceptedEvaluation {
+  return { status: "ACCEPTED", capture: syntheticCapture(), proposal: syntheticProposalValue() };
+}
+
+function rejectedEvaluationEntry(code = "INVALID_JSON"): SyntheticRejectedEvaluation {
+  return { status: "REJECTED", capture: syntheticCapture(), code };
+}
 
 function completedAccepted(itemId: string): FinalizedAgentCycleBatchResult {
   return {
     itemId,
     status: "COMPLETED",
-    result: { status: "ACCEPTED", evaluations: [], result: {} }
+    result: { status: "ACCEPTED", evaluations: [acceptedEvaluationEntry()], result: acceptedEvaluationEntry() }
   } as unknown as FinalizedAgentCycleBatchResult;
 }
 
 function completedHold(itemId: string): FinalizedAgentCycleBatchResult {
+  const evaluations = [rejectedEvaluationEntry()];
   return {
     itemId,
     status: "COMPLETED",
-    result: { status: "HOLD", reason: "ATTEMPTS_EXHAUSTED", evaluations: [], rejectionCodes: [] }
+    result: {
+      status: "HOLD",
+      reason: "ATTEMPTS_EXHAUSTED",
+      evaluations,
+      rejectionCodes: evaluations.map((evaluation) => evaluation.code)
+    }
   } as unknown as FinalizedAgentCycleBatchResult;
 }
 
@@ -405,7 +443,7 @@ describe("summarizeFinalizedAgentCycles: invalid or forged batch structure fails
     const forged = {
       itemId: "a",
       status: "COMPLETED",
-      result: { status: "ACCEPTED", evaluations: [], result: [] }
+      result: { status: "ACCEPTED", evaluations: [acceptedEvaluationEntry()], result: [] }
     } as unknown as FinalizedAgentCycleBatchResult;
     expectRejection(() => summarizeFinalizedAgentCycles([forged]));
   });
@@ -448,6 +486,188 @@ describe("summarizeFinalizedAgentCycles: invalid or forged batch structure fails
     const elapsedMs = Date.now() - startedAt;
 
     assert.ok(elapsedMs < 500, `rejection must not scale with the reported length (took ${elapsedMs}ms)`);
+  });
+});
+
+describe("summarizeFinalizedAgentCycles: nested evaluations/result/rejectionCodes structural validation", () => {
+  it("rejects a COMPLETED/ACCEPTED item whose evaluations is empty (the reported bypass)", () => {
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations: [], result: {} }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/HOLD item whose evaluations and rejectionCodes are empty (the reported bypass)", () => {
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "HOLD", reason: "ATTEMPTS_EXHAUSTED", evaluations: [], rejectionCodes: [] }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose evaluations holds more entries than the maximum allowed", () => {
+    const evaluations = [
+      rejectedEvaluationEntry(),
+      rejectedEvaluationEntry(),
+      rejectedEvaluationEntry(),
+      acceptedEvaluationEntry()
+    ];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: acceptedEvaluationEntry() }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/HOLD item whose evaluations array is sparse", () => {
+    const evaluations = [rejectedEvaluationEntry(), , rejectedEvaluationEntry()] as unknown[]; // eslint-disable-line no-sparse-arrays
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "HOLD",
+        reason: "ATTEMPTS_EXHAUSTED",
+        evaluations,
+        rejectionCodes: ["INVALID_JSON", "INVALID_JSON"]
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose evaluations array carries an extra non-enumerable property", () => {
+    const evaluations: unknown[] = [acceptedEvaluationEntry()];
+    Object.defineProperty(evaluations, "hidden", { value: "secret-field", enumerable: false });
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: acceptedEvaluationEntry() }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/HOLD item whose rejectionCodes array carries an extra Symbol-keyed property", () => {
+    const evaluations = [rejectedEvaluationEntry()];
+    const rejectionCodes: unknown[] = evaluations.map((evaluation) => evaluation.code);
+    (rejectionCodes as unknown as Record<symbol, unknown>)[Symbol("hidden")] = "secret-symbol-field";
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "HOLD", reason: "ATTEMPTS_EXHAUSTED", evaluations, rejectionCodes }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose evaluation entry carries an extra property", () => {
+    const evaluations = [{ ...acceptedEvaluationEntry(), extra: "nope" }];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: acceptedEvaluationEntry() }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/HOLD item whose evaluation entry declares an unknown rejection code", () => {
+    const evaluations = [rejectedEvaluationEntry("SOMETHING_ELSE")];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "HOLD",
+        reason: "ATTEMPTS_EXHAUSTED",
+        evaluations,
+        rejectionCodes: ["SOMETHING_ELSE"]
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/HOLD item whose evaluations contains an ACCEPTED-shaped entry", () => {
+    const evaluations = [rejectedEvaluationEntry(), acceptedEvaluationEntry()];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "HOLD",
+        reason: "ATTEMPTS_EXHAUSTED",
+        evaluations,
+        rejectionCodes: ["INVALID_JSON"]
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose result has a REJECTED shape instead of ACCEPTED", () => {
+    const evaluations = [acceptedEvaluationEntry()];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: rejectedEvaluationEntry() }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/ACCEPTED item whose result is missing proposal", () => {
+    const evaluations = [acceptedEvaluationEntry()];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: { status: "ACCEPTED", evaluations, result: { status: "ACCEPTED", capture: syntheticCapture() } }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/HOLD item whose rejectionCodes length does not match evaluations", () => {
+    const evaluations = [rejectedEvaluationEntry(), rejectedEvaluationEntry()];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "HOLD",
+        reason: "ATTEMPTS_EXHAUSTED",
+        evaluations,
+        rejectionCodes: ["INVALID_JSON"]
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("rejects a COMPLETED/HOLD item whose rejectionCodes order does not match the declared evaluations", () => {
+    const evaluations = [rejectedEvaluationEntry("INVALID_JSON"), rejectedEvaluationEntry("INVALID_PROPOSAL")];
+    const forged = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "HOLD",
+        reason: "ATTEMPTS_EXHAUSTED",
+        evaluations,
+        rejectionCodes: ["INVALID_PROPOSAL", "INVALID_JSON"]
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+    expectRejection(() => summarizeFinalizedAgentCycles([forged]));
+  });
+
+  it("accepts a COMPLETED/HOLD item at the maximum allowed evaluations count", () => {
+    const evaluations = [rejectedEvaluationEntry(), rejectedEvaluationEntry(), rejectedEvaluationEntry()];
+    const valid = {
+      itemId: "a",
+      status: "COMPLETED",
+      result: {
+        status: "HOLD",
+        reason: "ATTEMPTS_EXHAUSTED",
+        evaluations,
+        rejectionCodes: evaluations.map((evaluation) => evaluation.code)
+      }
+    } as unknown as FinalizedAgentCycleBatchResult;
+
+    const summary = summarizeFinalizedAgentCycles([valid]);
+
+    assert.equal(summary.holdCount, 1);
+    assert.deepEqual(summary.holdItemIds, ["a"]);
   });
 });
 

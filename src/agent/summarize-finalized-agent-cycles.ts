@@ -28,15 +28,27 @@
  * confirm it carries exactly the closed set of properties that outcome
  * allows, and confirm each required property has the basic shape/value its
  * own closed union demands — `HOLD`'s `reason` equal to the single closed
- * value `ATTEMPTS_EXHAUSTED`, `evaluations`/`rejectionCodes` each an array —
- * never recomputed, and never copied into the summary. This module never
- * recalculates an attempt or a result and never duplicates
- * `finalizeBoundedAgentAttempts`'s own structural revalidation of evaluations
- * or proposals; exactly like `runFinalizedAgentCycles` intentionally leaves
- * each item's `request` unvalidated at its own boundary, this module
- * intentionally leaves `result`'s nested `evaluations`/`rejectionCodes`/proposal
- * content unvalidated at this boundary, because that content is never read,
- * copied or exposed here.
+ * value `ATTEMPTS_EXHAUSTED`; `evaluations` (both outcomes) a dense array,
+ * with no extra property anywhere on it, holding between one and
+ * `MAX_AGENT_RETRY_ATTEMPTS` entries, each entry itself a JSON object with
+ * exactly the closed set of properties its own `status` allows (`REJECTED`:
+ * `status`/`capture`/`code` with `code` one of the closed
+ * `AgentResponseRejectionCode` values; `ACCEPTED`: `status`/`capture`/`proposal`),
+ * with `capture`/`proposal` required only to be JSON objects; `ACCEPTED`'s
+ * `result` the same closed `ACCEPTED`-evaluation shape; `HOLD`'s
+ * `evaluations` entries every one `REJECTED`-shaped, and its `rejectionCodes`
+ * a dense array, with no extra property anywhere on it, matching those
+ * entries' own declared `code`s exactly, in count and order. None of this
+ * recomputes an attempt or a result: a `capture`'s or `proposal`'s own nested
+ * fields are never read, `evaluateAgentResponseCapture` is never called
+ * again, and nothing here confirms a `capture` genuinely produced the
+ * `proposal`/`code` sitting beside it — only that the shapes are internally
+ * consistent and closed. This module never duplicates
+ * `finalizeBoundedAgentAttempts`'s own recomputation-based revalidation;
+ * exactly like `runFinalizedAgentCycles` intentionally leaves each item's
+ * `request` unvalidated at its own boundary, this module intentionally
+ * leaves every `capture`'s and `proposal`'s nested content unvalidated at
+ * this boundary, because that content is never read, copied or exposed here.
  *
  * Every read of the untrusted batch — its `length`, each index, each item's
  * and each nested `result`'s own keys and fields — goes through the same
@@ -58,7 +70,9 @@
  */
 
 import { ContractValidationError, rejectContract } from "../domain/errors.js";
+import { AGENT_RESPONSE_REJECTION_CODES, type AgentResponseRejectionCode } from "./evaluate-agent-response-capture.js";
 import { readProperty, requireBoundedText, requireInputObject } from "./internal/attempt-input-validation.js";
+import { MAX_AGENT_RETRY_ATTEMPTS, MIN_AGENT_RETRY_ATTEMPTS } from "./retry-policy.js";
 import { type FinalizedAgentCycleBatchResults } from "./run-finalized-agent-cycles.js";
 
 export { ContractValidationError } from "../domain/errors.js";
@@ -77,6 +91,10 @@ const HOLD_RESULT_KEYS = ["status", "reason", "evaluations", "rejectionCodes"] a
 
 /** Closed set of reasons a `HOLD` result may declare. Mirrors `finalize-bounded-agent-attempts.ts`'s `AGENT_ATTEMPTS_HOLD_REASONS` without importing it. */
 const HOLD_RESULT_REASON = "ATTEMPTS_EXHAUSTED";
+
+/** Exact own keys one `evaluations` entry may have for each discriminant. Mirrors `finalize-bounded-agent-attempts.ts`'s closed shapes without importing its private constants. */
+const REJECTED_EVALUATION_KEYS = ["status", "capture", "code"] as const;
+const ACCEPTED_EVALUATION_KEYS = ["status", "capture", "proposal"] as const;
 
 /** Immutable, closed, frozen summary of a finalized batch: counts plus ordered `itemId` lists per category. Observability/audit only. */
 export interface FinalizedAgentCyclesSummary {
@@ -173,6 +191,94 @@ function isJsonObject(value: unknown): value is object {
   return typeof value === "object" && value !== null && !safeIsArray(value);
 }
 
+/** Whether `value` is one of the closed {@link AGENT_RESPONSE_REJECTION_CODES} values — never an arbitrary string standing in for one. */
+function isKnownRejectionCode(value: unknown): value is AgentResponseRejectionCode {
+  return typeof value === "string" && (AGENT_RESPONSE_REJECTION_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * Reads `value` as a dense array — exactly `"length"` plus each canonical
+ * index, nothing more, checked the same fail-closed, declared-length-agnostic
+ * way {@link hasExactDenseArrayKeys} already checks the outer batch array —
+ * and returns its entries in order. Every read goes through
+ * {@link readProperty}, so a throwing getter or `Proxy` trap anywhere is
+ * treated exactly like a missing entry rather than escaping unsanitized.
+ */
+function requireDenseArrayEntries(value: unknown, field: string): readonly unknown[] {
+  if (!safeIsArray(value)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "must be an array");
+  }
+  const arrayValue = value as object;
+  const length = readProperty(arrayValue, "length");
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "must be an array");
+  }
+  if (!hasExactDenseArrayKeys(arrayValue, length)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "must be a dense array with no extra properties");
+  }
+  const entries: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    entries.push(readProperty(arrayValue, String(index)));
+  }
+  return entries;
+}
+
+/** {@link requireDenseArrayEntries} for `evaluations`, additionally bounded to `[MIN_AGENT_RETRY_ATTEMPTS, MAX_AGENT_RETRY_ATTEMPTS]`, mirroring `finalize-bounded-agent-attempts.ts`'s own bound without recomputing anything. */
+function requireEvaluationEntries(value: unknown): readonly unknown[] {
+  const entries = requireDenseArrayEntries(value, "evaluations");
+  if (entries.length < MIN_AGENT_RETRY_ATTEMPTS || entries.length > MAX_AGENT_RETRY_ATTEMPTS) {
+    rejectContract(
+      SUMMARIZE_FINALIZED_AGENT_CYCLES,
+      "evaluations",
+      `must hold between ${MIN_AGENT_RETRY_ATTEMPTS} and ${MAX_AGENT_RETRY_ATTEMPTS} entries`
+    );
+  }
+  return entries;
+}
+
+/**
+ * Validates one `evaluations` entry's own closed shape, purely structurally
+ * and without recomputing anything: a JSON object with exactly the closed
+ * set of properties its own declared `status` allows — `REJECTED` with
+ * `code` one of the closed {@link AGENT_RESPONSE_REJECTION_CODES} values,
+ * `ACCEPTED` with `proposal` at least a JSON object — and `capture` at least
+ * a JSON object in both cases. Never reads a nested field of `capture` or
+ * `proposal`, and never calls `evaluateAgentResponseCapture`: this confirms
+ * the entry is internally shape-consistent, not that it was genuinely
+ * produced by evaluating a real capture.
+ */
+function requireEvaluationEntryShape(value: unknown, field: string): "ACCEPTED" | "REJECTED" {
+  if (!isJsonObject(value)) {
+    rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "each entry must be a JSON object");
+  }
+  const status = readProperty(value, "status");
+  if (status === "REJECTED") {
+    if (!hasExactOwnKeys(value, REJECTED_EVALUATION_KEYS)) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "must have exactly the expected REJECTED evaluation properties");
+    }
+    if (!isJsonObject(readProperty(value, "capture"))) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "capture must be a JSON object");
+    }
+    if (!isKnownRejectionCode(readProperty(value, "code"))) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "code must be a closed rejection code");
+    }
+    return "REJECTED";
+  }
+  if (status === "ACCEPTED") {
+    if (!hasExactOwnKeys(value, ACCEPTED_EVALUATION_KEYS)) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "must have exactly the expected ACCEPTED evaluation properties");
+    }
+    if (!isJsonObject(readProperty(value, "capture"))) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "capture must be a JSON object");
+    }
+    if (!isJsonObject(readProperty(value, "proposal"))) {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "proposal must be a JSON object");
+    }
+    return "ACCEPTED";
+  }
+  rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, field, "status must be ACCEPTED or REJECTED");
+}
+
 type FinalizedAgentCycleCategory = "ACCEPTED" | "HOLD" | "FAILED";
 
 interface ValidatedSummaryItem {
@@ -186,18 +292,22 @@ interface ValidatedSummaryItem {
  * module never recalculates an attempt or a result, so `result` is read only
  * far enough to discriminate `ACCEPTED` from `HOLD`, to confirm it carries
  * exactly the closed set of properties that discriminant allows, and to
- * confirm each of those required properties has the basic shape/value its
- * own closed union demands — never its nested `evaluations`,
- * `rejectionCodes` or proposal *content*, and never copied into the summary.
+ * confirm each required property has the closed shape/value its own union
+ * demands — never a `capture`'s or `proposal`'s nested *content*, and never
+ * copied into the summary.
  *
- * A closed union member is not "revalidated" by checking only its key set:
- * `evaluations`/`rejectionCodes` must at least be arrays (not `null` or some
- * other type standing in for one), `result` must at least be a JSON object,
- * and `HOLD`'s `reason` must be the single closed value
- * `ATTEMPTS_EXHAUSTED` — never arbitrary free text. Checking this remains
- * strictly shallower than `finalize-bounded-agent-attempts.ts`'s own
- * recomputation: it never inspects what is inside `evaluations`,
- * `rejectionCodes` or `result`.
+ * A closed union member is not "revalidated" by checking only its top-level
+ * key set: `HOLD`'s `reason` must be the single closed value
+ * `ATTEMPTS_EXHAUSTED` — never arbitrary free text; `evaluations` (both
+ * outcomes) must be a dense array of one to `MAX_AGENT_RETRY_ATTEMPTS`
+ * entries, each itself closed-shaped and, for `HOLD`, `REJECTED`-shaped with
+ * a closed rejection code; `ACCEPTED`'s `result` must carry the same closed
+ * `ACCEPTED`-evaluation shape; `HOLD`'s `rejectionCodes` must be a dense
+ * array matching the declared evaluations' own codes exactly, in count and
+ * order. Checking this remains strictly shallower than
+ * `finalize-bounded-agent-attempts.ts`'s own recomputation: it never reads
+ * what is inside any `capture` or `proposal`, and never calls
+ * `evaluateAgentResponseCapture`.
  */
 function classifyCompletedResult(value: unknown): "ACCEPTED" | "HOLD" {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -208,11 +318,11 @@ function classifyCompletedResult(value: unknown): "ACCEPTED" | "HOLD" {
     if (!hasExactOwnKeys(value, ACCEPTED_RESULT_KEYS)) {
       rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "must have exactly the expected ACCEPTED properties");
     }
-    if (!safeIsArray(readProperty(value, "evaluations"))) {
-      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "evaluations must be an array");
-    }
-    if (!isJsonObject(readProperty(value, "result"))) {
-      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "result must be a JSON object");
+    const evaluationEntries = requireEvaluationEntries(readProperty(value, "evaluations"));
+    evaluationEntries.forEach((entry) => requireEvaluationEntryShape(entry, "evaluations"));
+    const acceptedResult = readProperty(value, "result");
+    if (requireEvaluationEntryShape(acceptedResult, "result") !== "ACCEPTED") {
+      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "result must be an ACCEPTED evaluation");
     }
     return "ACCEPTED";
   }
@@ -223,11 +333,24 @@ function classifyCompletedResult(value: unknown): "ACCEPTED" | "HOLD" {
     if (readProperty(value, "reason") !== HOLD_RESULT_REASON) {
       rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "reason must be ATTEMPTS_EXHAUSTED");
     }
-    if (!safeIsArray(readProperty(value, "evaluations"))) {
-      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "evaluations must be an array");
+    const evaluationEntries = requireEvaluationEntries(readProperty(value, "evaluations"));
+    const declaredCodes: string[] = [];
+    for (const entry of evaluationEntries) {
+      if (requireEvaluationEntryShape(entry, "evaluations") !== "REJECTED") {
+        rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "evaluations", "must be entirely REJECTED for HOLD");
+      }
+      declaredCodes.push(readProperty(entry as object, "code") as string);
     }
-    if (!safeIsArray(readProperty(value, "rejectionCodes"))) {
-      rejectContract(SUMMARIZE_FINALIZED_AGENT_CYCLES, "result", "rejectionCodes must be an array");
+    const rejectionCodeEntries = requireDenseArrayEntries(readProperty(value, "rejectionCodes"), "rejectionCodes");
+    const codesMatch =
+      rejectionCodeEntries.length === declaredCodes.length &&
+      rejectionCodeEntries.every((code, index) => code === declaredCodes[index]);
+    if (!codesMatch) {
+      rejectContract(
+        SUMMARIZE_FINALIZED_AGENT_CYCLES,
+        "rejectionCodes",
+        "must match the declared evaluations' rejection codes, in order"
+      );
     }
     return "HOLD";
   }

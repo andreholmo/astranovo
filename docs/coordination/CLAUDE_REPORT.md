@@ -5899,3 +5899,124 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-034 — correção solicitada na revisão (ciclo 2/3) do PR #65
+
+- **Status reportado:** correção executada, aguardando nova revisão do ChatGPT/GPT-5.6 Sol e de
+  André (não aprovada por mim)
+- **Data:** 2026-09-21
+
+### Resumo
+
+André (`andreholmo`) solicitou, no ciclo 2/3 da revisão do PR #65 (após os três casos do ciclo 1/3
+já corrigidos), nova correção porque `classifyCompletedResult`
+(`src/agent/summarize-finalized-agent-cycles.ts`) ainda aceitava resultados que
+`finalizeBoundedAgentAttempts` jamais poderia ter produzido. O próprio fixture sintético
+`completedAccepted` do arquivo de testes — `{ status: "ACCEPTED", evaluations: [], result: {} }`
+— era aceito e contado; da mesma forma, um `HOLD` com `evaluations`/`rejectionCodes` vazios,
+esparsos ou com propriedades extras também passava, embora `finalizeBoundedAgentAttempts` sempre
+produza entre 1 e 3 avaliações, cada uma com uma união interna fechada.
+
+A correção acrescenta, ainda sem recomputar tentativas nem chamar `evaluateAgentResponseCapture`,
+validação estrutural mais profunda em `classifyCompletedResult`:
+
+- `evaluations` (em ambos os desfechos) deve ser um array denso — sem buraco nem propriedade
+  extra enumerável, não enumerável ou `Symbol` — com entre 1 e `MAX_AGENT_RETRY_ATTEMPTS` (3)
+  entradas, reaproveitando `MIN_AGENT_RETRY_ATTEMPTS`/`MAX_AGENT_RETRY_ATTEMPTS` de
+  `retry-policy.ts`;
+- cada entrada de `evaluations` deve ser um objeto JSON com exatamente o conjunto fechado de
+  chaves do seu próprio `status` — `REJECTED`: `status`/`capture`/`code`, `ACCEPTED`:
+  `status`/`capture`/`proposal` — com `capture` (e, quando `ACCEPTED`, `proposal`) pelo menos um
+  objeto JSON, e `code` (quando `REJECTED`) um dos valores fechados de `AgentResponseRejectionCode`
+  (reaproveitado de `evaluate-agent-response-capture.ts`, sem duplicar o array);
+- `ACCEPTED.result` deve ter a mesma forma fechada de uma avaliação `ACCEPTED`
+  (`status`/`capture`/`proposal`, com `status` exatamente `"ACCEPTED"`);
+- toda entrada de `HOLD.evaluations` deve ser `REJECTED`-shaped — nenhuma entrada
+  `ACCEPTED`-shaped é aceita dentro de um `HOLD`;
+- `HOLD.rejectionCodes` deve ser um array denso — mesma checagem de "sem propriedade extra" — cujo
+  comprimento e ordem coincidem exatamente com os `code`s próprios já declarados em cada entrada de
+  `evaluations` (comparação estrutural entre os dois campos já lidos, nunca recomputada a partir de
+  uma `capture`).
+
+Isso fecha o bypass relatado sem duplicar a recomputação de `finalizeBoundedAgentAttempts`:
+`capture` e `proposal` continuam sendo lidos apenas como "objeto JSON", nunca inspecionados campo a
+campo, e `evaluateAgentResponseCapture` nunca é chamado por este módulo.
+
+Como os fixtures sintéticos `completedAccepted`/`completedHold` do arquivo de testes usavam
+exatamente a estrutura vazia agora rejeitada, ambos foram reescritos para uma estrutura
+genuinamente possível (uma entrada de `evaluations` fechada por discriminante, com `capture`/
+`proposal` sintéticos e `rejectionCodes` coerentes), conforme pedido explicitamente na revisão.
+
+### Arquivos alterados
+
+- `src/agent/summarize-finalized-agent-cycles.ts` (`classifyCompletedResult` reescrito para
+  validar estruturalmente `evaluations`/`result`/`rejectionCodes`; novas funções
+  `requireDenseArrayEntries`, `requireEvaluationEntries`, `requireEvaluationEntryShape`,
+  `isKnownRejectionCode`; novas constantes `REJECTED_EVALUATION_KEYS`/`ACCEPTED_EVALUATION_KEYS`;
+  reaproveita `MIN_AGENT_RETRY_ATTEMPTS`/`MAX_AGENT_RETRY_ATTEMPTS` de `retry-policy.ts` e
+  `AGENT_RESPONSE_REJECTION_CODES` de `evaluate-agent-response-capture.ts`; comentário de módulo
+  atualizado)
+- `tests/summarize-finalized-agent-cycles.test.ts` (fixtures `completedAccepted`/`completedHold`
+  reescritas para uma estrutura genuinamente possível; 14 novos testes de regressão estruturais;
+  um teste existente ajustado para continuar exercitando seu cenário original com `evaluations`
+  válido)
+- `docs/coordination/CLAUDE_REPORT.md` (este registro)
+
+### Testes de regressão adicionados
+
+- rejeita `ACCEPTED` com `evaluations` vazio (o bypass relatado pelo fixture `completedAccepted`);
+- rejeita `HOLD` com `evaluations`/`rejectionCodes` vazios (o bypass relatado);
+- rejeita `evaluations` com mais de 3 entradas;
+- rejeita `evaluations` esparso;
+- rejeita `evaluations` com propriedade extra não enumerável;
+- rejeita `rejectionCodes` com propriedade extra `Symbol`;
+- rejeita entrada de `evaluations` com propriedade extra;
+- rejeita entrada `REJECTED` com `code` fora do conjunto fechado;
+- rejeita `HOLD.evaluations` contendo uma entrada `ACCEPTED`-shaped;
+- rejeita `ACCEPTED.result` com a forma `REJECTED` em vez de `ACCEPTED`;
+- rejeita `ACCEPTED.result` sem `proposal`;
+- rejeita `rejectionCodes` cujo comprimento não bate com `evaluations`;
+- rejeita `rejectionCodes` cuja ordem não bate com os `code`s declarados;
+- aceita `HOLD` no limite máximo de 3 avaliações (caso positivo, garante que o limite superior não
+  rejeita incorretamente).
+
+### Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **980 testes, 980 passaram, 0 falharam** (966 anteriores + 14 novos), ambiente local Node.js |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+### Limitações conhecidas
+
+A validação continua estritamente mais rasa que a recomputação de `finalizeBoundedAgentAttempts`:
+`capture` e `proposal` nunca têm seus campos internos lidos ou comparados, e nada aqui confirma que
+uma `capture` genuinamente produziu o `proposal`/`code` ao lado dela — apenas que a forma é
+interna e mutuamente consistente e fechada. Isso é intencional: este módulo nunca recalcula uma
+tentativa ou um resultado. Nenhuma propriedade adicional, ranking, Risk Manager, `PaperBroker`,
+rede, credencial ou rota financeira real foi introduzida.
+
+Este sandbox de execução não teve acesso de rede para `git fetch origin main` (o comando exigiu
+aprovação indisponível neste ambiente não interativo); a branch de trabalho
+(`claude/issue-64-20260921-1441`) já estava com a árvore de trabalho limpa no checkout inicial,
+sem alterações remotas pendentes a incorporar.
+
+### Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+### Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+### Commit
+
+- **Mensagem:** `fix: valida estruturalmente evaluations, result e rejectionCodes no resumo de ciclos finalizados`
+- **Hash:** (ver commit seguinte, que registra o hash)
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
