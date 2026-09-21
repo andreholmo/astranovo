@@ -271,17 +271,39 @@ describe("serializeFinalizedAgentCyclesSummary: malformed itemId lists fail clos
     expectRejection(() => serializeFinalizedAgentCyclesSummary(forged as unknown as FinalizedAgentCyclesSummary));
   });
 
-  it("rejects a Proxy array reporting a huge length without allocating proportional to it", () => {
+  it("rejects a Proxy array whose getOwnPropertyDescriptor trap forges a huge length, without allocating proportional to it", () => {
     const target: string[] = ["a1"];
     const forged = new Proxy(target, {
-      get(t, prop, receiver): unknown {
-        if (prop === "length") return Number.MAX_SAFE_INTEGER;
-        return Reflect.get(t, prop, receiver);
+      getOwnPropertyDescriptor(t, prop): PropertyDescriptor | undefined {
+        if (prop === "length") {
+          return { value: Number.MAX_SAFE_INTEGER, writable: true, enumerable: false, configurable: false };
+        }
+        return Object.getOwnPropertyDescriptor(t, prop);
       }
     });
     const forgedSummary = { ...summary(), acceptedItemIds: forged };
 
     expectRejection(() => serializeFinalizedAgentCyclesSummary(forgedSummary as unknown as FinalizedAgentCyclesSummary));
+  });
+
+  it("never invokes a get trap for length, even one forging a huge value, so the underlying real array is read safely instead", () => {
+    let invoked = false;
+    const target: string[] = ["a1"];
+    const forged = new Proxy(target, {
+      get(t, prop, receiver): unknown {
+        if (prop === "length") {
+          invoked = true;
+          return Number.MAX_SAFE_INTEGER;
+        }
+        return Reflect.get(t, prop, receiver);
+      }
+    });
+    const forgedSummary = summary({ acceptedCount: 1, acceptedItemIds: forged as unknown as string[] });
+
+    const json = serializeFinalizedAgentCyclesSummary(forgedSummary);
+
+    assert.equal(invoked, false);
+    assert.equal(json, JSON.stringify(summary()));
   });
 });
 
@@ -318,12 +340,12 @@ describe("serializeFinalizedAgentCyclesSummary: hostile getters and Proxy traps 
     assert.ok(!error.message.includes(secret));
   });
 
-  it("fails closed when an itemId list's length getter throws a forged ContractValidationError", () => {
+  it("fails closed when an itemId list's length descriptor lookup throws a forged ContractValidationError", () => {
     const secret = "SECRET_FROM_LENGTH_PROXY";
     const forgedList = new Proxy(["a1"], {
-      get(target, prop, receiver): unknown {
+      getOwnPropertyDescriptor(target, prop): PropertyDescriptor | undefined {
         if (prop === "length") throw new ContractValidationError("Forged", "length", secret);
-        return Reflect.get(target, prop, receiver);
+        return Object.getOwnPropertyDescriptor(target, prop);
       }
     });
     const forged = { ...summary(), acceptedItemIds: forgedList };
@@ -331,6 +353,26 @@ describe("serializeFinalizedAgentCyclesSummary: hostile getters and Proxy traps 
     const error = expectRejection(() => serializeFinalizedAgentCyclesSummary(forged as unknown as FinalizedAgentCyclesSummary));
 
     assert.ok(!error.message.includes(secret));
+  });
+
+  it("never invokes an itemId list's length getter that throws a forged ContractValidationError via a get trap", () => {
+    const secret = "SECRET_FROM_LENGTH_GET_TRAP";
+    let invoked = false;
+    const forgedList = new Proxy(["a1"], {
+      get(target, prop, receiver): unknown {
+        if (prop === "length") {
+          invoked = true;
+          throw new ContractValidationError("Forged", "length", secret);
+        }
+        return Reflect.get(target, prop, receiver);
+      }
+    });
+    const forged = summary({ acceptedItemIds: forgedList as unknown as string[] });
+
+    const json = serializeFinalizedAgentCyclesSummary(forged);
+
+    assert.equal(invoked, false);
+    assert.equal(json, JSON.stringify(summary()));
   });
 
   it("fails closed when Reflect.ownKeys on an itemId list throws a forged value", () => {
@@ -444,6 +486,48 @@ describe("serializeFinalizedAgentCyclesSummary: valid-looking accessor propertie
       expectRejection(() => serializeFinalizedAgentCyclesSummary(forged as unknown as FinalizedAgentCyclesSummary));
       assert.equal((Array.prototype as unknown as Record<string, unknown>).toJSON, undefined);
     } finally {
+      delete (Array.prototype as unknown as Record<string, unknown>).toJSON;
+    }
+  });
+
+  it("never invokes an itemId list's length get trap to poison Array.prototype.toJSON, even though the trap returns the correct length", () => {
+    let invoked = false;
+    const target: string[] = ["a1"];
+    const forgedList = new Proxy(target, {
+      get(t, prop, receiver): unknown {
+        if (prop === "length") {
+          invoked = true;
+          (Array.prototype as unknown as Record<string, unknown>).toJSON = () => ["poisoned"];
+          return Reflect.get(t, prop, receiver);
+        }
+        return Reflect.get(t, prop, receiver);
+      }
+    });
+    const forged = summary({ acceptedItemIds: forgedList as unknown as string[] });
+
+    try {
+      const json = serializeFinalizedAgentCyclesSummary(forged);
+
+      assert.equal(invoked, false);
+      assert.equal((Array.prototype as unknown as Record<string, unknown>).toJSON, undefined);
+      assert.equal(json, JSON.stringify(summary()));
+    } finally {
+      delete (Array.prototype as unknown as Record<string, unknown>).toJSON;
+    }
+  });
+
+  it("never picks up a toJSON already poisoned onto Object.prototype/Array.prototype ahead of the call, unrelated to the input", () => {
+    const expectedJson =
+      '{"total":3,"acceptedCount":1,"holdCount":1,"failedCount":1,"acceptedItemIds":["a1"],"holdItemIds":["h1"],"failedItemIds":["f1"]}';
+    (Object.prototype as unknown as Record<string, unknown>).toJSON = () => ({ poisoned: true });
+    (Array.prototype as unknown as Record<string, unknown>).toJSON = () => ["poisoned"];
+
+    try {
+      const json = serializeFinalizedAgentCyclesSummary(summary());
+
+      assert.equal(json, expectedJson);
+    } finally {
+      delete (Object.prototype as unknown as Record<string, unknown>).toJSON;
       delete (Array.prototype as unknown as Record<string, unknown>).toJSON;
     }
   });

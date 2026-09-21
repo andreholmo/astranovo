@@ -6486,3 +6486,111 @@ Nenhum bloqueio.
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
+
+## TASK-036 — correção 2/3: eliminar o trap `get` na leitura de `length` (revisão de PR #69)
+
+- **ID da tarefa:** TASK-036 (correção solicitada em revisão de PR, não uma nova tarefa em `TASK.md`)
+- **Status reportado:** executada, aguardando revisão do ChatGPT/GPT-5.6 Sol (não aprovada por mim)
+- **Data:** 2026-09-21
+- **Origem:** revisão `CHANGES_REQUESTED` de @andreholmo no PR #69 — bloqueador de segurança 2/3
+
+## Resumo da correção
+
+A correção 1/3 migrou a leitura dos sete campos do resumo e de cada índice das listas de `itemId`
+para `readDataProperty` (via `Object.getOwnPropertyDescriptor`), mas deixou deliberadamente a
+leitura de `length` de cada lista em `readProperty` (acesso por colchete `source[key]`), com a
+justificativa de que `length` é uma data property não configurável num `Array` real e por isso
+nunca poderia virar accessor. A revisão apontou o furo dessa justificativa: mesmo sendo uma
+propriedade que nunca vira accessor, o acesso por colchete a um `Proxy` ainda invoca a trap `get`
+do `Proxy`, e essa trap pode executar qualquer efeito colateral — por exemplo envenenar
+`Object.prototype.toJSON`/`Array.prototype.toJSON` — enquanto devolve o valor real e correto de
+`length`, deixando toda a validação passar e o `JSON.stringify` final rodar sobre um protótipo já
+comprometido.
+
+A correção troca essa leitura para `readDataProperty`, igual a todo o resto: `length` agora é lido
+via `Object.getOwnPropertyDescriptor`, nunca por acesso de colchete, então a trap `get` de um
+`Proxy` nunca é invocada para `length`, correta ou incorretamente forjada. Como `length` é
+*writable* (mesmo não configurável), as invariantes de `Proxy` não fixam seu valor para uma trap
+`getOwnPropertyDescriptor`, então um `Proxy` ainda pode forjar um `length` gigante por essa via sem
+lançar — mas isso continua barrado sem alocação proporcional: `hasExactDenseArrayKeys` já rejeita
+comparando a contagem real de `Reflect.ownKeys` contra `length + 1`, sem nunca iterar até o valor
+forjado.
+
+Também foi adicionada uma segunda camada de defesa, sugerida na revisão: a saída canônica
+(`envelope` e cada lista de `itemId`) agora é construída com protótipo `null`
+(`Object.create(null)` para o objeto; `Object.setPrototypeOf(array, null)` para cada lista, via
+nova função `toBarePrototypeArray`). Isso significa que mesmo um `toJSON` já envenenado em
+`Object.prototype`/`Array.prototype` por código totalmente alheio a este módulo — antes ou durante
+a chamada, por qualquer via — nunca é encontrado por `JSON.stringify`, porque a busca por `toJSON`
+percorre a cadeia de protótipos e a saída deste módulo não tem uma cadeia de protótipos com
+`toJSON` para encontrar. `Array.isArray` e o acesso indexado/`length` continuam funcionando
+normalmente, pois dependem dos slots internos exóticos do array, não do protótipo.
+
+Nenhum contrato público mudou: `serializeFinalizedAgentCyclesSummary` continua com a mesma
+assinatura, a mesma saída canônica para entradas válidas e as mesmas mensagens de erro públicas.
+
+## Arquivos alterados
+
+| Arquivo | Ação |
+|---|---|
+| `src/agent/serialize-finalized-agent-cycles-summary.ts` | alterado (`length` migrado de `readProperty` para `readDataProperty`; import de `readProperty` removido; nova `toBarePrototypeArray`; envelope e listas de saída construídos com protótipo `null`; comentários atualizados) |
+| `tests/serialize-finalized-agent-cycles-summary.test.ts` | alterado (regressão pré-existente de `length` forjado via trap `get` migrada para trap `getOwnPropertyDescriptor`; regressão pré-existente de `length` lançando via trap `get` migrada para trap `getOwnPropertyDescriptor`; 5 novos testes) |
+| `docs/coordination/CLAUDE_REPORT.md` | atualizado (este registro) |
+
+## Testes adicionados ou ajustados
+
+- `rejects a Proxy array whose getOwnPropertyDescriptor trap forges a huge length, without
+  allocating proportional to it` — substitui o teste pré-existente que forjava `length` via trap
+  `get` (agora inofensivo, pois `get` nunca é chamado); a mesma proteção contra alocação
+  desproporcional é reprovada com a trap real usada hoje (`getOwnPropertyDescriptor`);
+- `never invokes a get trap for length, even one forging a huge value, so the underlying real
+  array is read safely instead` — prova que uma trap `get` que forja um `length` gigante nunca é
+  chamada e que a lista real (`["a1"]`) é lida corretamente por baixo dela;
+- `fails closed when an itemId list's length descriptor lookup throws a forged
+  ContractValidationError` — substitui o teste pré-existente equivalente que lançava via trap `get`
+  (não mais invocada) pela trap `getOwnPropertyDescriptor`, mantendo a cobertura de sanitização de
+  erro/segredo no caminho de leitura real;
+- `never invokes an itemId list's length getter that throws a forged ContractValidationError via a
+  get trap` — prova que uma trap `get` que lançaria um erro forjado com segredo nunca é chamada;
+- `never invokes an itemId list's length get trap to poison Array.prototype.toJSON, even though
+  the trap returns the correct length` — o teste explicitamente pedido na revisão: uma trap `get`
+  para `length` que devolve o valor correto mas tenta envenenar `Array.prototype.toJSON` como
+  efeito colateral nunca é chamada, e a saída é a mesma do resumo válido, sem contaminação;
+- `never picks up a toJSON already poisoned onto Object.prototype/Array.prototype ahead of the
+  call, unrelated to the input` — prova a defesa de protótipo `null`: com `Object.prototype.toJSON`
+  e `Array.prototype.toJSON` já envenenados antes da chamada (por código alheio ao módulo), a saída
+  permanece o JSON canônico esperado, byte a byte.
+
+Toda a suíte de testes anterior continua passando, com duas exceções que foram atualizadas por
+descreverem exatamente o comportamento que esta correção muda intencionalmente (ver acima), e não
+por regressão: o teste que forjava `length` via trap `get` (agora inofensivo por não ser mais
+chamado) e o teste que lançava via trap `get` no `length` (idem).
+
+## Comandos executados e resultados
+
+| Comando | Resultado |
+|---|---|
+| `npm ci` | 3 pacotes, 0 vulnerabilidades |
+| `npm run typecheck` (`tsc --noEmit`, estrito) | sem erros |
+| `npm test` (`tsc` + `node --test`) | **1057 testes, 1057 passaram, 0 falharam** (1053 anteriores, 2 ajustados, 5 novos) |
+
+CI (`.github/workflows/ci.yml`) executa `npm ci`, `npm run typecheck` e `npm test` na matriz
+Node.js 20/22; verificação final cabe à execução do workflow no PR.
+
+## Limitações conhecidas
+
+Mesma limitação de rede já registrada nas entregas anteriores: `git fetch origin` exigiu aprovação
+indisponível neste ambiente não interativo. `git status`/`git log`/`git branch -vv` locais
+confirmaram que a branch `claude/issue-68-20260921-1638` já estava sincronizada com o commit mais
+recente conhecido antes desta correção, sem alterações remotas pendentes a incorporar.
+
+## Decisões pendentes para André / revisor
+
+Nenhuma nova.
+
+## Bloqueios ou ambiguidades materiais
+
+Nenhum bloqueio.
+
+Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
+revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.

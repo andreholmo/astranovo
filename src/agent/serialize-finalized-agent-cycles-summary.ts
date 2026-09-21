@@ -46,14 +46,17 @@
  * The canonical output is built from freshly extracted primitives — never
  * from the input object or its nested arrays directly — so a hostile
  * `toJSON` anywhere on `value` (own or inherited) is never invoked: this
- * module never calls `JSON.stringify` on anything the caller supplied,
- * only on a plain object/array literal assembled from already-validated
- * strings, numbers and array-of-strings. The output key order is always
- * `total`, `acceptedCount`, `holdCount`, `failedCount`, `acceptedItemIds`,
- * `holdItemIds`, `failedItemIds`, and each `itemId` list keeps its own
- * original order; `JSON.stringify` with no indentation produces a compact
- * string with no extra whitespace. Field-for-field identical inputs always
- * produce byte-identical output.
+ * module never calls `JSON.stringify` on anything the caller supplied, only
+ * on a `null`-prototype object/array assembled from already-validated
+ * strings, numbers and array-of-strings (see {@link toBarePrototypeArray}).
+ * The `null` prototype means even a `toJSON` poisoned onto
+ * `Object.prototype`/`Array.prototype` by code entirely unrelated to `value`
+ * — before or during this call — can never be picked up either. The output
+ * key order is always `total`, `acceptedCount`, `holdCount`, `failedCount`,
+ * `acceptedItemIds`, `holdItemIds`, `failedItemIds`, and each `itemId` list
+ * keeps its own original order; `JSON.stringify` with no indentation
+ * produces a compact string with no extra whitespace. Field-for-field
+ * identical inputs always produce byte-identical output.
  *
  * This module never mutates or freezes `value`, never calls any function
  * `value` exposes, has no aggregation, ranking, scoring, voting, consensus,
@@ -64,7 +67,7 @@
  */
 
 import { ContractValidationError, rejectContract } from "../domain/errors.js";
-import { readProperty, requireBoundedText } from "./internal/attempt-input-validation.js";
+import { requireBoundedText } from "./internal/attempt-input-validation.js";
 import { type FinalizedAgentCyclesSummary } from "./summarize-finalized-agent-cycles.js";
 
 export { ContractValidationError } from "../domain/errors.js";
@@ -197,24 +200,29 @@ function requireSafeNonNegativeInteger(value: unknown, field: string): number {
  * Reads `value` as a dense array of bounded, non-blank `itemId` strings, the
  * same declared-length-agnostic, `Proxy`/getter-safe way
  * {@link hasExactDenseArrayKeys} already checks cardinality before any
- * per-index read happens. `length` is read through {@link readProperty} (a
- * bracket-style read), same as before: on a genuine `Array`, `length` is a
- * non-configurable data property that can never become an accessor, so
- * nothing is gained by reading it through {@link readDataProperty} — and
- * doing so would let a `Proxy`'s `get` trap forging a huge `length` slip past
- * undetected, since only a `getOwnPropertyDescriptor` trap (not a `get`
- * trap) can intercept a descriptor-based read. Every entry, in contrast,
- * goes through {@link readDataProperty} and {@link requireBoundedText}, so an
- * accessor property, a throwing getter or a `Proxy` trap on any index is
- * treated exactly like a missing entry — never invoked, never escaping
- * unsanitized.
+ * per-index read happens. `length` is now read through
+ * {@link readDataProperty}, exactly like every field and every entry: a
+ * bracket-style read would invoke a `Proxy`'s `get` trap for `"length"`, and
+ * a `get` trap can run arbitrary side effects (e.g. poisoning
+ * `Array.prototype.toJSON`) even while returning a correct-looking value, so
+ * it must never be called at all. On a genuine `Array`, `length` is a
+ * non-configurable *but writable* data property; a writable property's value
+ * is not pinned by the `Proxy` invariants, so a `getOwnPropertyDescriptor`
+ * trap can still forge an arbitrary `length` without throwing. That forged
+ * value is still safe here: {@link hasExactDenseArrayKeys} rejects it purely
+ * by comparing {@link safeOwnKeys}'s real key count against `length + 1`,
+ * without ever looping or allocating proportional to the forged number.
+ * Every entry, in turn, goes through {@link readDataProperty} and
+ * {@link requireBoundedText}, so an accessor property, a throwing getter or a
+ * `Proxy` trap on any index is treated exactly like a missing entry — never
+ * invoked, never escaping unsanitized.
  */
 function requireItemIdList(value: unknown, field: string): readonly string[] {
   if (!safeIsArray(value)) {
     rejectContract(SERIALIZE_FINALIZED_AGENT_CYCLES_SUMMARY, field, "must be an array");
   }
   const arrayValue = value as object;
-  const length = readProperty(arrayValue, "length");
+  const length = readDataProperty(arrayValue, "length");
   if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
     rejectContract(SERIALIZE_FINALIZED_AGENT_CYCLES_SUMMARY, field, "must be an array");
   }
@@ -317,6 +325,23 @@ function validateSummary(value: unknown): ValidatedSummaryFields {
 }
 
 /**
+ * Returns a fresh copy of `entries` with its prototype set to `null`.
+ * `JSON.stringify` looks up `toJSON` by walking the prototype chain of every
+ * object/array it serializes, so a plain array — which inherits from
+ * `Array.prototype` — would pick up a `toJSON` poisoned there by code
+ * entirely unrelated to this module, running *after* this module's own
+ * `Proxy`/getter-safe reads already completed. A `null`-prototype array has
+ * no `toJSON` to find; `Array.isArray` and indexed/`length` access are
+ * unaffected, since those depend on the array's internal exotic slots, not
+ * its prototype.
+ */
+function toBarePrototypeArray(entries: readonly string[]): readonly string[] {
+  const bare = [...entries];
+  Object.setPrototypeOf(bare, null);
+  return bare;
+}
+
+/**
  * Serializes a `FinalizedAgentCyclesSummary` into a canonical, compact JSON
  * string: fixed key order (`total`, `acceptedCount`, `holdCount`,
  * `failedCount`, `acceptedItemIds`, `holdItemIds`, `failedItemIds`), no
@@ -329,24 +354,26 @@ function validateSummary(value: unknown): ValidatedSummaryFields {
  *    fail-closed, including cross-checking each count against its list's
  *    length, `total` against the three counts, and `itemId` uniqueness
  *    across all three lists;
- * 2. builds a fresh plain object from the already-validated primitives, in
- *    the fixed key order, and serializes it with `JSON.stringify` — never
- *    `value` itself or any of its nested arrays, so a hostile `toJSON`
- *    anywhere on `value` is never invoked.
+ * 2. builds a fresh, `null`-prototype envelope and `null`-prototype
+ *    `itemId` lists from the already-validated primitives, in the fixed key
+ *    order, and serializes them with `JSON.stringify` — never `value` itself
+ *    or any of its nested arrays. This means a hostile `toJSON` anywhere on
+ *    `value` is never invoked, *and* an unrelated, ambient `toJSON` poisoned
+ *    onto `Object.prototype`/`Array.prototype` by something else entirely
+ *    can never be picked up by this module's own output either.
  *
  * Never mutates or freezes `value`, and never calls any function `value`
  * exposes.
  */
 export function serializeFinalizedAgentCyclesSummary(value: FinalizedAgentCyclesSummary): string {
   const fields = validateSummary(value);
-  const canonical = {
-    total: fields.total,
-    acceptedCount: fields.acceptedCount,
-    holdCount: fields.holdCount,
-    failedCount: fields.failedCount,
-    acceptedItemIds: fields.acceptedItemIds,
-    holdItemIds: fields.holdItemIds,
-    failedItemIds: fields.failedItemIds
-  };
+  const canonical: Record<string, unknown> = Object.create(null);
+  canonical.total = fields.total;
+  canonical.acceptedCount = fields.acceptedCount;
+  canonical.holdCount = fields.holdCount;
+  canonical.failedCount = fields.failedCount;
+  canonical.acceptedItemIds = toBarePrototypeArray(fields.acceptedItemIds);
+  canonical.holdItemIds = toBarePrototypeArray(fields.holdItemIds);
+  canonical.failedItemIds = toBarePrototypeArray(fields.failedItemIds);
   return JSON.stringify(canonical);
 }
