@@ -6143,7 +6143,7 @@ Nenhum bloqueio.
 ### Commit
 
 - **Mensagem:** `fix: fecha invariantes estruturais restantes do braço ACCEPTED no resumo de ciclos finalizados`
-- **Hash:** informado a André na resposta após o push.
+- **Hash:** `3d93e3816022116af30d9a28955f322c3aa2d741`
 
 Não aprovo nem mesclo o próprio trabalho. A aprovação e o merge cabem a André/ChatGPT após
 revisão do diff e da CI. O status desta tarefa em `TASK.md` não foi alterado por mim.
